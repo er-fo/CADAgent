@@ -1,0 +1,807 @@
+/* CADAgent AI CAD - Sleek UI Design with Dark Mode */
+/* CSS Variables for Light/Dark Theme */
+
+:root {
+    /* Light Mode Variables */
+    --bg-primary: #ffffff;
+    --bg-surface: #f8f9fa;
+    --bg-gradient-core: linear-gradient(180deg, #ffffff 0%, #f8f9fa 100%);
+    --bg-gradient-cyan-blue: linear-gradient(135deg, #0BA5EC 0%, #0069CB 100%);
+    --bg-gradient-purple-violet: linear-gradient(135deg, #8B5CF6 0%, #4B32B7 100%);
+    --bg-gradient-pink-fuchsia: linear-gradient(135deg, #F472B6 0%, #C026D3 100%);
+    --bg-backdrop-blur: rgba(248, 249, 250, 0.8);
+    
+    --text-primary: #1a1a1a;
+    --text-secondary: #666666;
+    --text-ghost: rgba(26, 26, 26, 0.6);
+    --text-on-accent: #ffffff;
+    
+    --accent-primary: #0BA5EC;
+    --accent-focus: #8B5CF6;
+    --accent-success: #059669;
+    --accent-error: #dc2626;
+    
+    --border-panel: #e5e5e5;
+    --border-subtle: rgba(0, 0, 0, 0.1);
+    
+    --font-primary: 'Geist', 'Inter', 'SF Pro Display', -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+    --font-mono: 'Berkeley Mono', 'JetBrains Mono', 'Fira Code', 'SF Mono', 'Cascadia Code', monospace;
+}
+
+[data-theme="dark"] {
+    /* Dark Mode Variables */
+    --bg-primary: #1E1E1E;
+    --bg-surface: #252526;
+    --bg-gradient-core: linear-gradient(180deg, #1E1E1E 0%, #232538 100%);
+    --bg-gradient-cyan-blue: linear-gradient(135deg, #0BA5EC 0%, #0069CB 100%);
+    --bg-gradient-purple-violet: linear-gradient(135deg, #8B5CF6 0%, #4B32B7 100%);
+    --bg-gradient-pink-fuchsia: linear-gradient(135deg, #F472B6 0%, #C026D3 100%);
+    --bg-backdrop-blur: rgba(37, 37, 38, 0.3);
+    
+    --text-primary: #E0E0E0;
+    --text-secondary: #A1A1AA;
+    --text-ghost: rgba(224, 224, 224, 0.6);
+    --text-on-accent: #FFFFFF;
+    
+    --accent-primary: #0BA5EC;
+    --accent-focus: #8B5CF6;
+    --accent-success: #6EE7B7;
+    --accent-error: #F87171;
+    
+    --border-panel: #3E3E42;
+    --border-subtle: rgba(224, 224, 224, 0.1);
+    
+    --font-primary: 'Geist', 'Inter', 'SF Pro Display', -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+    --font-mono: 'Berkeley Mono', 'JetBrains Mono', 'Fira Code', 'SF Mono', 'Cascadia Code', monospace;
+}
+
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+body {
+    font-family: var(--font-primary);
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    overflow: hidden;
+    transition: background-color 0.2s ease, color 0.2s ease;
+    font-size: clamp(0.875rem, 2.5vw, 1rem);
+}
+
+.space-app {
+    width: 100%;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    background: var(--bg-primary);
+    transition: background-color 0.2s ease;
+}
+
+/* Header */
+.header {
+    padding: 16px 20px;
+    border-bottom: 1px solid var(--border-panel);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    background: var(--bg-primary);
+    z-index: 100;
+    transition: background-color 0.2s ease, border-color 0.2s ease;
+}
+
+.header-controls {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+}
+
+/* Dark Mode Toggle */
+.dark-mode-toggle {
+    background: transparent;
+    border: 1px solid var(--border-panel);
+    border-radius: 8px;
+    width: 36px;
+    height: 36px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    transition: all 0.12s ease-in-out;
+    color: var(--text-secondary);
+}
+
+.dark-mode-toggle:hover {
+    background: var(--bg-surface);
+    border-color: var(--accent-focus);
+    color: var(--accent-focus);
+    transform: scale(1.04);
+}
+
+.theme-icon {
+    width: 18px;
+    height: 18px;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 2;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+}
+
+.dark-icon {
+    display: none;
+}
+
+[data-theme="dark"] .light-icon {
+    display: none;
+}
+
+[data-theme="dark"] .dark-icon {
+    display: block;
+}
+
+.logo {
+    height: 37px;
+    max-height: 37px;
+    width: auto;
+    object-fit: contain;
+}
+
+/* Logo variants for light/dark mode */
+.logo-light {
+    display: block;
+}
+
+.logo-dark {
+    display: none;
+}
+
+[data-theme="dark"] .logo-light {
+    display: none;
+}
+
+[data-theme="dark"] .logo-dark {
+    display: block;
+}
+
+.brand-container {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.brand-name {
+    font-size: 2.2rem;
+    font-weight: 700;
+    letter-spacing: -0.025em;
+    margin: 0;
+    color: var(--text-primary);
+}
+
+.brand-name .agent {
+    font-weight: 200;
+}
+
+.status {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.status-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--accent-error);
+    transition: background-color 0.3s ease;
+}
+
+.status-dot.connected {
+    background: var(--accent-success);
+}
+
+.status-text {
+    font-size: clamp(0.7rem, 2.5vw, 0.75rem);
+    color: var(--text-secondary);
+    font-weight: 500;
+    transition: color 0.2s ease;
+}
+
+/* API Key Container */
+.api-key-container {
+    background: var(--bg-primary);
+    border-bottom: 1px solid var(--border-panel);
+    transition: all 0.2s ease;
+}
+
+.section-header {
+    padding: 16px 20px;
+    cursor: pointer;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    user-select: none;
+    background: var(--bg-surface);
+    border-bottom: 1px solid var(--border-panel);
+    transition: all 0.2s ease;
+}
+
+.section-header:hover {
+    background: var(--bg-backdrop-blur);
+}
+
+.section-header span:first-child {
+    font-size: clamp(0.75rem, 2.8vw, 0.875rem);
+    font-weight: 600;
+    color: var(--text-primary);
+    transition: color 0.2s ease;
+    letter-spacing: 0.02em;
+    text-transform: uppercase;
+    font-family: var(--font-primary);
+}
+
+.toggle-icon {
+    color: var(--text-secondary);
+    font-size: 12px;
+    transition: transform 0.3s ease, color 0.2s ease;
+}
+
+.api-key-container.collapsed .toggle-icon {
+    transform: rotate(-90deg);
+}
+
+.section-content {
+    padding: 16px 20px;
+    display: flex;
+    gap: 12px;
+    align-items: center;
+    background: var(--bg-primary);
+    transition: background-color 0.2s ease;
+}
+
+/* Make parameters section scrollable */
+#parametersSection .section-content {
+    max-height: 300px;
+    overflow-y: auto;
+    overflow-x: hidden;
+    align-items: stretch;
+    flex-direction: column;
+}
+
+.api-key-container.collapsed .section-content {
+    display: none;
+}
+
+#apiKeyInput {
+    flex: 1;
+    padding: clamp(12px, 3vw, 16px) clamp(16px, 4vw, 20px);
+    border: 1px solid var(--border-panel);
+    border-radius: clamp(6px, 1.5vw, 8px);
+    font-size: clamp(0.875rem, 3.5vw, 1rem);
+    background: var(--bg-surface);
+    color: var(--text-primary);
+    font-family: var(--font-primary);
+    outline: none;
+    transition: all 0.2s ease;
+}
+
+#apiKeyInput:focus {
+    border-color: var(--accent-focus);
+    box-shadow: 0 0 0 2px rgba(139, 92, 246, 0.2);
+}
+
+#apiKeyInput::placeholder {
+    color: var(--text-ghost);
+}
+
+.btn {
+    padding: clamp(12px, 3vw, 16px) clamp(24px, 6vw, 32px);
+    border: none;
+    border-radius: clamp(6px, 1.5vw, 8px);
+    font-size: clamp(0.875rem, 3.5vw, 1rem);
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.12s ease-in-out;
+    position: relative;
+    font-family: var(--font-primary);
+}
+
+.btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.btn-primary {
+    background: transparent;
+    color: var(--accent-focus);
+    border: 1px solid var(--accent-focus);
+    padding: clamp(8px, 2vw, 10px) clamp(16px, 4vw, 20px);
+    font-size: clamp(0.8rem, 3vw, 0.875rem);
+    font-weight: 500;
+}
+
+.btn-primary:hover:not(:disabled) {
+    background: var(--accent-focus);
+    color: var(--text-on-accent);
+    transform: scale(1.04);
+}
+
+.btn-secondary {
+    background: transparent;
+    color: var(--text-primary);
+    border: 1px solid var(--border-panel);
+    font-weight: 500;
+}
+
+.btn-secondary:hover:not(:disabled) {
+    border-color: var(--accent-focus);
+    color: var(--accent-focus);
+}
+
+.btn.loading::after {
+    content: '';
+    position: absolute;
+    width: 16px;
+    height: 16px;
+    margin: auto;
+    border: 2px solid transparent;
+    border-top-color: currentColor;
+    border-radius: 50%;
+    animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+    0% { transform: rotate(0deg); }
+    100% { transform: rotate(360deg); }
+}
+
+/* Main Content Area - Optimized for right-docked panel */
+.main-content {
+    flex: 1;
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    /* Better utilization of vertical space for docked panel */
+    padding-bottom: 80px; /* Space for docked input area */
+}
+
+/* Welcome Message */
+.welcome-message {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    text-align: center;
+    z-index: 1;
+    transition: opacity 0.3s ease;
+}
+
+.welcome-title {
+    font-size: clamp(2.5rem, 8vw, 4rem);
+    font-weight: 600;
+    color: var(--text-primary);
+    margin: 0 0 clamp(16px, 4vw, 20px) 0;
+    font-family: var(--font-mono);
+    line-height: 1.1;
+    letter-spacing: -0.03em;
+    transition: color 0.2s ease;
+    text-shadow: 0 1px 2px rgba(0, 0, 0, 0.1);
+}
+
+.welcome-subtitle {
+    font-size: clamp(1.1rem, 4vw, 1.35rem);
+    color: var(--text-secondary);
+    margin: 0;
+    font-weight: 400;
+    font-family: var(--font-primary);
+    line-height: 1.4;
+    letter-spacing: -0.01em;
+    transition: color 0.2s ease;
+}
+
+.thought-italic {
+    font-family: 'Times New Roman', Times, serif;
+    font-style: italic;
+}
+
+/* Chat Messages Area - Optimized for docked panel */
+.messages {
+    flex: 1;
+    padding: 16px; /* Slightly smaller padding for docked panel */
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    background: var(--bg-primary);
+    transition: background-color 0.2s ease;
+    /* Better scroll behavior for narrow panel */
+    overscroll-behavior: contain;
+}
+
+/* Message Bubbles */
+.message {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+}
+
+.message .content {
+    max-width: 80%;
+    padding: clamp(10px, 2.5vw, 12px) clamp(12px, 3vw, 16px);
+    border-radius: clamp(14px, 3vw, 18px);
+    font-size: clamp(0.8rem, 3vw, 0.875rem);
+    line-height: 1.4;
+    word-wrap: break-word;
+}
+
+.message.system .content {
+    background: var(--bg-surface);
+    color: var(--text-secondary);
+    border: 1px solid var(--border-panel);
+}
+
+.message.user .content {
+    background: var(--bg-gradient-cyan-blue);
+    color: var(--text-on-accent);
+}
+
+.message.assistant .content {
+    background: var(--bg-surface);
+    color: var(--text-primary);
+    border: 1px solid var(--border-panel);
+}
+
+/* Progress Message */
+.message.progress .content {
+    background: var(--bg-surface);
+    border: 1px solid var(--border-panel);
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    transition: all 0.3s ease;
+}
+
+.progress-icon {
+    width: 16px;
+    height: 16px;
+    color: var(--accent-primary);
+}
+
+.progress-text {
+    font-weight: 500;
+    color: var(--text-primary);
+}
+
+.message.progress.completed .content {
+    max-width: 140px;
+    background: var(--bg-surface);
+    border-color: var(--accent-success);
+}
+
+.message.progress.completed .progress-text {
+    color: var(--accent-success);
+}
+
+.message.progress.completed .progress-icon {
+    color: var(--accent-success);
+}
+
+/* Input Container - Fixed bottom for docked panel */
+.floating-input-container {
+    position: fixed;
+    bottom: 16px;
+    left: 16px;
+    right: 16px;
+    background: var(--bg-surface);
+    border: 1px solid var(--border-panel);
+    border-radius: 12px;
+    box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 12px;
+    transition: all 0.2s ease;
+    z-index: 10;
+    min-height: 48px;
+    /* Better for docked panel - smaller margins */
+    margin: 0;
+}
+
+.floating-input-container:focus-within {
+    border-color: var(--accent-focus);
+    box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06), 0 0 0 2px rgba(139, 92, 246, 0.2);
+}
+
+#chatInput {
+    flex: 1;
+    border: none;
+    outline: none;
+    font-size: clamp(0.875rem, 3.5vw, 1rem);
+    line-height: 1.4;
+    resize: none;
+    background: transparent;
+    color: var(--text-primary);
+    min-height: clamp(20px, 4vw, 24px);
+    font-family: var(--font-primary);
+    transition: color 0.2s ease;
+    vertical-align: top;
+    padding: 0;
+}
+
+#chatInput::placeholder {
+    color: var(--text-ghost);
+    font-style: italic;
+    letter-spacing: 0.01em;
+}
+
+.send-button {
+    width: 36px;
+    height: 36px;
+    background: var(--bg-gradient-cyan-blue);
+    border: none;
+    border-radius: 8px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    transition: all 0.12s ease-in-out;
+    flex-shrink: 0;
+}
+
+.send-button:hover:not(:disabled) {
+    transform: scale(1.04);
+    filter: brightness(1.1);
+}
+
+.send-button:disabled {
+    background: var(--border-panel);
+    cursor: not-allowed;
+    transform: none;
+    filter: none;
+}
+
+.send-icon {
+    width: 16px;
+    height: 16px;
+    color: var(--text-on-accent);
+}
+
+/* Parameters Container - uses same styling as API key container */
+
+.parameter-controls {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-bottom: 12px;
+}
+
+.parameter-item {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 8px 12px;
+    background: var(--bg-surface);
+    border: 1px solid var(--border-panel);
+    border-radius: 4px;
+    transition: all 0.2s ease;
+}
+
+.parameter-item:hover {
+    border-color: var(--accent-focus);
+    background: var(--bg-backdrop-blur);
+}
+
+.parameter-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 4px;
+}
+
+.parameter-label {
+    font-size: clamp(0.7rem, 2.8vw, 0.75rem);
+    font-weight: 500;
+    color: var(--text-primary);
+    transition: color 0.2s ease;
+    text-transform: capitalize;
+}
+
+.parameter-current-value {
+    font-size: clamp(0.65rem, 2.5vw, 0.7rem);
+    font-weight: 500;
+    color: var(--accent-primary);
+    font-family: var(--font-mono);
+    background: rgba(11, 165, 236, 0.1);
+    padding: 1px 6px;
+    border-radius: 3px;
+    transition: all 0.2s ease;
+}
+
+.parameter-controls-row {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+}
+
+.parameter-slider-container {
+    flex: 1;
+    position: relative;
+}
+
+.parameter-slider {
+    -webkit-appearance: none;
+    width: 100%;
+    height: 4px;
+    border-radius: 2px;
+    background: var(--border-panel);
+    outline: none;
+    position: relative;
+    transition: background 0.2s ease;
+}
+
+.parameter-slider::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    background: var(--accent-primary);
+    cursor: pointer;
+    transition: all 0.2s ease;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+}
+
+.parameter-slider::-webkit-slider-thumb:hover {
+    background: var(--accent-focus);
+    transform: scale(1.1);
+    box-shadow: 0 2px 8px rgba(139, 92, 246, 0.3);
+}
+
+.parameter-slider::-moz-range-thumb {
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
+    background: var(--accent-primary);
+    cursor: pointer;
+    border: none;
+    transition: all 0.2s ease;
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+}
+
+.parameter-slider::-moz-range-thumb:hover {
+    background: var(--accent-focus);
+    transform: scale(1.1);
+    box-shadow: 0 2px 8px rgba(139, 92, 246, 0.3);
+}
+
+.parameter-numeric-input {
+    width: 80px;
+    padding: 8px 10px;
+    border: 1px solid var(--border-panel);
+    border-radius: 6px;
+    font-size: clamp(0.8rem, 3vw, 0.875rem);
+    font-family: var(--font-mono);
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    text-align: center;
+    outline: none;
+    transition: all 0.2s ease;
+}
+
+.parameter-numeric-input:focus {
+    border-color: var(--accent-focus);
+    box-shadow: 0 0 0 2px rgba(139, 92, 246, 0.2);
+}
+
+.parameter-range-labels {
+    display: flex;
+    justify-content: space-between;
+    margin-top: 4px;
+    font-size: clamp(0.7rem, 2.5vw, 0.75rem);
+    color: var(--text-ghost);
+    font-family: var(--font-mono);
+}
+
+.parameter-updating {
+    opacity: 0.7;
+    pointer-events: none;
+}
+
+.parameter-updating .parameter-slider::-webkit-slider-thumb {
+    animation: pulse 1.5s infinite;
+}
+
+@keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.5; }
+}
+
+/* Animation Classes */
+.fade-in {
+    animation: fadeIn 0.3s ease-in;
+}
+
+.slide-up {
+    animation: slideUp 0.3s ease-out;
+}
+
+@keyframes fadeIn {
+    from { opacity: 0; }
+    to { opacity: 1; }
+}
+
+@keyframes slideUp {
+    from { 
+        opacity: 0;
+        transform: translateY(10px);
+    }
+    to { 
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+/* Scrollbar Styling */
+.messages::-webkit-scrollbar {
+    width: 6px;
+}
+
+.messages::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+.messages::-webkit-scrollbar-thumb {
+    background-color: #d1d5db;
+    border-radius: 3px;
+}
+
+.messages::-webkit-scrollbar-thumb:hover {
+    background-color: #9ca3af;
+}
+
+/* Hide welcome message when messages are present */
+.main-content.has-messages .welcome-message {
+    display: none;
+}
+
+/* Enhanced Responsive Design */
+@media (max-width: 480px) {
+    .header {
+        padding: clamp(10px, 2.5vw, 12px) clamp(14px, 3vw, 16px);
+    }
+    
+    .section-content {
+        padding: clamp(10px, 2.5vw, 12px) clamp(14px, 3vw, 16px);
+        flex-direction: column;
+        align-items: stretch;
+        gap: clamp(10px, 2.5vw, 12px);
+    }
+    
+    .floating-input-container {
+        left: clamp(14px, 3vw, 16px);
+        right: clamp(14px, 3vw, 16px);
+        bottom: clamp(10px, 2.5vw, 12px);
+        padding: clamp(10px, 2.5vw, 12px);
+    }
+    
+    .messages {
+        padding: clamp(14px, 3vw, 16px);
+    }
+    
+    .space-app {
+        font-size: clamp(0.8rem, 4vw, 1rem);
+    }
+}
+
+/* Extra small screens */
+@media (max-width: 320px) {
+    .welcome-title {
+        font-size: clamp(2rem, 10vw, 2.5rem);
+    }
+    
+    .welcome-subtitle {
+        font-size: clamp(0.95rem, 5vw, 1.1rem);
+    }
+}

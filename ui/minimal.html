@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CADAgent Minimal Test</title>
+    <style>
+        body { 
+            background-color: yellow; 
+            padding: 20px; 
+            font-family: Arial, sans-serif; 
+            font-size: 16px;
+        }
+        .test-box {
+            background-color: red;
+            color: white;
+            padding: 10px;
+            margin: 10px 0;
+            border: 2px solid black;
+        }
+    </style>
+</head>
+<body>
+    <div class="test-box">
+        <h1>MINIMAL TEST - IF YOU SEE THIS, PALETTE WORKS!</h1>
+    </div>
+    <p>This is the most basic HTML possible to test palette rendering.</p>
+    <div id="status">Loading...</div>
+    
+    <script>
+        console.log('CADAgent: Minimal HTML script executing');
+        
+        // Handle Fusion messages (Python -> HTML)
+        window.fusionJavaScriptHandler = {
+            handle: function(action, data) {
+                console.log('CADAgent: Received from Python:', action, data);
+                try {
+                    if (action === 'init') {
+                        document.getElementById('status').innerHTML += '<br>Received init message from Python!';
+                        return 'HTML_OK';
+                    }
+                } catch (e) {
+                    console.error('CADAgent: Error handling Fusion message:', e);
+                }
+                return 'OK';
+            }
+        };
+        
+        document.addEventListener('DOMContentLoaded', function() {
+            console.log('CADAgent: DOM loaded');
+            document.getElementById('status').innerHTML = 'DOM Ready - JavaScript works!';
+            // Notify Python that HTML is ready
+            try {
+                if (typeof adsk !== 'undefined' && adsk && typeof adsk.fusionSendData === 'function') {
+                    const res = adsk.fusionSendData('html_ready', JSON.stringify({ ts: Date.now(), page: 'minimal' }));
+                    if (res && res.then) {
+                        res.then(r => console.log('CADAgent: minimal html_ready ack:', r));
+                    } else {
+                        console.log('CADAgent: minimal html_ready sync ack:', res);
+                    }
+                }
+            } catch (e) {
+                console.warn('CADAgent: minimal html_ready exception:', e);
+            }
+            
+            // Test if Fusion bridge is available
+            if (typeof adsk !== 'undefined') {
+                document.getElementById('status').innerHTML += '<br>Fusion bridge detected!';
+                console.log('CADAgent: Fusion bridge available');
+                
+                // Test sending message to Python
+                try {
+                    const result = adsk.fusionSendData('ping', 'test_from_html');
+                    if (result && result.then) {
+                        result.then(res => {
+                            console.log('CADAgent: Ping response:', res);
+                            document.getElementById('status').innerHTML += '<br>Ping response: ' + res;
+                        });
+                    } else {
+                        console.log('CADAgent: Sync ping response:', result);
+                        document.getElementById('status').innerHTML += '<br>Sync ping response: ' + result;
+                    }
+                } catch (e) {
+                    console.error('CADAgent: Error sending ping:', e);
+                    document.getElementById('status').innerHTML += '<br>Error sending ping: ' + e;
+                }
+            } else {
+                document.getElementById('status').innerHTML += '<br>No Fusion bridge detected - will retry';
+                console.log('CADAgent: No Fusion bridge - retrying in 1 second');
+                
+                // Retry after 1 second as per best practices
+                setTimeout(function() {
+                    if (typeof adsk !== 'undefined') {
+                        document.getElementById('status').innerHTML += '<br>Fusion bridge detected on retry!';
+                        console.log('CADAgent: Fusion bridge available on retry');
+                    } else {
+                        document.getElementById('status').innerHTML += '<br>Still no Fusion bridge after retry';
+                        console.log('CADAgent: Still no Fusion bridge');
+                    }
+                }, 1000);
+            }
+        });
+    </script>
+</body>
+</html>
