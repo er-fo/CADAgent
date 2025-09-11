@@ -70,10 +70,35 @@ This guide covers downloading CADAgent from GitHub and installing it as a Fusion
 
 ## Configuration
 
-1. **API Key Setup:**
+### Getting Your Anthropic API Key (Required)
+
+CADAgent requires an **Anthropic API key** to function. This powers the AI that converts your natural language into CAD models.
+
+1. **Create an Anthropic Account:**
+   - Go to https://console.anthropic.com/
+   - Sign up for a new account or log in if you already have one
+   - **Note:** You'll need to add a payment method, but usage costs are typically very low (around $0.01-0.10 per model)
+
+2. **Generate an API Key:**
+   - Once logged in, navigate to https://console.anthropic.com/account/keys
+   - Click "Create Key"
+   - Give it a name like "CADAgent" 
+   - Copy the generated key (starts with `sk-ant-api03-`)
+   - **Important:** Save this key securely - you won't be able to see it again!
+
+3. **Add Credits (if needed):**
+   - New accounts may need to add credits to use the API
+   - Go to https://console.anthropic.com/account/billing
+   - Add a small amount ($5-10 is usually plenty to start)
+
+### Configure CADAgent with Your API Key
+
+1. **API Key Setup in Fusion 360:**
+   - Launch CADAgent from the Fusion 360 Add-Ins panel
    - Click on the dropdown menu in the CADAgent chat UI "API Configuration"
-   - Add your Anthropic API key (get one from https://console.anthropic.com/account/keys)
+   - Paste your Anthropic API key in the field
    - Press "Save API Key"
+   - **Security Note:** The key is stored locally on your computer only
 
 2. **Test the installation:**
    - Launch CADAgent from the Add-Ins panel

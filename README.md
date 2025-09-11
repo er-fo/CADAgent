@@ -27,19 +27,29 @@ The add-in provides a chat interface within Fusion 360 where you can:
 - Fusion 360 (version 2.0.16000 or newer)
 - Windows or macOS
 - Internet connection for AI processing
-- API key for CADAgent backend service
+- **Anthropic API key** (required for AI functionality)
+  - Sign up at https://console.anthropic.com/
+  - Generate API key at https://console.anthropic.com/account/keys
+  - Typical usage costs: $0.01-0.10 per model generation
 
 ## Installation
 
-See installation_guide.md for detailed setup instructions.
+See `installation_guide.md` for detailed setup instructions.
+
+### Quick Setup
+1. Download and install the add-in (see installation guide)
+2. **Get Anthropic API key:** Visit https://console.anthropic.com/account/keys
+3. Configure the API key in CADAgent's settings within Fusion 360
+4. Start creating models with natural language!
 
 ## Usage
 
 1. Open Fusion 360
 2. Launch CADAgent from the Add-Ins panel
-3. Type your part description in the chat interface
-4. Review and refine the generated model
-5. Save or export your design
+3. Configure your Anthropic API key (first time only)
+4. Type your part description in the chat interface
+5. Review and refine the generated model
+6. Save or export your design
 
 ## Examples
 
