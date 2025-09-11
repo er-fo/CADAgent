@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>CADAgent Test</title>
+</head>
+<body>
+    <h1>CADAgent Test Page</h1>
+    <p>If you see this, the palette is loading HTML correctly.</p>
+    <button onclick="testFusion()">Test Fusion Bridge</button>
+    <div id="output"></div>
+    
+    <script>
+        console.log('CADAgent: Test page loaded');
+        
+        function testFusion() {
+            const output = document.getElementById('output');
+            if (typeof adsk !== 'undefined' && adsk.fusionSendData) {
+                output.innerHTML = 'Fusion bridge detected!';
+                console.log('CADAgent: Fusion bridge available');
+                
+                // Test sending data to Python
+                const result = adsk.fusionSendData('ping', 'test');
+                if (result && result.then) {
+                    result.then(res => {
+                        output.innerHTML += '<br>Response: ' + res;
+                        console.log('CADAgent: Got response:', res);
+                    });
+                } else {
+                    output.innerHTML += '<br>Sync response: ' + result;
+                    console.log('CADAgent: Sync response:', result);
+                }
+            } else {
+                output.innerHTML = 'Fusion bridge not available';
+                console.log('CADAgent: No Fusion bridge');
+            }
+        }
+        
+        // Auto-test when page loads
+        document.addEventListener('DOMContentLoaded', testFusion);
+    </script>
+</body>
+</html>

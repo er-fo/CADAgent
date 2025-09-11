@@ -1,0 +1,22 @@
+{
+  "autodeskProduct": "Fusion360",
+  "type": "addin",
+  "id": "3bef428c-20d7-40e7-bce3-5f8a5ea342f0",
+  "name": "CADAgent",
+  "version": "1.0.0",
+  "author": "Personal Use",
+  "description": {
+    "en": "AI-powered CAD interface for natural language 3D modeling"
+  },
+  "supportedOS": "windows|mac",
+  "supportedAppVersions": ">=2.0.16000",
+  "startup": false,
+  "entry": "CADAgent.py",
+  "editEnabled": true,
+  "tags": ["AI", "CAD", "Natural Language", "3D Modeling"],
+  "helpUrl": "",
+  "onlineHelp": {
+    "url": ""
+  },
+  "dependencies": []
+}
