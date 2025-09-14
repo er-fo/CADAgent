@@ -62,11 +62,20 @@ See `installation_guide.md` for detailed setup instructions.
 **Assemblies:**
 "Build a simple hinge with two parts and mounting holes"
 
+
+## Good to know
+
+**Cost?**
+- The software is currently free to use, i (the author) make no money off of this beta, completely non-profit. – It is BYO API key. 
+
+**Limitations**
+- Currently limited to fillets, chamfers, boolean operations and rotation + movement. (parameters quickly changeable via UI) - Organic models will (although funny to look at) produce results below expectations.
+
 ## Support
 
-For installation issues, check the installation guide. For modeling questions, describe your requirements as specifically as possible - the AI works best with clear, detailed descriptions.
+For installation issues, check the installation guide. For modeling questions, describe your requirements as specifically as possible - the AI works best with clear, detailed descriptions. (or email me at eriknollett@gmail.com)
 
 Questions? Contact – Answering everyone
 - Email: eriknollett@gmail.com
 - Email: hi@cadagentpro.com
-- Website: cadagentpro.com
+- Website: https://cadagentpro.com
