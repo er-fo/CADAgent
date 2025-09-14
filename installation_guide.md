@@ -63,6 +63,7 @@ This guide covers downloading CADAgent from GitHub and installing it as a Fusion
 3. **Find CADAgent:**
    - Look for "CADAgent" in the list
    - If not visible, click "Refresh" or restart Fusion 360
+   - Make sure name of the top level folder is exactly "CADAgent" 
 
 4. **Enable the add-in:**
    - Check the box next to "CADAgent"
