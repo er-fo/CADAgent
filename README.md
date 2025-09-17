@@ -34,13 +34,18 @@ The add-in provides a chat interface within Fusion 360 where you can:
 
 ## Installation
 
-See `installation_guide.md` for detailed setup instructions.
+### One-Click Installation (Recommended)
+1. Download CADAgent from GitHub
+2. Extract the ZIP file
+3. **Double-click the installer for your platform:**
+   - **Windows:** `Install-CADAgent-Windows.bat`
+   - **macOS:** `Install-CADAgent-macOS.sh`
+4. **Get Anthropic API key:** Visit https://console.anthropic.com/account/keys
+5. Configure the API key in CADAgent's settings within Fusion 360
+6. Start creating models with natural language!
 
-### Quick Setup
-1. Download and install the add-in (see installation guide)
-2. **Get Anthropic API key:** Visit https://console.anthropic.com/account/keys
-3. Configure the API key in CADAgent's settings within Fusion 360
-4. Start creating models with natural language!
+### Manual Installation
+See `installation_guide.md` for detailed manual setup instructions.
 
 ## Usage
 

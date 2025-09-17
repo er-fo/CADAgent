@@ -16,7 +16,32 @@ This guide covers downloading CADAgent from GitHub and installing it as a Fusion
 4. Extract the ZIP file to a temporary location
 5. Navigate to the extracted folder and locate the `CADAgent` directory
 
-## Installation
+## One-Click Installation (Recommended)
+
+After downloading and extracting CADAgent:
+
+### Windows
+1. **Navigate to the CADAgent folder**
+2. **Double-click `Install-CADAgent-Windows.bat`**
+3. **The installer will automatically:**
+   - Locate your Fusion 360 add-ins directory
+   - Copy all CADAgent files to the correct location
+   - Handle any existing installations
+4. **Done!** Proceed to "Enable the Add-in" section below
+
+### macOS
+1. **Navigate to the CADAgent folder**
+2. **Double-click `Install-CADAgent-macOS.sh`**
+   - If prompted about security, right-click the file and select "Open"
+3. **The installer will automatically:**
+   - Locate your Fusion 360 add-ins directory
+   - Copy all CADAgent files to the correct location
+   - Handle any existing installations
+4. **Done!** Proceed to "Enable the Add-in" section below
+
+## Manual Installation (Alternative Method)
+
+If you prefer to install manually or the one-click installer doesn't work:
 
 ### Windows
 
