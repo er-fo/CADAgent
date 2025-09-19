@@ -14,6 +14,7 @@ import adsk.cam
 import traceback
 import sys
 import os
+from pathlib import Path
 import json
 import base64
 import tempfile
@@ -186,20 +187,26 @@ def run(context):
         for palette in _ui.palettes:
             if palette.id == palette_id:
                 palette.deleteMe()
-        
-        # Get the path to the HTML file - use original file directly
-        html_file = os.path.join(os.path.dirname(__file__), 'ui', 'chat.html')
+
+        # Get the path to the HTML file and convert to proper file URI (fixes Windows backslash issues)
+        # Using Path.as_uri() avoids invalid URLs like ...%5Cui%5Cchat.html in some environments
+        html_path = Path(__file__).parent / 'ui' / 'chat.html'
+        html_file = html_path.as_uri() if html_path.exists() else str(html_path)
+        try:
+            _app.log(f'CADAgent: HTML URL resolved to: {html_file}')
+        except Exception:
+            pass
         
         # Store backend URL to pass to HTML via initial message
         global _backend_url
         config_path = os.path.join(os.path.dirname(__file__), 'config')
         if config_path not in sys.path:
             sys.path.append(config_path)
-        from settings import BACKEND_BASE_URL
-        _backend_url = BACKEND_BASE_URL
-        
-        # Create new palette
-        _palette = _ui.palettes.add(
+    from settings import BACKEND_BASE_URL
+    _backend_url = BACKEND_BASE_URL
+
+    # Create new palette
+    _palette = _ui.palettes.add(
             id=palette_id,
             name='space v23',
             htmlFileURL=html_file,
