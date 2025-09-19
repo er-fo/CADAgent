@@ -202,30 +202,30 @@ def run(context):
         config_path = os.path.join(os.path.dirname(__file__), 'config')
         if config_path not in sys.path:
             sys.path.append(config_path)
-    from settings import BACKEND_BASE_URL
-    _backend_url = BACKEND_BASE_URL
+        from settings import BACKEND_BASE_URL
+        _backend_url = BACKEND_BASE_URL
 
-    # Create new palette
-    _palette = _ui.palettes.add(
-            id=palette_id,
-            name='space v23',
-            htmlFileURL=html_file,
-            isVisible=True,
-            showCloseButton=True,
-            isResizable=True,
-            width=CHAT_WINDOW_WIDTH,
-            height=CHAT_WINDOW_HEIGHT,
-            useNewWebBrowser=True  # Use Qt browser following best practices
-        )
-        
+        # Create new palette
+        _palette = _ui.palettes.add(
+                id=palette_id,
+                name='space v23',
+                htmlFileURL=html_file,
+                isVisible=True,
+                showCloseButton=True,
+                isResizable=True,
+                width=CHAT_WINDOW_WIDTH,
+                height=CHAT_WINDOW_HEIGHT,
+                useNewWebBrowser=True  # Use Qt browser following best practices
+            )
+            
         # Dock the palette to the right side, filling from top to bottom
         # Following Fusion 360 best practices for palette positioning
         try:
-            _palette.dockingState = adsk.core.PaletteDockingStates.PaletteDockStateRight
+            _palette.dockingState = adsk.core.PaletteDockingStates.PaletteDockStateLeft
             # Make the palette fill the available vertical space
             _palette.isResizable = True
             # Set appropriate width for right-docked panel (wider than floating)
-            _palette.width = 400  # Slightly wider for better usability when docked
+            _palette.width = 420  # 5% wider than previous 400px
         except Exception as dock_error:
             _app.log(f'CADAgent: Could not dock palette to right: {dock_error}')
             # Fallback: ensure it's visible even if docking fails
