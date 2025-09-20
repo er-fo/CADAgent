@@ -71,7 +71,7 @@ See `installation_guide.md` for detailed manual setup instructions.
 ## Good to know
 
 **Cost?**
-- The software is currently free to use, i (the author) make no money off of this beta, completely non-profit. – It is BYO API key. 
+- The software is currently free to use, i (the author) make no money off this beta, completely non-profit. – It is BYO API key. 
 
 **Limitations**
 - Currently limited to fillets, chamfers, boolean operations and rotation + movement. (parameters quickly changeable via UI) - Organic models will (although funny to look at) produce results below expectations.
