@@ -2,11 +2,13 @@
 # Following Fusion 360 best practices - keep simple
 
 # Your backend URL
+# Set to production by default; switch to a local echo server manually when debugging payloads
 BACKEND_BASE_URL = "https://api.cadagentpro.com"
 
-# Fallback URLs in case of DNS issues in Fusion 360 environment
+# Fallback URLs in case of DNS issues or transient backend failures
 BACKEND_FALLBACK_URLS = [
     "https://api.cadagentpro.com",  # Primary
+    "https://spacecad.fly.dev",     # Legacy deployment fallback
 ]
 
 # Debug mode - set to True to enable verbose logging
@@ -17,8 +19,6 @@ GENERATE_ENDPOINT = "/api/v1/direct/generate"
 ITERATE_ENDPOINT = "/api/v1/direct/iterate/{model_id}"
 PARAMETERS_PUT_ENDPOINT = "/api/v1/parameters/{model_id}"
 PARAMETERS_GET_ENDPOINT = "/api/v1/parameters/{model_id}"
-ONBOARD_ENDPOINT = "/api/v1/status"  # Use status endpoint for health checks
-
 # UI settings for palette - optimized for right-side docking
 CHAT_WINDOW_WIDTH = 400  # Wider for better usability when docked to right
 CHAT_WINDOW_HEIGHT = 600  # Taller to better utilize vertical space

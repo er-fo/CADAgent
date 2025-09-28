@@ -55,7 +55,23 @@
                 <span class="toggle-icon">▼</span>
             </div>
             <div class="section-content">
-                <input type="password" id="apiKeyInput" placeholder="Enter your Anthropic API key" />
+                <div class="api-input-container">
+                    <input type="password" id="apiKeyInput" placeholder="Enter your Anthropic API key" />
+                    <div id="cachedKeyOverlay" class="cached-key-overlay" style="display: none;">
+                        <div class="cached-key-display">
+                            <span class="cached-key-text">Using cached API key</span>
+                            <button id="resetApiKey" class="btn btn-reset" title="Clear cached key and enter new one">
+                                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/>
+                                    <path d="M21 3v5h-5"/>
+                                    <path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/>
+                                    <path d="M3 21v-5h5"/>
+                                </svg>
+                                Reset
+                            </button>
+                        </div>
+                    </div>
+                </div>
                 <button id="saveApiKey" class="btn btn-primary">Save Key</button>
                 <button id="testApiKey" class="btn btn-secondary">Verify</button>
             </div>

@@ -295,6 +295,79 @@ body {
     color: var(--text-ghost);
 }
 
+/* API Input Container with Overlay Support */
+.api-input-container {
+    position: relative;
+    flex: 1;
+}
+
+/* Cached Key Overlay */
+.cached-key-overlay {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(40, 167, 69, 0.1);
+    border: 2px solid #28a745;
+    border-radius: clamp(6px, 1.5vw, 8px);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 clamp(16px, 4vw, 20px);
+    backdrop-filter: blur(1px);
+    z-index: 10;
+}
+
+.cached-key-display {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    width: 100%;
+    gap: 12px;
+}
+
+.cached-key-text {
+    color: #28a745;
+    font-style: italic;
+    font-weight: 500;
+    flex: 1;
+    font-size: clamp(0.875rem, 3.5vw, 1rem);
+}
+
+/* Reset Button */
+.btn-reset {
+    background: rgba(108, 117, 125, 0.1);
+    color: #6c757d;
+    border: 1px solid rgba(108, 117, 125, 0.3);
+    padding: 6px 10px;
+    border-radius: calc(clamp(6px, 1.5vw, 8px) * 0.8);
+    font-size: 0.8rem;
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    transition: all 0.2s ease;
+    cursor: pointer;
+    white-space: nowrap;
+}
+
+.btn-reset:hover {
+    background: rgba(108, 117, 125, 0.2);
+    border-color: rgba(108, 117, 125, 0.5);
+    color: #495057;
+    transform: scale(1.02);
+}
+
+.btn-reset:active {
+    transform: translateY(1px);
+}
+
+.btn-reset svg {
+    width: 13px;
+    height: 13px;
+    opacity: 0.8;
+}
+
 .btn {
     padding: clamp(12px, 3vw, 16px) clamp(24px, 6vw, 32px);
     border: none;

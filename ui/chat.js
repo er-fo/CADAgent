@@ -78,16 +78,6 @@ window.addEventListener('unhandledrejection', function(e){
 document.addEventListener('DOMContentLoaded', function() {
     console.log('CADAgent: Initializing chat interface...');
     initializeApp();
-    // Notify Python that HTML is ready
-    try {
-        if (window.adsk && typeof window.adsk.fusionSendData === 'function') {
-            sendToFusion('html_ready', { ts: Date.now() })
-              .then(r => console.log('CADAgent: html_ready ack:', r))
-              .catch(e => console.warn('CADAgent: html_ready failed:', e));
-        }
-    } catch (e) {
-        console.warn('CADAgent: html_ready exception:', e);
-    }
 });
 
 
@@ -165,6 +155,11 @@ function checkFusionBridge() {
                     if (result === 'pong') {
                         updateConnectionStatus('connected');
                         console.log('CADAgent: Communication bridge established');
+
+                        // Now send html_ready after bridge is confirmed working
+                        sendToFusion('html_ready', { ts: Date.now() })
+                            .then(r => console.log('CADAgent: html_ready ack:', r))
+                            .catch(e => console.warn('CADAgent: html_ready failed:', e));
                     } else if (attempts < maxAttempts) {
                         setTimeout(tryPing, delayMs);
                     } else {
@@ -242,6 +237,13 @@ function setupEventListeners() {
         if (e.key === 'Enter') {
             saveApiKey();
         }
+    });
+
+    // Reset API key button
+    document.getElementById('resetApiKey').addEventListener('click', function(e) {
+        e.preventDefault();
+        e.stopPropagation();
+        resetCachedApiKey();
     });
     
     // Chat input
@@ -457,17 +459,26 @@ function saveApiKey() {
     saveButton.classList.add('loading');
     saveButton.disabled = true;
     
-    // Kick off async validation via Python; await api_validation_result event
-    pendingApiKey = key;
-    sendToFusion('validate_api_key', { api_key: key })
-        .then(() => { /* ACK received; wait for api_validation_result */ })
+    // Store API key locally without validation
+    currentApiKey = key;
+    
+    // Store in Python cache
+    sendToFusion('store_api_key', { api_key: key })
+        .then(() => {
+            // Collapse API key section and notify
+            document.getElementById('apiKeySection').classList.add('collapsed');
+            showNativeNotification('API key saved successfully. You can now create models.', 'info');
+            // Enable send button if chat input has text
+            const chatInput = document.getElementById('chatInput');
+            const sendButton = document.getElementById('sendButton');
+            sendButton.disabled = !chatInput.value.trim() || isProcessing;
+        })
         .catch(err => {
-            showNativeNotification('Error starting validation: ' + err.message, 'error');
-            pendingApiKey = null;
+            showNativeNotification('Error saving API key: ' + err.message, 'error');
         })
         .finally(() => {
-            // Keep button disabled until we get a result event for better UX
-            setTimeout(() => { saveButton.classList.remove('loading'); /* keep disabled state handled by event */ }, 200);
+            saveButton.classList.remove('loading');
+            saveButton.disabled = false;
         });
 }
 
@@ -488,56 +499,126 @@ function testApiKey() {
     testButton.classList.add('loading');
     testButton.disabled = true;
     
-    pendingApiKey = key;
-    sendToFusion('validate_api_key', { api_key: key })
-        .then(() => { /* ACK received; wait for api_validation_result */ })
-        .catch(err => {
-            console.error('CADAgent: Backend test start error:', err);
-            showNativeNotification('API key verification error: ' + err.message, 'error');
-            pendingApiKey = null;
+    // Simple local validation - just check format
+    if (key.startsWith('sk-ant-api03-') && key.length > 20) {
+        showNativeNotification('API key format looks valid. Click Save to use it.', 'info');
+    } else {
+        showNativeNotification('API key format may be invalid. Please check your key.', 'warning');
+    }
+    
+    setTimeout(() => {
+        testButton.classList.remove('loading');
+        testButton.disabled = false;
+    }, 500);
+}
+
+/**
+ * Show the cached API key overlay
+ */
+function showCachedKeyOverlay() {
+    const overlay = document.getElementById('cachedKeyOverlay');
+    if (overlay) {
+        overlay.style.display = 'flex';
+        // Make the input field readonly to prevent typing
+        const input = document.getElementById('apiKeyInput');
+        if (input) {
+            input.setAttribute('readonly', 'readonly');
+            input.style.cursor = 'not-allowed';
+        }
+        console.log('CADAgent: Cached key overlay shown');
+    }
+}
+
+/**
+ * Hide the cached API key overlay
+ */
+function hideCachedKeyOverlay() {
+    const overlay = document.getElementById('cachedKeyOverlay');
+    if (overlay) {
+        overlay.style.display = 'none';
+        // Make the input field editable again
+        const input = document.getElementById('apiKeyInput');
+        if (input) {
+            input.removeAttribute('readonly');
+            input.style.cursor = '';
+            input.value = ''; // Clear the input
+            input.focus(); // Focus for user to enter new key
+        }
+        console.log('CADAgent: Cached key overlay hidden');
+    }
+}
+
+/**
+ * Reset cached API key - clears all caches and allows user to enter new key
+ */
+function resetCachedApiKey() {
+    console.log('CADAgent: Resetting cached API key...');
+
+    // Clear the local state
+    currentApiKey = null;
+
+    // Hide the overlay
+    hideCachedKeyOverlay();
+
+    // Show the API key section if it was collapsed
+    const apiKeySection = document.getElementById('apiKeySection');
+    if (apiKeySection) {
+        apiKeySection.classList.remove('collapsed');
+    }
+
+    // Clear cached keys from Python backend (all sources)
+    sendToFusion('clear_cached_api_key', {})
+        .then(result => {
+            console.log('CADAgent: Backend cache clear result:', result);
+            showNativeNotification('Cached API key cleared. Please enter a new API key.', 'info');
         })
-        .finally(() => {
-            setTimeout(() => { testButton.classList.remove('loading'); /* keep disabled handled by event */ }, 200);
+        .catch(err => {
+            console.warn('CADAgent: Failed to clear backend cache:', err);
+            showNativeNotification('API key reset. Please enter a new API key.', 'info');
         });
 }
 
 /**
- * Load API key from cache
+ * Load API key from cache (fallback if init message doesn't handle it)
  */
 function loadApiKey() {
-    console.log('CADAgent: Loading cached API key...');
-    
+    console.log('CADAgent: Loading cached API key as fallback...');
+
+    // Check if init has already shown the overlay
+    const overlay = document.getElementById('cachedKeyOverlay');
+    if (overlay && overlay.style.display === 'flex') {
+        console.log('CADAgent: Init already handled cached key with overlay, skipping loadApiKey');
+        return;
+    }
+
     sendToFusion('get_cached_api_key', {})
         .then(result => {
             if (result && result.success && result.has_cached_key && result.api_key) {
-                console.log('CADAgent: Found cached API key');
-                
+                console.log('CADAgent: Found cached API key via fallback');
+
                 // Set the cached key
-                currentApiKey = result.api_key;
-                
-                // Update the input field
-                const input = document.getElementById('apiKeyInput');
-                if (input) {
-                    input.value = result.api_key;
-                }
-                
+                currentApiKey = '__CACHED_KEY__';
+
+                // Show the overlay (fallback case)
+                showCachedKeyOverlay();
+
                 // Enable send button if chat input has text
                 const chatInput = document.getElementById('chatInput');
                 const sendButton = document.getElementById('sendButton');
                 if (chatInput && sendButton) {
                     sendButton.disabled = !chatInput.value.trim() || isProcessing;
                 }
-                
+
                 // Collapse API key section since we have a cached key
                 const apiKeySection = document.getElementById('apiKeySection');
                 if (apiKeySection) {
                     apiKeySection.classList.add('collapsed');
                 }
-                
+
                 // Show native notification instead of chat message
                 showNativeNotification('Cached API key loaded successfully. Ready to create models.', 'info');
             } else {
-                console.log('CADAgent: No cached API key found');
+                console.log('CADAgent: No cached API key found via fallback');
                 // Show API key section if no cached key
                 const apiKeySection = document.getElementById('apiKeySection');
                 if (apiKeySection) {
@@ -546,7 +627,7 @@ function loadApiKey() {
             }
         })
         .catch(err => {
-            console.warn('CADAgent: Error loading cached API key:', err);
+            console.warn('CADAgent: Error loading cached API key via fallback:', err);
             // Show API key section on error
             const apiKeySection = document.getElementById('apiKeySection');
             if (apiKeySection) {
@@ -587,10 +668,12 @@ function sendMessage() {
     
     if (isIteration) {
         // Call iterate using Python bridge (proper Fusion 360 pattern)
+        // If currentApiKey is a placeholder, send empty string so Python retrieves from cache
+        const keyToSend = (currentApiKey === '__CACHED_KEY__') ? '' : (currentApiKey || '');
         sendToFusion('iterate_model', {
             model_id: currentModelId,
             prompt: message,
-            anthropic_api_key: currentApiKey || ''  // Let Python handle .env fallback
+            anthropic_api_key: keyToSend  // Let Python handle cache/env fallback
         })
             .then(result => {
                 // Expect async ACK; final result will arrive via iteration_complete event
@@ -611,9 +694,11 @@ function sendMessage() {
             });
     } else {
         // Call generate using Python bridge (proper Fusion 360 pattern)
+        // If currentApiKey is a placeholder, send empty string so Python retrieves from cache
+        const keyToSend = (currentApiKey === '__CACHED_KEY__') ? '' : (currentApiKey || '');
         sendToFusion('generate_model', {
             prompt: message,
-            anthropic_api_key: currentApiKey || ''  // Let Python handle .env fallback
+            anthropic_api_key: keyToSend  // Let Python handle cache/env fallback
         })
             .then(result => {
                 // Expect async ACK; final result will arrive via generation_complete event
@@ -1087,42 +1172,50 @@ window.fusionJavaScriptHandler = {
         
         try {
             switch (action) {
-                case 'api_validation_result':
-                    const val = JSON.parse(data);
-                    if (val && val.success) {
-                        // Promote pending key
-                        if (pendingApiKey) {
-                            currentApiKey = pendingApiKey;
-                        }
-                        // Cache in Python
-                        sendToFusion('store_api_key', { api_key: currentApiKey || '' })
-                          .then(() => {
-                              // Collapse API key section and notify
-                              document.getElementById('apiKeySection').classList.add('collapsed');
-                              showNativeNotification('API key saved and verified successfully. You can now create models.', 'info');
-                              // Enable send button if chat input has text
-                              const chatInput = document.getElementById('chatInput');
-                              const sendButton = document.getElementById('sendButton');
-                              sendButton.disabled = !chatInput.value.trim() || isProcessing;
-                          })
-                          .catch(() => {})
-                          .finally(() => { pendingApiKey = null; });
-                    } else {
-                        showNativeNotification('API key verification failed: ' + (val && (val.error || val.message) || 'unknown error'), 'error');
-                        pendingApiKey = null;
-                    }
-                    return 'OK';
                 case 'init':
                     // Handle initialization message from Python
                     const initData = JSON.parse(data);
                     console.log('CADAgent: Received init message:', initData);
-                    
+
                     // Update backend configuration if provided
                     if (initData.backend_url) {
                         BACKEND_CONFIG.baseUrl = initData.backend_url;
                         console.log('CADAgent: Backend URL updated to:', initData.backend_url);
                     }
-                    
+
+                    // Handle cached API key information
+                    if (initData.has_cached_api_key && initData.cached_key_display) {
+                        console.log(`CADAgent: Found cached API key from ${initData.cached_key_source}`);
+
+                        // Show the cached key overlay instead of modifying the input
+                        showCachedKeyOverlay();
+
+                        // Set current API key internally (will be retrieved from cache when needed)
+                        currentApiKey = '__CACHED_KEY__'; // Placeholder indicating we have a cached key
+
+                        // Enable send button if chat input has text
+                        const chatInput = document.getElementById('chatInput');
+                        const sendButton = document.getElementById('sendButton');
+                        if (chatInput && sendButton) {
+                            sendButton.disabled = !chatInput.value.trim() || isProcessing;
+                        }
+
+                        // Collapse API key section since we have a cached key
+                        const apiKeySection = document.getElementById('apiKeySection');
+                        if (apiKeySection) {
+                            apiKeySection.classList.add('collapsed');
+                        }
+
+                        console.log('CADAgent: UI updated to show cached API key overlay');
+                    } else {
+                        console.log('CADAgent: No cached API key found, showing API key section');
+                        // Ensure API key section is visible if no cached key
+                        const apiKeySection = document.getElementById('apiKeySection');
+                        if (apiKeySection) {
+                            apiKeySection.classList.remove('collapsed');
+                        }
+                    }
+
                     // Don't add system message to chat - keep chat clean for actual conversations
                     // Mark connection as established on init as well
                     updateConnectionStatus('connected');

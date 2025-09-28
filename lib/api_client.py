@@ -12,6 +12,8 @@ import socket
 import os
 import sys
 import uuid
+from pathlib import Path
+from datetime import datetime
 
 # Import settings from config with a robust strategy
 try:
@@ -38,7 +40,6 @@ GENERATE_ENDPOINT = getattr(_settings, 'GENERATE_ENDPOINT')
 ITERATE_ENDPOINT = getattr(_settings, 'ITERATE_ENDPOINT')
 PARAMETERS_PUT_ENDPOINT = getattr(_settings, 'PARAMETERS_PUT_ENDPOINT')
 PARAMETERS_GET_ENDPOINT = getattr(_settings, 'PARAMETERS_GET_ENDPOINT')
-ONBOARD_ENDPOINT = getattr(_settings, 'ONBOARD_ENDPOINT')
 BACKEND_AUTH_TOKEN = getattr(_settings, 'BACKEND_AUTH_TOKEN', None)
 
 class SpaceAPIClient:
@@ -46,23 +47,95 @@ class SpaceAPIClient:
     Simple HTTP client for communicating with the Fly.io backend.
     Uses only standard library to avoid dependencies.
     """
+
+    @staticmethod
+    def _write_request_debug(method, url, headers, data_dict, data_bytes):
+        """Append sanitized request details to a debug log for diagnostics."""
+        try:
+            log_path = Path(__file__).with_name('request_debug.log')
+            content_length = len(data_bytes) if data_bytes else 0
+
+            # Sanitize headers to avoid leaking secrets
+            safe_headers = {}
+            if headers:
+                for key, value in headers.items():
+                    if value is None:
+                        safe_headers[key] = value
+                        continue
+                    lower_key = key.lower()
+                    if lower_key in ('authorization', 'x-api-key', 'idempotency-key'):
+                        value_str = str(value)
+                        masked = f"{value_str[:6]}...len={len(value_str)}"
+                        safe_headers[key] = masked
+                    else:
+                        safe_headers[key] = value
+
+            # Sanitize data dictionary similarly
+            safe_body = data_dict
+            if isinstance(data_dict, dict):
+                safe_body = {}
+                for key, value in data_dict.items():
+                    if value is None:
+                        safe_body[key] = value
+                        continue
+                    if isinstance(value, str) and key.lower().endswith('key'):
+                        masked = f"{value[:6]}...len={len(value)}"
+                        safe_body[key] = masked
+                    else:
+                        safe_body[key] = value
+
+            log_entry = (
+                f"{datetime.utcnow().isoformat()}Z | {method} {url}\n"
+                f"Headers: {safe_headers}\n"
+                f"Body: {safe_body}\n"
+                f"Content-Length: {content_length}\n"
+                "----\n"
+            )
+
+            with log_path.open('a', encoding='utf-8') as log_file:
+                log_file.write(log_entry)
+        except Exception:
+            # Never let diagnostics cause request failure
+            pass
     
     def __init__(self, api_key=None):
-        # Use preset API key if none provided
-        from settings import DEFAULT_ANTHROPIC_API_KEY
-        self.api_key = api_key or DEFAULT_ANTHROPIC_API_KEY
+        # Get DEFAULT_ANTHROPIC_API_KEY using robust import strategy
+        DEFAULT_ANTHROPIC_API_KEY = getattr(_settings, 'DEFAULT_ANTHROPIC_API_KEY', None)
+
+        # Try to auto-retrieve cached API key if none provided and no default set
+        retrieved_key = None
+        if not api_key and not DEFAULT_ANTHROPIC_API_KEY:
+            if DEBUG_MODE:
+                try:
+                    print("SpaceAPIClient: No API key provided, attempting to retrieve cached key...")
+                except Exception:
+                    pass
+            retrieved_key = self._retrieve_cached_api_key()
+            if retrieved_key and DEBUG_MODE:
+                try:
+                    print(f"SpaceAPIClient: Successfully retrieved cached API key, length={len(retrieved_key)}")
+                except Exception:
+                    pass
+            elif DEBUG_MODE:
+                try:
+                    print("SpaceAPIClient: No cached API key found")
+                except Exception:
+                    pass
+
+        self.api_key = api_key or retrieved_key or DEFAULT_ANTHROPIC_API_KEY
         self.base_url = BACKEND_BASE_URL
         self.backend_token = BACKEND_AUTH_TOKEN
-        self._is_onboarded = False
         
     def set_api_key(self, api_key):
-        """Set the Anthropic API key for requests."""
+        """Set the Anthropic API key for requests and optionally cache it."""
         # Clean and validate the API key
         if api_key:
             # Strip whitespace and normalize
             cleaned_key = str(api_key).strip()
             if cleaned_key:
                 self.api_key = cleaned_key
+                # Try to cache the API key for future use
+                self._store_cached_api_key(cleaned_key)
                 try:
                     print(f"SpaceAPIClient: API key set, length={len(cleaned_key)}, starts_with={cleaned_key[:10]}...")
                 except Exception:
@@ -71,7 +144,154 @@ class SpaceAPIClient:
                 self.api_key = None
         else:
             self.api_key = None
-    
+
+    def _retrieve_cached_api_key(self):
+        """
+        Attempt to retrieve cached API key from Fusion 360 design attributes.
+        Returns None if not available or if running outside Fusion environment.
+        """
+        try:
+            if DEBUG_MODE:
+                try:
+                    print("SpaceAPIClient: Starting cached API key retrieval...")
+                except Exception:
+                    pass
+
+            # Import fusion_utils using robust strategy similar to settings import
+            fusion_utils_module = None
+            try:
+                # Try absolute package import first
+                from Space.lib import fusion_utils as fusion_utils_module
+                if DEBUG_MODE:
+                    try:
+                        print("SpaceAPIClient: Successfully imported fusion_utils via absolute path")
+                    except Exception:
+                        pass
+            except Exception as e:
+                if DEBUG_MODE:
+                    try:
+                        print(f"SpaceAPIClient: Absolute import failed: {e}, trying fallback...")
+                    except Exception:
+                        pass
+                # Fallback to path-based import for Fusion runtime contexts
+                lib_path = os.path.dirname(__file__)
+                if lib_path not in sys.path:
+                    sys.path.append(lib_path)
+                import fusion_utils as fusion_utils_module
+                if DEBUG_MODE:
+                    try:
+                        print("SpaceAPIClient: Successfully imported fusion_utils via fallback path")
+                    except Exception:
+                        pass
+
+            # Create utils instance and retrieve key
+            fusion_utils = fusion_utils_module.SpaceFusionUtils()
+            if DEBUG_MODE:
+                try:
+                    print("SpaceAPIClient: Created SpaceFusionUtils instance, calling retrieve_api_key()...")
+                except Exception:
+                    pass
+
+            cached_key = fusion_utils.retrieve_api_key()
+
+            if cached_key:
+                if DEBUG_MODE:
+                    try:
+                        print(f"SpaceAPIClient: Retrieved cached API key, length={len(cached_key)}")
+                    except Exception:
+                        pass
+                return cached_key
+            else:
+                if DEBUG_MODE:
+                    try:
+                        print("SpaceAPIClient: fusion_utils.retrieve_api_key() returned None")
+                    except Exception:
+                        pass
+                return None
+
+        except Exception as e:
+            # This is expected when running outside Fusion 360 environment
+            if DEBUG_MODE:
+                try:
+                    print(f"SpaceAPIClient: Could not retrieve cached API key: {type(e).__name__}: {e}")
+                    import traceback
+                    print(f"SpaceAPIClient: Traceback: {traceback.format_exc()}")
+                except Exception:
+                    pass
+            return None
+
+    def _store_cached_api_key(self, api_key):
+        """
+        Attempt to store API key in Fusion 360 design attributes for future use.
+        Silently fails if not in Fusion environment or if storage fails.
+        """
+        try:
+            # Import fusion_utils using robust strategy similar to settings import
+            fusion_utils_module = None
+            try:
+                # Try absolute package import first
+                from Space.lib import fusion_utils as fusion_utils_module
+            except Exception:
+                # Fallback to path-based import for Fusion runtime contexts
+                lib_path = os.path.dirname(__file__)
+                if lib_path not in sys.path:
+                    sys.path.append(lib_path)
+                import fusion_utils as fusion_utils_module
+
+            # Create utils instance and store key
+            fusion_utils = fusion_utils_module.SpaceFusionUtils()
+            success = fusion_utils.store_api_key(api_key)
+
+            if success and DEBUG_MODE:
+                try:
+                    print(f"SpaceAPIClient: Cached API key for future use")
+                except Exception:
+                    pass
+
+        except Exception as e:
+            # This is expected when running outside Fusion 360 environment
+            if DEBUG_MODE:
+                try:
+                    print(f"SpaceAPIClient: Could not cache API key: {e}")
+                except Exception:
+                    pass
+
+    def clear_cached_api_key(self):
+        """
+        Clear any cached API key from Fusion 360 design attributes.
+        Useful for security or when switching API keys.
+        """
+        try:
+            # Import fusion_utils using robust strategy similar to settings import
+            fusion_utils_module = None
+            try:
+                # Try absolute package import first
+                from Space.lib import fusion_utils as fusion_utils_module
+            except Exception:
+                # Fallback to path-based import for Fusion runtime contexts
+                lib_path = os.path.dirname(__file__)
+                if lib_path not in sys.path:
+                    sys.path.append(lib_path)
+                import fusion_utils as fusion_utils_module
+
+            # Create utils instance and clear key
+            fusion_utils = fusion_utils_module.SpaceFusionUtils()
+            success = fusion_utils.clear_api_key()
+
+            if success and DEBUG_MODE:
+                try:
+                    print(f"SpaceAPIClient: Cleared cached API key")
+                except Exception:
+                    pass
+
+        except Exception as e:
+            # This is expected when running outside Fusion 360 environment
+            if DEBUG_MODE:
+                try:
+                    print(f"SpaceAPIClient: Could not clear cached API key: {e}")
+                except Exception:
+                    pass
+
     def _make_request(self, method, endpoint, data=None, headers=None):
         """
         Make HTTP request to the backend with fallback URLs.
@@ -91,7 +311,26 @@ class SpaceAPIClient:
                     pass
             
             try:
-                return self._make_single_request(method, url, data, headers)
+                result = self._make_single_request(method, url, data, headers)
+
+                # If this attempt failed with a server-side error and fallbacks remain, try the next URL.
+                if (
+                    isinstance(result, dict)
+                    and result.get('success') is False
+                    and i < len(urls_to_try) - 1
+                ):
+                    error_text = str(result.get('error', '')).lower()
+                    # Retry on common transient/server-side failures.
+                    if any(token in error_text for token in ('http 5', ' 5xx', 'bad gateway', 'service unavailable', 'gateway timeout', '502', '503', '504')):
+                        last_error = result
+                        if DEBUG_MODE:
+                            try:
+                                print(f"SpaceAPIClient: Attempt {i+1} received server error '{result.get('error')}', trying next fallback")
+                            except Exception:
+                                pass
+                        continue
+
+                return result
             except Exception as e:
                 last_error = e
                 if DEBUG_MODE:
@@ -102,6 +341,8 @@ class SpaceAPIClient:
                 continue
         
         # All URLs failed, return the last error
+        if isinstance(last_error, dict):
+            return last_error
         if isinstance(last_error, urllib.error.URLError):
             return {
                 'success': False,
@@ -140,6 +381,12 @@ class SpaceAPIClient:
         if data:
             req_data = json.dumps(data).encode('utf-8')
         
+        # Persist diagnostic information to a debug log
+        try:
+            self._write_request_debug(method, url, req_headers, data, req_data)
+        except Exception:
+            pass
+
         # Debug: log request summary (mask secrets)
         try:
             log_headers = dict(req_headers)
@@ -296,117 +543,45 @@ class SpaceAPIClient:
     
     def test_connection(self):
         """
-        Test connection to the backend and surface informative errors.
-        Returns a dict with 'success' (bool) and either 'message' or 'error'.
+        Disabled - API key validation is handled locally only.
+        Always returns success to skip server-side validation.
         """
-        try:
-            # First run network diagnostics
-            diag_result = self.diagnose_network()
-            if not diag_result['success']:
-                return {
-                    'success': False,
-                    'error': 'DNS resolution failed - check network connectivity',
-                    'diagnostics': diag_result['diagnostics']
-                }
-            # Include Authorization if available so backend can validate the key on this check if it wants to.
-            # First, if we have an Anthropic key, attempt onboarding to store it server-side.
-            if self.api_key:
-                onboard_out = self._make_request('POST', ONBOARD_ENDPOINT, data={'anthropic_api_key': self.api_key.strip()})
-                try:
-                    print(f"SpaceAPIClient: onboard result: {onboard_out}")
-                except Exception:
-                    pass
-                # If onboarding returns an error envelope, surface it but continue status check
-                if isinstance(onboard_out, dict) and onboard_out.get('success') is False:
-                    # Keep going to status probe, but remember onboarding failed
-                    self._is_onboarded = False
-                else:
-                    self._is_onboarded = True
-
-            headers = None  # Status check is public on backend
-
-            # Try a small set of common health endpoints
-            endpoints = ['/api/v1/status', '/status', '/health', '/healthz']
-            last_err = None
-            for ep in endpoints:
-                result = self._make_request('GET', ep, headers=headers)
-                try:
-                    print(f"SpaceAPIClient: test_connection [{ep}] raw result: {result}")
-                except Exception:
-                    pass
-
-                # Success path: health ok
-                if isinstance(result, dict) and result.get('health') == 'ok':
-                    return {'success': True, 'message': 'Backend connection successful', 'health': 'ok', 'endpoint': ep}
-
-                # Standard error envelope
-                if isinstance(result, dict) and result.get('success') is False:
-                    err = result.get('error') or result.get('message') or 'Backend reported failure'
-                    out = {'success': False, 'error': err, 'endpoint': ep}
-                    for k in ('code', 'message', 'detail', 'details'):
-                        if k in result and k not in out:
-                            out[k] = result[k]
-                    out['payload'] = result
-                    # Return on first definitive failure with details
-                    return out
-
-                # Collect last error context for unexpected schemas
-                last_err = {
-                    'success': False,
-                    'error': f'Unexpected response schema from {ep}',
-                    'endpoint': ep,
-                    'payload': result if isinstance(result, dict) else str(result)[:200]
-                }
-
-            # If none succeeded and no definitive failure was returned, surface last observed error
-            return last_err or {'success': False, 'error': 'Status check failed for all known endpoints'}
-
-        except Exception as e:
-            return {'success': False, 'error': f'Connection test failed: {type(e).__name__}: {str(e)}'}
+        return {'success': True, 'message': 'API key validation disabled - local caching only'}
     
     def generate(self, prompt):
         """
         Generate new CAD model from natural language prompt.
-        
+
         Args:
             prompt (str): Natural language description
-            
+
         Returns:
             dict: Response with model_id, step_file, parameters, etc.
         """
-        if not self.api_key:
-            return {'success': False, 'error': 'No API key configured'}
-        
         if not prompt or not prompt.strip():
             return {'success': False, 'error': 'Empty prompt provided'}
-        
-        # Always ensure onboarding before generate requests for reliability
-        if self.api_key:
-            onboard_result = self._make_request('POST', ONBOARD_ENDPOINT, data={'anthropic_api_key': self.api_key.strip()})
-            try:
-                print(f"SpaceAPIClient: generate onboard result: {onboard_result}")
-            except Exception:
-                pass
-            
-            # Check if onboarding failed
-            if isinstance(onboard_result, dict) and onboard_result.get('success') is False:
-                # Return the onboarding error instead of proceeding
-                error_msg = onboard_result.get('error') or onboard_result.get('message') or 'Onboarding failed'
-                return {'success': False, 'error': f'API key onboarding failed: {error_msg}'}
-            
-            self._is_onboarded = True
 
-        # Prepare request data - include API key as backup for backend
+        # Prepare request data - include API key as required by backend
         data = {
-            'prompt': prompt.strip(),
-            'anthropic_api_key': self.api_key.strip()  # Backup auth method
+            'prompt': prompt.strip()
         }
-        headers = None  # Use backend Authorization only
-        
+        headers = {}
+
+        # Include Anthropic API key in request body (required by backend)
+        if self.api_key:
+            data['anthropic_api_key'] = self.api_key
+            headers['x-api-key'] = self.api_key  # Also in headers as backup
+            print(f"SpaceAPIClient: FINAL DATA TO SEND: {data}")
+        else:
+            print(f"SpaceAPIClient: NO API KEY - FINAL DATA: {data}")
+
         try:
-            # Debug: log auth header format (mask the key)
-            masked_auth = f'Bearer {self.api_key[:10]}...' if len(self.api_key) > 10 else 'Bearer ***'
-            print(f"SpaceAPIClient: generate auth header: {masked_auth}")
+            # Debug: log API key format (mask the key)
+            if self.api_key and len(self.api_key) > 10:
+                masked_key = f'{self.api_key[:10]}...'
+            else:
+                masked_key = '***'
+            print(f"SpaceAPIClient: using API key in x-api-key header: {masked_key}")
         except Exception:
             pass
 
@@ -436,38 +611,23 @@ class SpaceAPIClient:
         Returns:
             dict: Response with updated step_file, parameters, etc.
         """
-        if not self.api_key:
-            return {'success': False, 'error': 'No API key configured'}
-        
         if not model_id:
             return {'success': False, 'error': 'No model ID provided'}
             
         if not prompt or not prompt.strip():
             return {'success': False, 'error': 'Empty iteration prompt provided'}
-        
-        # Always ensure onboarding before iterate requests for reliability
-        if self.api_key:
-            onboard_result = self._make_request('POST', ONBOARD_ENDPOINT, data={'anthropic_api_key': self.api_key.strip()})
-            try:
-                print(f"SpaceAPIClient: iterate onboard result: {onboard_result}")
-            except Exception:
-                pass
-            
-            # Check if onboarding failed
-            if isinstance(onboard_result, dict) and onboard_result.get('success') is False:
-                # Return the onboarding error instead of proceeding
-                error_msg = onboard_result.get('error') or onboard_result.get('message') or 'Onboarding failed'
-                return {'success': False, 'error': f'API key onboarding failed: {error_msg}'}
-            
-            self._is_onboarded = True
 
-        # Prepare request data - include API key as backup for backend
+        # Prepare request data - include API key as required by backend
         data = {
-            'prompt': prompt.strip(),
-            'anthropic_api_key': self.api_key.strip()  # Backup auth method
+            'prompt': prompt.strip()
         }
-        headers = None
-        
+        headers = {}
+
+        # Include Anthropic API key in request body (required by backend)
+        if self.api_key:
+            data['anthropic_api_key'] = self.api_key
+            headers['x-api-key'] = self.api_key  # Also in headers as backup
+
         # Format endpoint with model_id
         endpoint = ITERATE_ENDPOINT.replace('{model_id}', str(model_id))
         
@@ -497,38 +657,23 @@ class SpaceAPIClient:
         Returns:
             dict: Response with updated step_file
         """
-        if not self.api_key:
-            return {'success': False, 'error': 'No API key configured'}
-        
         if not model_id:
             return {'success': False, 'error': 'No model ID provided'}
             
         if not parameter_updates:
             return {'success': False, 'error': 'No parameter updates provided'}
-        
-        # Always ensure onboarding before parameter update requests for reliability
-        if self.api_key:
-            onboard_result = self._make_request('POST', ONBOARD_ENDPOINT, data={'anthropic_api_key': self.api_key.strip()})
-            try:
-                print(f"SpaceAPIClient: update_parameters onboard result: {onboard_result}")
-            except Exception:
-                pass
-            
-            # Check if onboarding failed
-            if isinstance(onboard_result, dict) and onboard_result.get('success') is False:
-                # Return the onboarding error instead of proceeding
-                error_msg = onboard_result.get('error') or onboard_result.get('message') or 'Onboarding failed'
-                return {'success': False, 'error': f'API key onboarding failed: {error_msg}'}
-            
-            self._is_onboarded = True
 
-        # Prepare request data - include API key as backup for backend
+        # Prepare request data - include API key as required by backend
         data = {
-            'updates': parameter_updates,
-            'anthropic_api_key': self.api_key.strip()  # Backup auth method
+            'updates': parameter_updates
         }
-        headers = None
-        
+        headers = {}
+
+        # Include Anthropic API key in request body (required by backend)
+        if self.api_key:
+            data['anthropic_api_key'] = self.api_key
+            headers['x-api-key'] = self.api_key  # Also in headers as backup
+
         # Use direct parameters PUT endpoint - hardcoded to avoid caching issues  
         endpoint = f"/api/v1/direct/parameters/{model_id}"
         

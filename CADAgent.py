@@ -176,9 +176,36 @@ def run(context):
             _fusion_utils = SpaceFusionUtils()
         if SpaceAPIClient is not None:
             try:
+                client_module = sys.modules.get(SpaceAPIClient.__module__)
+                if client_module and hasattr(client_module, '__file__'):
+                    _app.log(f'CADAgent: SpaceAPIClient module path: {client_module.__file__}')
+            except Exception as client_path_error:
+                _app.log(f'CADAgent: Could not determine SpaceAPIClient module path: {client_path_error}')
+
+            try:
                 _api_client = SpaceAPIClient()
             except Exception:
                 _api_client = None
+
+        # Auto-retrieve cached API key from Fusion attributes on startup
+        global _cached_api_key
+        if _fusion_utils and not _cached_api_key:
+            try:
+                startup_key = _fusion_utils.retrieve_api_key()
+                if startup_key:
+                    _cached_api_key = startup_key
+                    _app.log('CADAgent: Auto-retrieved cached API key from Fusion attributes on startup')
+                    # Also set in API client if available
+                    if _api_client:
+                        try:
+                            _api_client.set_api_key(startup_key)
+                            _app.log('CADAgent: API client initialized with cached key')
+                        except Exception as client_init_e:
+                            _app.log(f'CADAgent: Warning - could not initialize API client with cached key: {client_init_e}')
+                else:
+                    _app.log('CADAgent: No cached API key found in Fusion attributes on startup')
+            except Exception as startup_e:
+                _app.log(f'CADAgent: Warning - could not retrieve cached API key on startup: {startup_e}')
         
         # Create the palette for HTML/JS frontend
         palette_id = 'SpaceAICadPaletteV23'
@@ -320,12 +347,25 @@ class HTMLEventHandler(adsk.core.HTMLEventHandler):
                 # HTML reports it is ready
                 _app.log(f"CADAgent: HTML reported ready with data: {request_data}")
                 try:
+                    # Check if we have a cached API key to inform the UI
+                    cached_key_info = self.handle_get_cached_api_key({})
+                    has_cached_key = cached_key_info.get('success') and cached_key_info.get('has_cached_key', False)
+                    cached_key_source = cached_key_info.get('source', 'none') if has_cached_key else None
+
+                    if has_cached_key:
+                        _app.log(f'CADAgent: Informing UI about cached API key from {cached_key_source}')
+                    else:
+                        _app.log('CADAgent: No cached API key to report to UI')
+
                     initial_message = json.dumps({
                         'type': 'init',
                         'message': 'CADAgent AI CAD ready - Fusion API mode',
                         'version': 'v2.0.0',
                         'backend': 'python-fusion-api-only',
-                        'backend_url': _backend_url
+                        'backend_url': _backend_url,
+                        'has_cached_api_key': has_cached_key,
+                        'cached_key_source': cached_key_source,
+                        'cached_key_display': 'Using cached API key' if has_cached_key else None
                     })
                     ret = _palette.sendInfoToHTML('init', initial_message) if _palette else ''
                     _app.log(f'CADAgent: Sent init to HTML; handler returned: {ret}')
@@ -372,44 +412,25 @@ class HTMLEventHandler(adsk.core.HTMLEventHandler):
                 html_args.returnData = json.dumps(result)
             
             elif action == 'validate_api_key':
-                # Validate API key by testing backend connection (async)
+                # Store API key locally without server validation
                 try:
-                    html_args.returnData = json.dumps({'success': True, 'processing': True, 'message': 'validation started'})
-                except Exception:
-                    html_args.returnData = '{"success": true, "processing": true}'
-
-                def validate_in_background():
-                    try:
-                        api_key = request_data.get('api_key', '')
-                        if not api_key:
-                            signal_html_from_background('api_validation_result', {
-                                'success': False, 
-                                'error': 'No API key provided'
-                            })
-                            return
-
-                        result = None
-                        try:
-                            if _api_client is not None:
-                                try:
-                                    _api_client.set_api_key(api_key)
-                                except Exception:
-                                    pass
-                                result = _api_client.test_connection()
-                            else:
-                                result = self.handle_validate_api_key({'api_key': api_key})
-                        except Exception as e:
-                            result = {'success': False, 'error': f'Validation failed: {str(e)}'}
-
-                        signal_html_from_background('api_validation_result', result)
-                    except Exception as e:
-                        signal_html_from_background('api_validation_result', {
-                            'success': False, 
-                            'error': str(e)
-                        })
-
-                t = threading.Thread(target=validate_in_background, daemon=True)
-                t.start()
+                    api_key = request_data.get('api_key', '')
+                    if not api_key:
+                        html_args.returnData = json.dumps({'success': False, 'error': 'No API key provided'})
+                    else:
+                        # Just store the key locally and return success immediately
+                        result = self.handle_store_api_key({'api_key': api_key})
+                        if result.get('success'):
+                            html_args.returnData = json.dumps({'success': True, 'message': 'API key saved locally'})
+                            # Signal success to HTML immediately
+                            signal_html_from_background('api_validation_result', {'success': True, 'message': 'API key saved locally'})
+                        else:
+                            html_args.returnData = json.dumps(result)
+                            signal_html_from_background('api_validation_result', result)
+                except Exception as e:
+                    error_result = {'success': False, 'error': f'Failed to save API key: {str(e)}'}
+                    html_args.returnData = json.dumps(error_result)
+                    signal_html_from_background('api_validation_result', error_result)
                 
             elif action == 'generate_model':
                 # Kick off generation in background, ACK immediately
@@ -421,9 +442,31 @@ class HTMLEventHandler(adsk.core.HTMLEventHandler):
                 def generate_in_background():
                     try:
                         prompt = request_data.get('prompt', '')
-                        api_key = request_data.get('anthropic_api_key', '') or os.environ.get('ANTHROPIC_API_KEY', '')
-                        
-                        # Fallback to default API key from settings if none provided
+                        api_key = request_data.get('anthropic_api_key', '').strip()
+
+                        _app.log(f'CADAgent: DEBUG - request_data keys: {list(request_data.keys())}')
+                        _app.log(f'CADAgent: DEBUG - anthropic_api_key from UI: "{api_key}", length: {len(api_key)}')
+                        _app.log(f'CADAgent: DEBUG - full request_data: {request_data}')
+
+                        # If no API key provided from UI, retrieve from all cache sources
+                        if not api_key:
+                            _app.log('CADAgent: No API key from UI, checking all cache sources...')
+                            try:
+                                cache_result = self.handle_get_cached_api_key({})
+                                if cache_result.get('success') and cache_result.get('api_key'):
+                                    api_key = cache_result['api_key']
+                                    _app.log(f'CADAgent: Using cached API key from {cache_result.get("source", "unknown")}')
+                                else:
+                                    _app.log('CADAgent: No cached API key found in any source')
+                            except Exception as cache_e:
+                                _app.log(f'CADAgent: Error retrieving cached API key: {cache_e}')
+
+                        # Final fallback to environment and settings
+                        if not api_key:
+                            api_key = os.environ.get('ANTHROPIC_API_KEY', '')
+                            if api_key:
+                                _app.log('CADAgent: Using API key from environment variable')
+
                         if not api_key:
                             try:
                                 config_path = os.path.join(os.path.dirname(__file__), 'config')
@@ -431,7 +474,8 @@ class HTMLEventHandler(adsk.core.HTMLEventHandler):
                                     sys.path.append(config_path)
                                 from settings import DEFAULT_ANTHROPIC_API_KEY
                                 api_key = DEFAULT_ANTHROPIC_API_KEY
-                                _app.log('CADAgent: Using default API key from settings')
+                                if api_key:
+                                    _app.log('CADAgent: Using default API key from settings')
                             except ImportError:
                                 pass
                         
@@ -457,15 +501,33 @@ class HTMLEventHandler(adsk.core.HTMLEventHandler):
                         result = None
                         try:
                             if _api_client is not None:
+                                _app.log('CADAgent: Using API client for generation')
                                 try:
                                     _api_client.set_api_key(api_key)
-                                except Exception:
-                                    pass
-                                result = _api_client.generate(prompt)
+                                    _app.log('CADAgent: API key set on client successfully')
+                                    try:
+                                        key_length = len(_api_client.api_key or '')
+                                    except Exception:
+                                        key_length = 0
+                                    _app.log(f'CADAgent: API client key length after set: {key_length}')
+                                except Exception as set_key_e:
+                                    _app.log(f'CADAgent: Failed to set API key on client: {set_key_e}')
+                                
+                                _app.log(f'CADAgent: About to call _api_client.generate with prompt: "{prompt}"')
+                                try:
+                                    result = _api_client.generate(prompt)
+                                    _app.log('CADAgent: API client generate call completed successfully')
+                                except Exception as gen_e:
+                                    _app.log(f'CADAgent: EXCEPTION in _api_client.generate(): {gen_e}')
+                                    _app.log(f'CADAgent: Exception type: {type(gen_e).__name__}')
+                                    _app.log(f'CADAgent: Full traceback: {traceback.format_exc()}')
+                                    raise gen_e  # Re-raise to be caught by outer exception handler
                             else:
-                                # Fallback: use existing handler (urllib) in thread
-                                result = self.handle_generate_model({'prompt': prompt, 'anthropic_api_key': api_key})
+                                _app.log('CADAgent: API client is None, using fallback')
+                                # Fallback: use existing handler (urllib) in thread - no API key needed
+                                result = self.handle_generate_model({'prompt': prompt})
                         except Exception as e:
+                            _app.log(f'CADAgent: Exception in generation: {e}')
                             result = {'success': False, 'error': f'Generation failed: {str(e)}'}
                             
                         # API response received - log basic info
@@ -752,9 +814,27 @@ class HTMLEventHandler(adsk.core.HTMLEventHandler):
                     try:
                         model_id = request_data.get('model_id', '')
                         prompt = request_data.get('prompt', '')
-                        api_key = request_data.get('anthropic_api_key', '') or os.environ.get('ANTHROPIC_API_KEY', '')
-                        
-                        # Fallback to default API key from settings if none provided
+                        api_key = request_data.get('anthropic_api_key', '').strip()
+
+                        # If no API key provided from UI, retrieve from all cache sources
+                        if not api_key:
+                            _app.log('CADAgent: No API key from UI for iteration, checking all cache sources...')
+                            try:
+                                cache_result = self.handle_get_cached_api_key({})
+                                if cache_result.get('success') and cache_result.get('api_key'):
+                                    api_key = cache_result['api_key']
+                                    _app.log(f'CADAgent: Using cached API key from {cache_result.get("source", "unknown")} for iteration')
+                                else:
+                                    _app.log('CADAgent: No cached API key found in any source for iteration')
+                            except Exception as cache_e:
+                                _app.log(f'CADAgent: Error retrieving cached API key for iteration: {cache_e}')
+
+                        # Final fallback to environment and settings
+                        if not api_key:
+                            api_key = os.environ.get('ANTHROPIC_API_KEY', '')
+                            if api_key:
+                                _app.log('CADAgent: Using API key from environment variable for iteration')
+
                         if not api_key:
                             try:
                                 config_path = os.path.join(os.path.dirname(__file__), 'config')
@@ -762,7 +842,8 @@ class HTMLEventHandler(adsk.core.HTMLEventHandler):
                                     sys.path.append(config_path)
                                 from settings import DEFAULT_ANTHROPIC_API_KEY
                                 api_key = DEFAULT_ANTHROPIC_API_KEY
-                                _app.log('CADAgent: Using default API key from settings for iteration')
+                                if api_key:
+                                    _app.log('CADAgent: Using default API key from settings for iteration')
                             except ImportError:
                                 pass
                         
@@ -1103,7 +1184,12 @@ class HTMLEventHandler(adsk.core.HTMLEventHandler):
                 # Retrieve cached API key
                 result = self.handle_get_cached_api_key(request_data)
                 html_args.returnData = json.dumps(result)
-            
+
+            elif action == 'clear_cached_api_key':
+                # Clear all cached API keys
+                result = self.handle_clear_cached_api_key(request_data)
+                html_args.returnData = json.dumps(result)
+
             elif action == 'show_notification':
                 # Show native Fusion 360 notification
                 result = self.handle_show_notification(request_data)
@@ -1421,58 +1507,24 @@ class HTMLEventHandler(adsk.core.HTMLEventHandler):
     
     def handle_validate_api_key(self, request_data):
         """
-        Validate API key by testing connection to SpaceCad backend.
-        This follows Fusion 360 best practices: Python handles network requests.
+        DISABLED - API key validation is now local-only.
+        Just stores the API key locally without any server validation.
         """
         try:
             api_key = request_data.get('api_key', '')
             if not api_key:
                 return {'success': False, 'error': 'No API key provided'}
             
-            # Backend URL from config
-            config_path = os.path.join(os.path.dirname(__file__), 'config')
-            if config_path not in sys.path:
-                sys.path.append(config_path)
-            from settings import BACKEND_BASE_URL
-            backend_url = BACKEND_BASE_URL
-            status_endpoint = f"{backend_url}/api/v1/status"
-            
-            # Create HTTP request
-            req = urllib.request.Request(
-                status_endpoint,
-                headers={
-                    'Accept': 'application/json',
-                    'User-Agent': 'Space-Fusion-Addon/1.0'
-                }
-            )
-            
-            # Make request with timeout
-            try:
-                with urllib.request.urlopen(req, timeout=10) as response:
-                    if response.status == 200:
-                        data = json.loads(response.read().decode('utf-8'))
-                        if data.get('health') == 'ok':
-                            _app.log('CADAgent: API key validation successful - backend is healthy')
-                            return {
-                                'success': True,
-                                'message': 'Backend connection verified',
-                                'backend_data': data
-                            }
-                        else:
-                            return {'success': False, 'error': 'Backend health check failed'}
-                    else:
-                        return {'success': False, 'error': f'Backend returned HTTP {response.status}'}
-                        
-            except urllib.error.URLError as e:
-                _app.log(f'CADAgent: Network error during API validation: {e}')
-                return {'success': False, 'error': f'Network error: {str(e)}'}
-            except urllib.error.HTTPError as e:
-                _app.log(f'CADAgent: HTTP error during API validation: {e}')
-                return {'success': False, 'error': f'HTTP error: {e.code} {e.reason}'}
+            # Store the API key locally without any server validation
+            store_result = self.handle_store_api_key({'api_key': api_key})
+            if store_result.get('success'):
+                return {'success': True, 'message': 'API key saved locally (no server validation)'}
+            else:
+                return store_result
                 
         except Exception as e:
-            _app.log(f'CADAgent: Error validating API key: {e}')
-            return {'success': False, 'error': f'Validation failed: {str(e)}'}
+            _app.log(f'CADAgent: Error storing API key: {e}')
+            return {'success': False, 'error': f'Failed to store API key: {str(e)}'}
     
     def handle_generate_model(self, request_data):
         """
@@ -1480,26 +1532,22 @@ class HTMLEventHandler(adsk.core.HTMLEventHandler):
         Following Fusion 360 best practices: Python handles all network requests.
         """
         try:
-            prompt = request_data.get('prompt', '')
-            api_key = request_data.get('anthropic_api_key', '') or os.environ.get('ANTHROPIC_API_KEY', '')
+            prompt = (request_data.get('prompt', '') or '').strip()
             
             if not prompt:
                 return {'success': False, 'error': 'No prompt provided'}
-            if not api_key:
-                return {'success': False, 'error': 'No API key provided (check .env file or user input)'}
             
             # Backend configuration
             config_path = os.path.join(os.path.dirname(__file__), 'config')
             if config_path not in sys.path:
                 sys.path.append(config_path)
-            from settings import BACKEND_BASE_URL
+            from settings import BACKEND_BASE_URL  # type: ignore[import-not-found]
             backend_url = BACKEND_BASE_URL
             generate_endpoint = f"{backend_url}/api/v1/direct/generate"
             
             # Prepare request data
             request_payload = {
-                'prompt': prompt,
-                'anthropic_api_key': api_key
+                'prompt': prompt
             }
             
             # Create HTTP request
@@ -1552,14 +1600,11 @@ class HTMLEventHandler(adsk.core.HTMLEventHandler):
         try:
             model_id = request_data.get('model_id', '')
             prompt = request_data.get('prompt', '')
-            api_key = request_data.get('anthropic_api_key', '') or os.environ.get('ANTHROPIC_API_KEY', '')
             
             if not model_id:
                 return {'success': False, 'error': 'No model ID provided'}
             if not prompt:
                 return {'success': False, 'error': 'No prompt provided'}
-            if not api_key:
-                return {'success': False, 'error': 'No API key provided (check .env file or user input)'}
             
             # Backend configuration
             config_path = os.path.join(os.path.dirname(__file__), 'config')
@@ -1571,8 +1616,7 @@ class HTMLEventHandler(adsk.core.HTMLEventHandler):
             
             # Prepare request data
             request_payload = {
-                'prompt': prompt,
-                'anthropic_api_key': api_key
+                'prompt': prompt
             }
             
             # Create HTTP request
@@ -1619,69 +1663,190 @@ class HTMLEventHandler(adsk.core.HTMLEventHandler):
     
     def handle_store_api_key(self, request_data):
         """
-        Store API key in memory cache (persists until Fusion 360 restart).
-        This provides session-level persistence for the API key.
+        Store API key both in memory cache and Fusion design attributes for persistence.
+        This provides both session-level and cross-session persistence.
         """
         try:
             global _cached_api_key
-            
+
             api_key = request_data.get('api_key', '')
             if not api_key:
                 return {'success': False, 'error': 'No API key provided'}
-            
-            # Store in global cache
+
+            # Store in global cache (for current session)
             _cached_api_key = api_key
-            _app.log('CADAgent: API key cached successfully')
-            
+            _app.log('CADAgent: API key stored in memory cache')
+
+            # Also store in Fusion design attributes for persistence across sessions
+            persistent_stored = False
+            if _fusion_utils:
+                try:
+                    persistent_stored = _fusion_utils.store_api_key(api_key)
+                    if persistent_stored:
+                        _app.log('CADAgent: API key stored persistently in Fusion design attributes')
+                    else:
+                        _app.log('CADAgent: Warning - failed to store API key persistently')
+                except Exception as fusion_e:
+                    _app.log(f'CADAgent: Warning - could not store API key in Fusion attributes: {fusion_e}')
+
+            # Also update API client if available
+            if _api_client:
+                try:
+                    _api_client.set_api_key(api_key)
+                    _app.log('CADAgent: API key updated in API client')
+                except Exception as client_e:
+                    _app.log(f'CADAgent: Warning - could not update API client: {client_e}')
+
+            success_msg = 'API key cached successfully'
+            if persistent_stored:
+                success_msg += ' (persistent storage enabled)'
+
+            _app.log(f'CADAgent: {success_msg}')
+
             return {
                 'success': True,
-                'message': 'API key cached successfully'
+                'message': success_msg,
+                'persistent_storage': persistent_stored
             }
-            
+
         except Exception as e:
             _app.log(f'CADAgent: Error caching API key: {e}')
             return {'success': False, 'error': f'Failed to cache API key: {str(e)}'}
     
     def handle_get_cached_api_key(self, request_data):
         """
-        Retrieve cached API key from memory or .env file.
-        Returns the cached key or .env key if available.
+        Retrieve cached API key from all available sources:
+        1. Memory cache (_cached_api_key)
+        2. Fusion design attributes (persistent)
+        3. API client cache
+        4. Environment variable (.env file)
         """
         try:
             global _cached_api_key
-            
-            # Check cached key first
+
+            # Check memory cache first (fastest)
             if _cached_api_key:
-                _app.log('CADAgent: Retrieved cached API key')
+                _app.log('CADAgent: Retrieved API key from memory cache')
                 return {
                     'success': True,
                     'api_key': _cached_api_key,
-                    'has_cached_key': True
+                    'has_cached_key': True,
+                    'source': 'memory'
                 }
-            
+
+            # Check Fusion design attributes (persistent across sessions)
+            if _fusion_utils:
+                try:
+                    fusion_key = _fusion_utils.retrieve_api_key()
+                    if fusion_key:
+                        _app.log('CADAgent: Retrieved API key from Fusion design attributes')
+                        # Cache it in memory for this session
+                        _cached_api_key = fusion_key
+                        return {
+                            'success': True,
+                            'api_key': fusion_key,
+                            'has_cached_key': True,
+                            'source': 'fusion_attributes'
+                        }
+                except Exception as fusion_e:
+                    _app.log(f'CADAgent: Could not retrieve from Fusion attributes: {fusion_e}')
+
+            # Check API client cache
+            if _api_client:
+                try:
+                    if hasattr(_api_client, 'api_key') and _api_client.api_key:
+                        client_key = _api_client.api_key
+                        _app.log('CADAgent: Retrieved API key from API client')
+                        # Cache it in memory for this session
+                        _cached_api_key = client_key
+                        return {
+                            'success': True,
+                            'api_key': client_key,
+                            'has_cached_key': True,
+                            'source': 'api_client'
+                        }
+                except Exception as client_e:
+                    _app.log(f'CADAgent: Could not retrieve from API client: {client_e}')
+
             # Check .env file
             env_api_key = os.environ.get('ANTHROPIC_API_KEY', '')
             if env_api_key:
                 _app.log('CADAgent: Retrieved API key from .env file')
-                # Cache it for future use
+                # Cache it in memory for future use
                 _cached_api_key = env_api_key
                 return {
                     'success': True,
                     'api_key': env_api_key,
-                    'has_cached_key': True
+                    'has_cached_key': True,
+                    'source': 'environment'
                 }
-            
-            # No key found
+
+            # No key found anywhere
+            _app.log('CADAgent: No API key found in any cache source')
             return {
                 'success': True,
                 'api_key': None,
-                'has_cached_key': False
+                'has_cached_key': False,
+                'source': 'none'
             }
-                
+
         except Exception as e:
             _app.log(f'CADAgent: Error retrieving cached API key: {e}')
             return {'success': False, 'error': f'Failed to retrieve cached API key: {str(e)}'}
-    
+
+    def handle_clear_cached_api_key(self, request_data):
+        """
+        Clear all cached API keys from all storage locations:
+        1. Memory cache (_cached_api_key)
+        2. Fusion design attributes (persistent)
+        3. API client cache
+        """
+        try:
+            global _cached_api_key
+            cleared_sources = []
+
+            # Clear memory cache
+            if _cached_api_key:
+                _cached_api_key = None
+                cleared_sources.append('memory')
+                _app.log('CADAgent: Cleared API key from memory cache')
+
+            # Clear Fusion design attributes
+            if _fusion_utils:
+                try:
+                    if _fusion_utils.clear_api_key():
+                        cleared_sources.append('fusion_attributes')
+                        _app.log('CADAgent: Cleared API key from Fusion design attributes')
+                except Exception as fusion_e:
+                    _app.log(f'CADAgent: Warning - could not clear Fusion attributes: {fusion_e}')
+
+            # Clear API client cache
+            if _api_client:
+                try:
+                    _api_client.set_api_key(None)
+                    cleared_sources.append('api_client')
+                    _app.log('CADAgent: Cleared API key from API client')
+                except Exception as client_e:
+                    _app.log(f'CADAgent: Warning - could not clear API client: {client_e}')
+
+            # Note: We don't clear environment variables as they're system-level
+
+            success_msg = f'API key cleared from {len(cleared_sources)} sources'
+            if cleared_sources:
+                success_msg += f' ({", ".join(cleared_sources)})'
+
+            _app.log(f'CADAgent: {success_msg}')
+
+            return {
+                'success': True,
+                'message': success_msg,
+                'cleared_sources': cleared_sources
+            }
+
+        except Exception as e:
+            _app.log(f'CADAgent: Error clearing cached API key: {e}')
+            return {'success': False, 'error': f'Failed to clear cached API key: {str(e)}'}
+
     def handle_show_notification(self, request_data):
         """
         Show native Fusion 360 notification dialog.

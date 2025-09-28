@@ -84,3 +84,22 @@ Questions? Contact – Answering everyone
 - Email: eriknollett@gmail.com
 - Email: hi@cadagentpro.com
 - Website: https://cadagentpro.com
+
+## Diagnostics
+
+### Fallback sanity check (verify direct handler path)
+
+When comparing request payloads, it can be useful to exercise the legacy `handle_generate_model` path directly. Run the following from a Python REPL that has access to the add-in (for example Fusion 360's Python console or a shell launched in this folder):
+
+```python
+from CADAgent import HTMLEventHandler
+
+handler = HTMLEventHandler()
+response = handler.handle_generate_model({
+  'prompt': 'cube',
+  'anthropic_api_key': 'sk-your-test-key'
+})
+print(response)
+```
+
+With a test or placeholder key this route should still return an HTTP 422 response that includes the missing `anthropic_api_key` detail. Matching that behavior confirms the fallback handler mirrors the backend's validation and helps distinguish it from the threaded API client path.
