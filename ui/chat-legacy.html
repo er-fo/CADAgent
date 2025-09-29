@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>CADAgent AI CAD</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Geist:wght@200;300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&family=Playfair+Display:ital,wght@0,300;0,400;1,400&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="chat2.css" />
+  <!-- SVG Icons -->
+  <svg style="display: none;">
+    <symbol id="icon-loading" viewBox="0 0 24 24">
+      <circle cx="12" cy="12" r="10" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-dasharray="31.416" stroke-dashoffset="31.416">
+        <animate attributeName="stroke-dasharray" dur="2s" values="0 31.416;15.708 15.708;0 31.416" repeatCount="indefinite"/>
+        <animate attributeName="stroke-dashoffset" dur="2s" values="0;-15.708;-31.416" repeatCount="indefinite"/>
+      </circle>
+    </symbol>
+    <symbol id="icon-checkmark" viewBox="0 0 24 24">
+      <path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M20 6L9 17l-5-5"/>
+    </symbol>
+  </svg>
+</head>
+<body>
+    <div id="spaceApp" class="space-app">
+        <!-- Header -->
+        <div class="header">
+            <div class="brand-container">
+                <img src="../logo.png" alt="CADAgent" class="logo logo-light" />
+                <img src="../logotype.png" alt="CADAgent" class="logo logo-dark" />
+                <div class="brand-name">CAD<span class="agent">Agent</span></div>
+            </div>
+            <div class="header-controls">
+                <button id="darkModeToggle" class="dark-mode-toggle" title="Toggle dark mode">
+                    <svg class="theme-icon light-icon" viewBox="0 0 24 24">
+                        <circle cx="12" cy="12" r="5"/>
+                        <path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/>
+                    </svg>
+                    <svg class="theme-icon dark-icon" viewBox="0 0 24 24">
+                        <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
+                    </svg>
+                </button>
+                <div class="status" id="connectionStatus">
+                    <span class="status-dot"></span>
+                    <span class="status-text">Connecting...</span>
+                </div>
+                <div id="version-display" class="version-display">v0.1.34</div>
+            </div>
+        </div>
+
+        <!-- API Key Section (collapsible) -->
+        <div id="apiKeySection" class="api-key-container">
+            <div class="section-header" onclick="toggleSection('apiKeySection')">
+                <span>API Configuration</span>
+                <span class="toggle-icon">▼</span>
+            </div>
+            <div class="section-content">
+                <div class="api-input-container">
+                    <input type="password" id="apiKeyInput" placeholder="Enter your Anthropic API key" />
+                    <div id="cachedKeyOverlay" class="cached-key-overlay" style="display: none;">
+                        <div class="cached-key-display">
+                            <span class="cached-key-text">Using cached API key</span>
+                            <button id="resetApiKey" class="btn btn-reset" title="Clear cached key and enter new one">
+                                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/>
+                                    <path d="M21 3v5h-5"/>
+                                    <path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/>
+                                    <path d="M3 21v-5h5"/>
+                                </svg>
+                                Reset
+                            </button>
+                        </div>
+                    </div>
+                </div>
+                <button id="saveApiKey" class="btn save-key-btn" title="Securely cache your API key">
+                    <svg class="save-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                        <path d="M12 2l7 4v6c0 5-3.5 9-7 10-3.5-1-7-5-7-10V6l7-4z"/>
+                        <path d="M9 12l2 2 4-4"/>
+                    </svg>
+                    <span>Save API Key</span>
+                </button>
+                <button id="testApiKey" class="btn btn-secondary">Verify</button>
+            </div>
+        </div>
+
+        <!-- Parameters Section (collapsible) -->
+        <div id="parametersSection" class="api-key-container collapsed">
+            <div class="section-header" onclick="toggleSection('parametersSection')">
+                <span>Model Parameters</span>
+                <span class="toggle-icon">▼</span>
+            </div>
+            <div class="section-content">
+                <div id="parameterControls" class="parameter-controls">
+                    <!-- Dynamic parameter sliders will be inserted here -->
+                </div>
+                <button id="updateParameters" class="btn btn-primary">Update Model</button>
+            </div>
+        </div>
+
+        <!-- Main Content Area -->
+        <div class="main-content">
+            <!-- Welcome Message (shown when no messages) -->
+            <div id="welcomeMessage" class="welcome-message">
+                <h1 class="welcome-title">Welcome</h1>
+                <p class="welcome-subtitle">CAD at the speed of <em class="thought-italic">thought</em></p>
+            </div>
+
+            <!-- Chat Messages Area (background) -->
+            <div class="messages" id="chatMessages">
+                <!-- Messages will appear here -->
+            </div>
+
+            <!-- Floating Input Container -->
+            <div id="inputContainer" class="floating-input-container">
+                <textarea id="chatInput" placeholder="Describe what you want to create..." rows="1"></textarea>
+                <button id="sendButton" class="send-button" disabled>
+                    <svg viewBox="0 0 24 24" class="send-icon">
+                        <path fill="currentColor" d="M2,21L23,12L2,3V10L17,12L2,14V21Z"/>
+                    </svg>
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Backend config will be set by Python init message
+        window.SPACE_BACKEND_CONFIG = null;
+        // App version binding
+    window.SPACE_APP_VERSION = 'v0.1.34';
+
+        // If version display element exists, keep it in sync
+        (function(){
+            try{
+                var el = document && document.getElementById && document.getElementById('version-display');
+                if(el) el.textContent = window.SPACE_APP_VERSION;
+            }catch(e){/* ignore */}
+        })();
+    </script>
+    <script src="chat.js"></script>
+</body>
+</html>

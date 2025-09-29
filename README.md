@@ -1,4 +1,4 @@
-# CADAgent
+# CADAgent (v0.1.34)
 
 Transform 3D modeling from complex menus to simple conversations. Create and modify CAD models using plain English descriptions.
 
@@ -72,6 +72,14 @@ See `installation_guide.md` for detailed manual setup instructions.
 
 **Cost?**
 - The software is currently free to use, i (the author) make no money off of this beta, completely non-profit. – It is BYO API key. 
+
+**API Key Caching (New in v0.1.34)**
+Your Anthropic API key is now cached locally inside Fusion 360 using:
+1. In-memory session cache (clears when Fusion exits)
+2. Fusion design attributes for cross-session persistence
+3. Optional environment variable fallback (`.env` in add-in folder)
+
+Use the Reset button in the API Configuration panel to clear all cached locations. The key never leaves your machine.
 
 **Limitations**
 - Currently limited to fillets, chamfers, boolean operations and rotation + movement. (parameters quickly changeable via UI) - Organic models will (although funny to look at) produce results below expectations.

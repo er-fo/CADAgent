@@ -350,6 +350,7 @@ function toggleDarkMode() {
     localStorage.setItem('cadagent-theme', newTheme);
     
     console.log(`CADAgent: Switched to ${newTheme} mode`);
+    updateLogoForTheme(newTheme);
 }
 
 function initializeDarkMode() {
@@ -358,6 +359,22 @@ function initializeDarkMode() {
     document.documentElement.setAttribute('data-theme', savedTheme);
     
     console.log(`CADAgent: Initialized with ${savedTheme} mode`);
+    updateLogoForTheme(savedTheme);
+}
+
+// Swap logo based on theme (light theme uses full-color logo.png, dark theme uses logotype.png)
+function updateLogoForTheme(theme) {
+    try {
+        const logoEl = document.querySelector('.logo');
+        if (!logoEl) return;
+        if (theme === 'light') {
+            logoEl.src = '../logo.png';
+        } else {
+            logoEl.src = '../logotype.png';
+        }
+    } catch (e) {
+        console.warn('CADAgent: logo theme swap failed', e);
+    }
 }
 
 /**
@@ -365,7 +382,8 @@ function initializeDarkMode() {
  */
 function addProgressMessage() {
     const messagesDiv = document.getElementById('chatMessages');
-    const mainContent = document.querySelector('.main-content');
+    // Support both legacy layout (.main-content) and new layout (.chat-main)
+    const mainContent = document.querySelector('.chat-main') || document.querySelector('.main-content');
     
     // Create progress message element
     const messageDiv = document.createElement('div');
@@ -388,8 +406,10 @@ function addProgressMessage() {
     
     messagesDiv.appendChild(messageDiv);
     
-    // Hide welcome message when first message is added
-    mainContent.classList.add('has-messages');
+    // Hide welcome hero/tagline when first message is added (new layout) or legacy welcome
+    if (mainContent) {
+        mainContent.classList.add('has-messages');
+    }
     
     messagesDiv.scrollTop = messagesDiv.scrollHeight;
     
@@ -515,17 +535,31 @@ function testApiKey() {
 /**
  * Show the cached API key overlay
  */
-function showCachedKeyOverlay() {
+function showCachedKeyOverlay(keySource = null, customText = null) {
     const overlay = document.getElementById('cachedKeyOverlay');
+    const textElement = overlay ? overlay.querySelector('.cached-key-text') : null;
+    
     if (overlay) {
         overlay.style.display = 'flex';
+        
+        // Update overlay text based on key source
+        if (textElement) {
+            let displayText = customText || 'Using cached API key';
+            if (keySource === 'environment') {
+                displayText = 'Using environment API key';
+            } else if (keySource === 'fusion_attributes') {
+                displayText = 'Using saved API key';
+            }
+            textElement.textContent = displayText;
+        }
+        
         // Make the input field readonly to prevent typing
         const input = document.getElementById('apiKeyInput');
         if (input) {
             input.setAttribute('readonly', 'readonly');
             input.style.cursor = 'not-allowed';
         }
-        console.log('CADAgent: Cached key overlay shown');
+        console.log(`CADAgent: Cached key overlay shown (source: ${keySource || 'unknown'})`);
     }
 }
 
@@ -548,6 +582,9 @@ function hideCachedKeyOverlay() {
     }
 }
 
+// Global variable to track current key source
+let currentKeySource = null;
+
 /**
  * Reset cached API key - clears all caches and allows user to enter new key
  */
@@ -557,7 +594,7 @@ function resetCachedApiKey() {
     // Clear the local state
     currentApiKey = null;
 
-    // Hide the overlay
+    // Hide the overlay initially
     hideCachedKeyOverlay();
 
     // Show the API key section if it was collapsed
@@ -570,10 +607,29 @@ function resetCachedApiKey() {
     sendToFusion('clear_cached_api_key', {})
         .then(result => {
             console.log('CADAgent: Backend cache clear result:', result);
-            showNativeNotification('Cached API key cleared. Please enter a new API key.', 'info');
+            
+            if (result && result.env_key_present) {
+                // Environment key is still present - show overlay again but with updated text
+                currentKeySource = 'environment';
+                currentApiKey = '__CACHED_KEY__';
+                showCachedKeyOverlay('environment', 'Using environment API key');
+                
+                // Collapse the API key section again since env key is active
+                const apiKeySection = document.getElementById('apiKeySection');
+                if (apiKeySection) {
+                    apiKeySection.classList.add('collapsed');
+                }
+                
+                showNativeNotification('Cached keys cleared, but environment API key remains active. To use a different key, update your .env file or override by saving a new key.', 'info');
+            } else {
+                // All keys cleared successfully - keep overlay hidden
+                currentKeySource = null;
+                showNativeNotification('Cached API key cleared. Please enter a new API key.', 'info');
+            }
         })
         .catch(err => {
             console.warn('CADAgent: Failed to clear backend cache:', err);
+            currentKeySource = null;
             showNativeNotification('API key reset. Please enter a new API key.', 'info');
         });
 }
@@ -596,11 +652,14 @@ function loadApiKey() {
             if (result && result.success && result.has_cached_key && result.api_key) {
                 console.log('CADAgent: Found cached API key via fallback');
 
+                // Store the key source globally
+                currentKeySource = result.source;
+
                 // Set the cached key
                 currentApiKey = '__CACHED_KEY__';
 
-                // Show the overlay (fallback case)
-                showCachedKeyOverlay();
+                // Show the overlay (fallback case) with source info
+                showCachedKeyOverlay(result.source);
 
                 // Enable send button if chat input has text
                 const chatInput = document.getElementById('chatInput');
@@ -857,7 +916,8 @@ function updateParameters() {
  */
 function addMessage(type, content) {
     const messagesContainer = document.getElementById('chatMessages');
-    const mainContent = document.querySelector('.main-content');
+    // Support both legacy layout (.main-content) and new layout (.chat-main)
+    const mainContent = document.querySelector('.chat-main') || document.querySelector('.main-content');
     
     const messageElement = document.createElement('div');
     messageElement.className = `message ${type}`;
@@ -869,11 +929,19 @@ function addMessage(type, content) {
     messageElement.appendChild(contentElement);
     messagesContainer.appendChild(messageElement);
     
-    // Hide welcome message when first message is added
-    mainContent.classList.add('has-messages');
-    
-    // Scroll to bottom
-    messagesContainer.scrollTop = messagesContainer.scrollHeight;
+    // Hide welcome hero/tagline when first message is added
+    if (mainContent) {
+        mainContent.classList.add('has-messages');
+    }
+    // Only auto-scroll if content overflows (prevents initial messages from sitting mid-screen)
+    try {
+        const overflow = messagesContainer.scrollHeight > messagesContainer.clientHeight + 4; // small epsilon
+        // Also auto-scroll if user is already near the bottom (so new messages stay in view)
+        const nearBottom = (messagesContainer.scrollHeight - messagesContainer.scrollTop - messagesContainer.clientHeight) < 80;
+        if (overflow && nearBottom) {
+            messagesContainer.scrollTop = messagesContainer.scrollHeight;
+        }
+    } catch (_) { /* noop */ }
 }
 
 /**
@@ -1187,8 +1255,11 @@ window.fusionJavaScriptHandler = {
                     if (initData.has_cached_api_key && initData.cached_key_display) {
                         console.log(`CADAgent: Found cached API key from ${initData.cached_key_source}`);
 
-                        // Show the cached key overlay instead of modifying the input
-                        showCachedKeyOverlay();
+                        // Store the key source globally
+                        currentKeySource = initData.cached_key_source;
+
+                        // Show the cached key overlay with appropriate text based on source
+                        showCachedKeyOverlay(initData.cached_key_source, initData.cached_key_display);
 
                         // Set current API key internally (will be retrieved from cache when needed)
                         currentApiKey = '__CACHED_KEY__'; // Placeholder indicating we have a cached key

@@ -1,4 +1,4 @@
-# CADAgent Installation Guide
+# CADAgent Installation Guide (v0.1.34)
 
 This guide covers downloading CADAgent from GitHub and installing it as a Fusion 360 add-in.
 
@@ -137,6 +137,11 @@ CADAgent requires an **Anthropic API key** to function. This powers the AI that 
 - Verify the folder structure is correct
 - Restart Fusion 360
 - Check that all files were copied properly
+
+**API key caching & clearing:**
+- The add-in now caches your key in-memory and in Fusion design attributes so you only enter it once.
+- Click "Reset" in the green status pill (when a cached key is active) to wipe all stored copies.
+- Optional: create a `.env` file alongside `CADAgent.py` with `ANTHROPIC_API_KEY=sk-...` for a fallback source.
 
 **Connection errors:**
 - Verify your API key is correct

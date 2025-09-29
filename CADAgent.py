@@ -1805,20 +1805,39 @@ class HTMLEventHandler(adsk.core.HTMLEventHandler):
             global _cached_api_key
             cleared_sources = []
 
+            _app.log('CADAgent: Starting comprehensive API key clearing process...')
+
             # Clear memory cache
             if _cached_api_key:
                 _cached_api_key = None
                 cleared_sources.append('memory')
                 _app.log('CADAgent: Cleared API key from memory cache')
+            else:
+                _app.log('CADAgent: Memory cache was already empty')
 
             # Clear Fusion design attributes
             if _fusion_utils:
                 try:
-                    if _fusion_utils.clear_api_key():
+                    _app.log('CADAgent: Attempting to clear API key from Fusion design attributes...')
+                    result = _fusion_utils.clear_api_key()
+                    if result:
                         cleared_sources.append('fusion_attributes')
-                        _app.log('CADAgent: Cleared API key from Fusion design attributes')
+                        _app.log('CADAgent: Successfully cleared API key from Fusion design attributes')
+                    else:
+                        _app.log('CADAgent: Fusion clear_api_key returned False - may not have existed')
+                    
+                    # Verify it's actually gone by trying to retrieve it
+                    verification = _fusion_utils.retrieve_api_key()
+                    if verification:
+                        _app.log(f'CADAgent: WARNING - API key still exists after clear attempt! Length: {len(verification)}')
+                    else:
+                        _app.log('CADAgent: Verification confirmed - no API key found in Fusion attributes')
+                        
                 except Exception as fusion_e:
-                    _app.log(f'CADAgent: Warning - could not clear Fusion attributes: {fusion_e}')
+                    _app.log(f'CADAgent: Error clearing Fusion attributes: {fusion_e}')
+                    _app.log(f'CADAgent: Full traceback: {traceback.format_exc()}')
+            else:
+                _app.log('CADAgent: No fusion_utils available for clearing')
 
             # Clear API client cache
             if _api_client:
@@ -1828,23 +1847,37 @@ class HTMLEventHandler(adsk.core.HTMLEventHandler):
                     _app.log('CADAgent: Cleared API key from API client')
                 except Exception as client_e:
                     _app.log(f'CADAgent: Warning - could not clear API client: {client_e}')
+            else:
+                _app.log('CADAgent: No API client available for clearing')
 
-            # Note: We don't clear environment variables as they're system-level
+            # Check if API key still exists from environment - this is expected and OK
+            env_key_present = bool(os.environ.get('ANTHROPIC_API_KEY', ''))
+            if env_key_present:
+                _app.log('CADAgent: Note - API key still available from .env file (system-level, not cleared)')
+            
+            # Note: We don't clear environment variables as they're system-level configuration
 
-            success_msg = f'API key cleared from {len(cleared_sources)} sources'
             if cleared_sources:
-                success_msg += f' ({", ".join(cleared_sources)})'
+                success_msg = f'Cached API key cleared from {len(cleared_sources)} sources ({", ".join(cleared_sources)})'
+                if env_key_present:
+                    success_msg += '. System environment key remains active.'
+            else:
+                success_msg = 'No cached keys found to clear'
+                if env_key_present:
+                    success_msg += ', but system environment key remains active'
 
             _app.log(f'CADAgent: {success_msg}')
 
             return {
                 'success': True,
                 'message': success_msg,
-                'cleared_sources': cleared_sources
+                'cleared_sources': cleared_sources,
+                'env_key_present': env_key_present
             }
 
         except Exception as e:
             _app.log(f'CADAgent: Error clearing cached API key: {e}')
+            _app.log(f'CADAgent: Full traceback: {traceback.format_exc()}')
             return {'success': False, 'error': f'Failed to clear cached API key: {str(e)}'}
 
     def handle_show_notification(self, request_data):
