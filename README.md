@@ -71,7 +71,7 @@ See `installation_guide.md` for detailed manual setup instructions.
 ## Good to know
 
 **Cost?**
-- The software is currently free to use, i (the author) make no money off of this beta, completely non-profit. – It is BYO API key. 
+- The software is currently free to use, i (the author) make no money off this beta, completely non-profit. – It is BYO API key. 
 
 **API Key Caching (New in v0.1.34)**
 Your Anthropic API key is now cached locally inside Fusion 360 using:
