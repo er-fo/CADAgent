@@ -8,6 +8,26 @@
   <link rel="stylesheet" href="chat.css" />
 </head>
 <body>
+  <!-- SVG Icon Definitions -->
+  <svg style="display: none;" aria-hidden="true">
+    <defs>
+      <!-- Loading spinner icon -->
+      <symbol id="icon-loading" viewBox="0 0 24 24">
+        <circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="3" fill="none" 
+                stroke-linecap="round" stroke-dasharray="60" stroke-dashoffset="15" 
+                opacity="0.25"/>
+        <circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="3" fill="none" 
+                stroke-linecap="round" stroke-dasharray="15 45" 
+                class="spinner-path"/>
+      </symbol>
+      <!-- Checkmark icon -->
+      <symbol id="icon-checkmark" viewBox="0 0 24 24">
+        <path d="M5 13l4 4L19 7" stroke="currentColor" stroke-width="3" fill="none" 
+              stroke-linecap="round" stroke-linejoin="round"/>
+      </symbol>
+    </defs>
+  </svg>
+
   <div id="spaceApp" class="space-app">
     <!-- Header / Brand -->
     <header class="header-section">

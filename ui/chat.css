@@ -134,8 +134,11 @@ body::before {
 .message.user .content { background:linear-gradient(180deg, rgba(2,6,23,0.75) 0%, rgba(2,6,23,0.55) 100%), linear-gradient(135deg, rgba(14,165,233,0.2), rgba(56,189,248,0.08)); border:1px solid rgba(148,163,184,0.25); color:var(--text-primary); }
 .message.assistant .content { color:var(--text-primary); }
 .message.system .content { font-style:italic; color:var(--text-secondary); }
+/* Progress message styling */
 .message.progress .content { max-width:min(260px, 68vw); background:var(--glass-bg); border:1px solid var(--glass-border); display:flex; align-items:center; gap:10px; padding:0.65rem 0.85rem; border-radius:16px; box-shadow:none; }
-.progress-icon { width:16px; height:16px; color:var(--accent-color); display:inline-flex; align-items:center; justify-content:center; }
+.progress-icon { width:16px; height:16px; color:var(--accent-color); display:inline-flex; align-items:center; justify-content:center; flex-shrink: 0; }
+.progress-icon svg { width: 100%; height: 100%; }
+.progress-icon .spinner-path { animation: spin 1.5s linear infinite; transform-origin: center; }
 .progress-text { font-weight:500; color:var(--text-primary); letter-spacing:0.02em; }
 .message.progress.completed .content { max-width:140px; border-color:rgba(22,163,74,0.55); }
 .message.progress.completed .progress-icon { color:#22c55e; }
