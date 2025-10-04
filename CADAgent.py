@@ -60,13 +60,30 @@ CHAT_WINDOW_WIDTH = 320
 CHAT_WINDOW_HEIGHT = 480
 
 try:
-    from file_manager import SpaceFileManager  
+    # Force reload modules to pick up code changes without restarting Fusion
+    import importlib
+    import sys
+
+    # Reload file_manager if already imported
+    if 'file_manager' in sys.modules:
+        importlib.reload(sys.modules['file_manager'])
+    from file_manager import SpaceFileManager
+
+    # Reload fusion_utils if already imported
+    if 'fusion_utils' in sys.modules:
+        importlib.reload(sys.modules['fusion_utils'])
     from fusion_utils import SpaceFusionUtils
+
     # Optional: API client for network calls in background threads
     try:
+        if 'api_client' in sys.modules:
+            importlib.reload(sys.modules['api_client'])
         from api_client import SpaceAPIClient
     except Exception:
         SpaceAPIClient = None
+
+    if 'settings' in sys.modules:
+        importlib.reload(sys.modules['settings'])
     from settings import CHAT_WINDOW_WIDTH, CHAT_WINDOW_HEIGHT
 except ImportError as e:
     # Log import error but continue with defaults
@@ -1768,10 +1785,10 @@ class HTMLEventHandler(adsk.core.HTMLEventHandler):
                 except Exception as client_e:
                     _app.log(f'CADAgent: Could not retrieve from API client: {client_e}')
 
-            # Check .env file
+            # Check os.environ (populated from .env file at module load time)
             env_api_key = os.environ.get('ANTHROPIC_API_KEY', '')
             if env_api_key:
-                _app.log('CADAgent: Retrieved API key from .env file')
+                _app.log('CADAgent: Retrieved API key from os.environ (loaded from .env at module init)')
                 # Cache it in memory for future use
                 _cached_api_key = env_api_key
                 return {

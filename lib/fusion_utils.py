@@ -191,7 +191,7 @@ class SpaceFusionUtils:
     def store_api_key(self, api_key):
         """
         Store API key in .env file for global persistence across all designs and sessions.
-        Also stores in design attributes as a backup/legacy method.
+        Also updates os.environ runtime cache and design attributes as backup.
 
         Args:
             api_key (str): The Anthropic API key to store
@@ -204,9 +204,12 @@ class SpaceFusionUtils:
             env_vars = self._read_env_file()
             env_vars['ANTHROPIC_API_KEY'] = api_key
             env_file_success = self._write_env_file(env_vars)
-            
+
             if env_file_success:
                 self.app.log('CADAgent: API key stored successfully in .env file')
+                # CRITICAL: Also update os.environ runtime cache
+                os.environ['ANTHROPIC_API_KEY'] = api_key
+                self.app.log('CADAgent: API key updated in os.environ runtime cache')
             else:
                 self.app.log('CADAgent: Warning - failed to store API key in .env file')
             
@@ -294,14 +297,15 @@ class SpaceFusionUtils:
         """
         Clear stored API key from all storage locations:
         1. .env file (global persistence - PRIMARY)
-        2. Design attributes (legacy/backup method)
+        2. os.environ (runtime memory cache)
+        3. Design attributes (legacy/backup method)
 
         Returns:
             bool: True if successful or key didn't exist, False on error
         """
         try:
             cleared_any = False
-            
+
             # PRIMARY: Clear from .env file
             env_vars = self._read_env_file()
             if 'ANTHROPIC_API_KEY' in env_vars:
@@ -313,6 +317,14 @@ class SpaceFusionUtils:
                     self.app.log('CADAgent: Warning - failed to clear API key from .env file')
             else:
                 self.app.log('CADAgent: No API key found in .env file to clear')
+
+            # CRITICAL: Also clear from os.environ (runtime memory)
+            if 'ANTHROPIC_API_KEY' in os.environ:
+                del os.environ['ANTHROPIC_API_KEY']
+                self.app.log('CADAgent: API key cleared from os.environ runtime cache')
+                cleared_any = True
+            else:
+                self.app.log('CADAgent: No API key found in os.environ to clear')
             
             # BACKUP: Clear from design attributes (legacy method)
             design = self.get_active_design()
