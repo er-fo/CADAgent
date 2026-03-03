@@ -1,0 +1,356 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>CADAgent</title>
+  <link href="https://fonts.googleapis.com/css2?family=Geist:wght@200;300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&family=Playfair+Display:ital,wght@0,300;0,400;1,400&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <!-- SVG Icon Definitions -->
+  <svg style="display: none;" aria-hidden="true">
+    <defs>
+      <symbol id="icon-loading" viewBox="0 0 24 24">
+        <circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="3" fill="none"
+                stroke-linecap="round" stroke-dasharray="60" stroke-dashoffset="15"
+                opacity="0.25"/>
+        <circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="3" fill="none"
+                stroke-linecap="round" stroke-dasharray="15 45"
+                class="spinner-path"/>
+      </symbol>
+      <symbol id="icon-checkmark" viewBox="0 0 24 24">
+        <path d="M5 13l4 4L19 7" stroke="currentColor" stroke-width="3" fill="none"
+              stroke-linecap="round" stroke-linejoin="round"/>
+      </symbol>
+      <symbol id="icon-thumb-up" viewBox="0 0 24 24">
+        <path d="M14 9V5a3 3 0 0 0-3-3l-4 9v11h11.28a2 2 0 0 0 2-1.7l1.38-9a2 2 0 0 0-2-2.3zM7 22H4a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2h3" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+      </symbol>
+      <symbol id="icon-thumb-down" viewBox="0 0 24 24">
+        <path d="M10 15v4a3 3 0 0 0 3 3l4-9V2H5.72a2 2 0 0 0-2 1.7l-1.38 9a2 2 0 0 0 2 2.3zm7-13h2.67A2.31 2.31 0 0 1 22 4v7a2.31 2.31 0 0 1-2.33 2H17" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+      </symbol>
+      <symbol id="icon-send" viewBox="0 0 24 24">
+        <path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+      </symbol>
+      <symbol id="icon-cancel" viewBox="0 0 24 24">
+        <path d="M18 6L6 18M6 6l12 12" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+      </symbol>
+      <symbol id="icon-settings" viewBox="0 0 24 24">
+        <circle cx="12" cy="12" r="3" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+        <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+      </symbol>
+      <symbol id="icon-eye" viewBox="0 0 24 24">
+        <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+        <circle cx="12" cy="12" r="3" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+      </symbol>
+      <symbol id="icon-eye-off" viewBox="0 0 24 24">
+        <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+        <line x1="1" y1="1" x2="23" y2="23" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+      </symbol>
+      <symbol id="icon-link" viewBox="0 0 24 24">
+        <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+        <polyline points="15 3 21 3 21 9" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+        <line x1="10" y1="14" x2="21" y2="3" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+      </symbol>
+      <symbol id="icon-plus" viewBox="0 0 24 24">
+        <path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+      </symbol>
+    </defs>
+  </svg>
+
+  <div id="spaceApp" class="space-app">
+    <header class="header-section">
+      <div class="brand-container">
+        <img src="../logo-bright.png" alt="CADAgent" class="logo" />
+        <h1 class="brand-name">CAD<span class="agent">Agent</span></h1>
+      </div>
+      <div class="header-controls">
+        <div class="version-row"><span id="version-display" class="version-badge">v1.0</span></div>
+        <div class="auth-section" id="authSection">
+          <button id="loginBtn" class="auth-btn" type="button" title="Login" aria-label="Login">Login</button>
+          <div id="userInfo" class="user-info hidden">
+            <button id="apiKeysBtn" class="settings-btn" type="button" title="API Keys" aria-label="Configure API Keys">
+              <svg class="settings-icon-svg" aria-hidden="true">
+                <use href="#icon-settings"></use>
+              </svg>
+            </button>
+            <button id="logoutBtn" class="logout-btn" type="button" title="Logout" aria-label="Logout">Logout</button>
+          </div>
+        </div>
+        <button id="reconnectBtn" class="reconnect-btn hidden" type="button" title="Reconnect to backend" aria-label="Reconnect to backend">
+          <span class="reconnect-icon" aria-hidden="true">↻</span>
+        </button>
+        <div class="status" id="connectionStatus">
+          <span class="status-dot disconnected"></span>
+          <span class="status-text" id="statusText">Disconnected</span>
+        </div>
+      </div>
+    </header>
+
+    <!-- Build Plan Sub-Bar (appears below header when active) -->
+    <div class="build-plan-bar hidden" id="buildPlanBar">
+      <div class="build-plan-bar-inner">
+        <button class="build-plan-bar-toggle" id="buildPlanBarToggle" type="button" aria-expanded="false">
+          <span class="build-plan-bar-label" id="buildPlanBarText">Build Plan</span>
+          <span class="build-plan-bar-progress" id="buildPlanBarProgress">0/0</span>
+          <span class="build-plan-bar-chevron">▼</span>
+        </button>
+      </div>
+      <div class="build-plan-bar-content" id="buildPlanBarContent">
+        <div class="build-plan-bar-title" id="buildPlanBarTitle"></div>
+        <div class="build-plan-bar-steps" id="buildPlanBarSteps">
+          <!-- Steps will be populated dynamically -->
+        </div>
+      </div>
+    </div>
+
+    <main class="chat-main main-content">
+      <div id="welcomeMessage" class="welcome-hero">
+        <div class="hero-inner">
+          <h2 class="tagline">CAD at the speed of <em class="thought-italic">thought</em></h2>
+          <p class="description">Describe what you want. Iterate instantly. Directly into Fusion 360.</p>
+          <div class="session-pill">
+            <span class="session-label">Session</span>
+            <span class="session-id" id="sessionId">-</span>
+          </div>
+        </div>
+      </div>
+
+      <div id="chatMessages" class="messages" role="log" aria-live="polite" aria-atomic="false"></div>
+
+      <div id="progressSection" class="progress-toast hidden">
+        <svg aria-hidden="true" focusable="false" class="toast-icon">
+          <use href="#icon-loading"></use>
+        </svg>
+        <span id="progressText" class="toast-text">Processing...</span>
+        <div class="progress-meter">
+          <div id="progressFill" class="progress-meter-fill"></div>
+        </div>
+      </div>
+
+      <div id="inputContainer" class="chat-input-dock floating-input-container">
+        <div class="chat-input-dock-inner">
+          <textarea id="cadRequest" rows="1" placeholder="Describe your design..."></textarea>
+          
+          <!-- Image attachment preview -->
+          <div id="imagePreview" class="image-preview hidden">
+            <img id="previewImage" alt="Attached sketch" />
+            <button id="removeImageBtn" class="remove-image-btn" type="button" aria-label="Remove image">×</button>
+          </div>
+          
+          <div class="compose-actions">
+            <div class="compose-left">
+              <div class="mode-pill-group">
+                <!-- Image attachment button -->
+                <button id="attachImageBtn" class="attach-image-btn" type="button" title="Attach sketch image" aria-label="Attach image">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"></path>
+                  </svg>
+                </button>
+                <input type="file" id="imageInput" accept="image/png,image/jpeg,image/jpg" style="display: none;" />
+
+                <div class="model-selector-container">
+                  <select id="modelSelect" class="model-select" title="Select AI model" aria-label="Select model">
+                    <option value="claude-sonnet-4.6">Claude Sonnet 4.6</option>
+                    <option value="claude-opus-4.6">Claude Opus 4.6</option>
+                    <option value="gpt-5">GPT-5</option>
+                    <option value="gpt-5.2" selected>GPT-5.2</option>
+                    <option value="gpt-5-mini">GPT 5 Mini</option>
+                  </select>
+                </div>
+                <div class="reasoning-selector-container">
+                  <select id="reasoningSelect" class="reasoning-select" title="Reasoning effort" aria-label="Reasoning effort">
+                    <!-- Options populated dynamically by JS based on selected model -->
+                  </select>
+                </div>
+              </div>
+            </div>
+            <div class="compose-right">
+              <button id="inlineReconnect" class="inline-reconnect hidden" type="button" aria-label="Reconnect to backend">Reconnect</button>
+
+              <button id="executeBtn" class="btn send-btn" disabled aria-label="Send">
+                <svg class="send-icon-svg" aria-hidden="true">
+                  <use href="#icon-send"></use>
+                </svg>
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <div id="toastContainer" class="toast-container" aria-live="polite"></div>
+
+  <!-- Login Overlay -->
+  <div id="loginModal" class="login-overlay hidden">
+    <div class="login-overlay-backdrop"></div>
+    <div class="login-panel">
+      <div class="login-brand">
+        <div class="brand-container">
+          <img src="../logo-bright.png" alt="CADAgent" class="logo" />
+          <h1 class="brand-name">CAD<span class="agent">Agent</span></h1>
+        </div>
+        <span class="version-chip" id="loginVersion">v1.0</span>
+      </div>
+
+      <div class="login-copy">
+        <p class="eyebrow">Passwordless access</p>
+        <h2>Get started</h2>
+        <p class="lede">We'll email you a one-time code. No passwords to remember. New users are created automatically. CADAgent is completely free to use and 100% BYOK.</p>
+      </div>
+
+      <div id="loginCta" class="login-cta">
+        <button type="button" id="loginStartBtn" class="btn-primary btn-block">Continue</button>
+      </div>
+
+      <form id="loginForm" class="login-form hidden" novalidate>
+        <div id="emailRow" class="login-section">
+          <label class="field-label" for="emailInput">Work email</label>
+          <div class="field-inline">
+            <input type="email" id="emailInput" placeholder="you@company.com" required autocomplete="email" />
+            <button type="submit" id="sendOtpBtn" class="btn-primary btn-slim">Continue</button>
+          </div>
+          <p class="helper-text">Codes last about an hour. You can resend every 60 seconds.</p>
+          <div class="consent-row">
+            <input type="checkbox" id="tosConsent" class="consent-checkbox" />
+            <label for="tosConsent" class="consent-label">
+              By signing in or signing up, I agree and consent to the CADAgent <a href="#" data-external-url="https://cadagentpro.com/tos" class="external-link consent-link">Terms of Service</a> and <a href="#" data-external-url="https://cadagentpro.com/privacy" class="external-link consent-link">Privacy Policy</a>.
+            </label>
+          </div>
+        </div>
+
+        <div id="otpSection" class="otp-section hidden">
+          <label class="field-label" for="otpInput">6-digit code</label>
+          <div class="otp-row">
+            <div class="otp-stack">
+              <div class="otp-visual" aria-hidden="true">
+                <span></span><span></span><span></span><span></span><span></span><span></span>
+              </div>
+              <input
+                type="text"
+                id="otpInput"
+                class="otp-input-proxy"
+                inputmode="numeric"
+                pattern="[0-9]*"
+                maxlength="6"
+                autocomplete="one-time-code"
+                aria-label="6 digit verification code"
+              />
+            </div>
+            <button type="button" id="verifyOtpBtn" class="btn-primary btn-slim">Verify</button>
+          </div>
+          <div class="otp-actions">
+            <button type="button" id="switchEmailBtn" class="link-btn">Change email</button>
+            <span class="helper-text" id="resendHint">Waiting for the code? Check spam or resend above.</span>
+          </div>
+        </div>
+
+        <div id="passwordRow" class="login-section hidden">
+          <label class="field-label" for="passwordInput">Password (testing)</label>
+          <div class="field-inline">
+            <input type="password" id="passwordInput" placeholder="••••••••" autocomplete="current-password" />
+            <button type="button" id="passwordLoginBtn" class="btn-secondary btn-slim">Log in</button>
+          </div>
+          <p class="helper-text">Testing-only password login for the allowlisted account.</p>
+        </div>
+
+        <div class="login-section">
+          <button type="button" id="showPasswordLoginBtn" class="link-btn hidden">Testing: log in with password</button>
+        </div>
+
+        <div id="loginStatus" class="login-status hidden" role="status" aria-live="polite"></div>
+      </form>
+    </div>
+  </div>
+
+  <!-- API Keys Settings Overlay -->
+  <div id="apiKeysModal" class="login-overlay api-keys-overlay hidden">
+    <div class="login-overlay-backdrop"></div>
+    <div class="login-panel api-keys-panel">
+      <div class="login-brand">
+        <div class="brand-container">
+          <svg class="brand-logo-svg" viewBox="0 0 24 24" aria-hidden="true" style="width: 20px; height: 20px; color: var(--fg-secondary);">
+            <use href="#icon-settings"></use>
+          </svg>
+          <span class="brand-name">Settings</span>
+        </div>
+        <button type="button" id="closeApiKeysBtn" class="close-modal-btn api-keys-close-btn" aria-label="Close">
+          X
+        </button>
+      </div>
+
+      <div class="login-copy">
+        <h2>API Keys</h2>
+        <p class="lede">CADAgent is completely free to use and 100% BYOK. Connect your own AI provider account (Anthropic or OpenAI) to generate your 3D models.</p>
+        <p class="lede">You only pay your AI provider directly based on your usage. Typical provider costs are around $0.10-$0.50 per model.</p>
+
+        <details class="provider-guide">
+          <summary class="provider-guide-toggle">Which provider should I use?</summary>
+          <p class="provider-guide-content">Both work well. Anthropic tends to produce the most reliable results. You'll be billed directly by your provider based on usage — typically a few cents per model.</p>
+        </details>
+      </div>
+
+      <form id="apiKeysForm" class="login-form" novalidate>
+        <div class="api-key-row">
+          <span class="provider-label">Anthropic (Recommended)</span>
+          <span id="anthropicKeyStatus" class="key-status"></span>
+          <a href="#" data-external-url="https://console.anthropic.com/settings/keys" class="get-key-link external-link">
+            Get your API key
+          </a>
+        </div>
+        <div class="field-inline">
+          <input type="password" id="anthropicKeyInput" placeholder="sk-ant-..." autocomplete="off" class="key-input" />
+          <button type="button" id="toggleAnthropicKey" class="toggle-visibility-btn" aria-label="Show/hide key">
+            <svg class="eye-icon-svg" aria-hidden="true"><use href="#icon-eye"></use></svg>
+          </button>
+        </div>
+
+        <div class="api-key-row">
+          <span class="provider-label">OpenAI</span>
+          <span id="openaiKeyStatus" class="key-status"></span>
+          <a href="#" data-external-url="https://platform.openai.com/api-keys" class="get-key-link external-link">
+            Get your API key
+          </a>
+        </div>
+        <div class="field-inline">
+          <input type="password" id="openaiKeyInput" placeholder="sk-proj-..." autocomplete="off" class="key-input" />
+          <button type="button" id="toggleOpenaiKey" class="toggle-visibility-btn" aria-label="Show/hide key">
+            <svg class="eye-icon-svg" aria-hidden="true"><use href="#icon-eye"></use></svg>
+          </button>
+        </div>
+
+        <div id="apiKeysStatus" class="login-status hidden" role="status" aria-live="polite"></div>
+
+        <div id="apiKeysFooter" class="api-keys-footer hidden">
+          Enter at least one API key to start using CADAgent (100% BYOK).
+        </div>
+
+        <div class="api-keys-actions">
+          <button type="submit" id="saveApiKeysBtn" class="btn-primary btn-block">Save Configuration</button>
+        </div>
+
+        <div class="api-keys-legal">
+          <a href="#" data-external-url="https://cadagentpro.com/tos" class="external-link legal-link">Terms of Service</a>
+          <span class="legal-separator">•</span>
+          <a href="#" data-external-url="https://cadagentpro.com/privacy" class="external-link legal-link">Privacy Policy</a>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <script>
+    window.SPACE_BACKEND_CONFIG = null;
+    window.SPACE_APP_VERSION = 'v0.1.0';
+    (function() {
+      try {
+        var el = document.getElementById('version-display');
+        if (el) el.textContent = window.SPACE_APP_VERSION;
+      } catch (e) {}
+    })();
+  </script>
+  <!-- Markdown parser for rendering formatted LLM responses -->
+  <script src="https://cdn.jsdelivr.net/npm/marked@11.1.1/marked.min.js"></script>
+  <script src="main.js"></script>
+</body>
+</html>

@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ApplicationPackage
+    SchemaVersion="1.0"
+    AutodeskProduct="Fusion360"
+    Name="CADAgent"
+    Description="AI-powered CAD modeling assistant that executes natural language requests"
+    AppVersion="1.0.0"
+    ProductType="Application"
+    Author="CADAgent Team"
+    ProductCode="{CAD-AGENT-MAC-0001-BUNDLE}"
+    Icon="./Contents/resources/32x32.png">
+    <CompanyDetails Name="CADAgent" Url="https://github.com/er-fo/CADAgent" />
+    <Components>
+        <RuntimeRequirements OS="MacOS" Platform="Fusion360" />
+        <ComponentEntry AppName="CADAgent" Version="1.0.0" ModuleName="./Contents/CADAgent.py"/>
+    </Components>
+</ApplicationPackage>

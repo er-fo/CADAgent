@@ -1,0 +1,13 @@
+{
+    "autodeskProduct": "Fusion360",
+    "type": "addin",
+    "id": "cadagent_addin",
+    "author": "CADAgent Team",
+    "description": {
+        "": "AI-powered CAD modeling assistant that executes natural language requests through a WebSocket backend connection."
+    },
+    "version": "1.0.0",
+    "runOnStartup": true,
+    "supportedOS": "windows|mac",
+    "editEnabled": true
+}
