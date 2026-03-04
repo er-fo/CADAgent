@@ -6,17 +6,17 @@ AI-powered CAD modeling assistant for Autodesk Fusion 360. Submit natural langua
 
 ### Installation
 
-1. **Locate Fusion 360 Add-ins Directory**:
-   - **Windows**: `%APPDATA%\Autodesk\Autodesk Fusion 360\API\AddIns`
-   - **Mac**: `~/Library/Application Support/Autodesk/Autodesk Fusion 360/API/AddIns`
+1. **Locate Fusion 360 ApplicationPlugins Directory**:
+   - **Windows**: `%APPDATA%\Autodesk\ApplicationPlugins`
+   - **Mac**: `~/Library/Application Support/Autodesk/ApplicationPlugins`
 
-2. **Copy CADAgent Folder**:
+2. **Copy CADAgent.bundle Folder**:
    ```bash
    # Mac/Linux
-   cp -r CADAgent ~/Library/Application\ Support/Autodesk/Autodesk\ Fusion\ 360/API/AddIns/
+   cp -r CADAgent.bundle ~/Library/Application\ Support/Autodesk/ApplicationPlugins/
 
    # Windows (PowerShell)
-   Copy-Item -Recurse CADAgent "$env:APPDATA\Autodesk\Autodesk Fusion 360\API\AddIns\"
+   Copy-Item -Recurse CADAgent.bundle "$env:APPDATA\Autodesk\ApplicationPlugins\"
    ```
 
 - Load production defaults automatically from `wss://ws.cadagentpro.com/ws/{session_id}`
