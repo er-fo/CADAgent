@@ -4,17 +4,20 @@
 
 1. Download and extract `CADAgent.bundle`
 
-2. Copy the `Contents` folder from inside `CADAgent.bundle` to the Fusion 360 add-ins directory, renaming it to `CADAgent`:
+2. Copy the entire `CADAgent.bundle` folder to Fusion 360's ApplicationPlugins directory:
    ```
-   ~/Library/Application Support/Autodesk/Autodesk Fusion 360/API/AddIns/CADAgent/
+   ~/Library/Application Support/Autodesk/ApplicationPlugins/CADAgent.bundle
    ```
 
    **Mac App Store version of Fusion?** Use this path instead:
    ```
-   ~/Library/Containers/com.autodesk.mas.fusion360/Data/Library/Application Support/Autodesk/Autodesk Fusion 360/API/AddIns/CADAgent/
+   ~/Library/Containers/com.autodesk.mas.fusion360/Data/Library/Application Support/Autodesk/ApplicationPlugins/CADAgent.bundle
    ```
 
-   The folder should contain `CADAgent.py`, `CADAgent.manifest`, and the other plugin files directly (not nested inside another folder).
+   **Alternative:** Copy just the `CADAgent` folder from inside the bundle to the add-ins directory:
+   ```
+   ~/Library/Application Support/Autodesk/Autodesk Fusion 360/API/AddIns/CADAgent/
+   ```
 
 3. Restart Fusion 360
 

@@ -33,6 +33,17 @@ def _load_env_file(path: Path) -> None:
 _env_file_path = Path(__file__).resolve().parent / ".env.cadagent"
 _load_env_file(_env_file_path)
 
+# Supabase publishable defaults (safe to embed – these are public/anon keys)
+_SUPABASE_URL_DEFAULT = "https://wpgibucctvusoizwhsbz.supabase.co"
+_SUPABASE_KEY_DEFAULT = "sb_publishable_VkJwtJWbZn8DwovnrKXIew_W0mr9ix_"
+
+# Ensure Supabase env vars are set even when .env.cadagent is missing (e.g. dotfile
+# not copied on Windows or hidden-file-unaware extractors).
+if "SUPABASE_URL" not in os.environ:
+    os.environ["SUPABASE_URL"] = _SUPABASE_URL_DEFAULT
+if "SUPABASE_PUBLISHABLE_KEY" not in os.environ:
+    os.environ["SUPABASE_PUBLISHABLE_KEY"] = _SUPABASE_KEY_DEFAULT
+
 # Debug mode - enable verbose logging
 DEBUG = os.environ.get("CADAGENT_DEBUG", "False").lower() == "true"
 

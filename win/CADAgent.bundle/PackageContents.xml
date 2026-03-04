@@ -8,10 +8,10 @@
     ProductType="Application"
     Author="CADAgent Team"
     ProductCode="{CAD-AGENT-WIN-0001-BUNDLE}"
-    Icon="./Contents/resources/32x32.png">
+    Icon="./CADAgent/resources/32x32.png">
     <CompanyDetails Name="CADAgent" Url="https://github.com/er-fo/CADAgent" />
     <Components>
         <RuntimeRequirements OS="Win64" Platform="Fusion360" />
-        <ComponentEntry AppName="CADAgent" Version="1.0.0" ModuleName="./Contents/CADAgent.py"/>
+        <ComponentEntry AppName="CADAgent" Version="1.0.0" ModuleName="./CADAgent/CADAgent.py"/>
     </Components>
 </ApplicationPackage>
