@@ -12,22 +12,24 @@ AI-powered CAD modeling assistant. Describe what you want in plain English, and 
 ### Windows
 Copy `CADAgent.bundle` to:
 ```
-%appdata%\Autodesk\Autodesk Fusion 360\API\AddIns\
+%AppData%\Autodesk\ApplicationPlugins\
 ```
 
 ### macOS (Web Install)
 Copy `CADAgent.bundle` to:
 ```
-~/Library/Application Support/Autodesk/Autodesk Fusion 360/API/AddIns/
+~/Library/Application Support/Autodesk/ApplicationPlugins/
 ```
 
 ### macOS (App Store)
 Copy `CADAgent.bundle` to:
 ```
-~/Library/Containers/com.autodesk.mas.fusion360/Data/Library/Application Support/Autodesk/Autodesk Fusion 360/API/AddIns/
+~/Library/Containers/com.autodesk.mas.fusion360/Data/Library/Application Support/Autodesk/ApplicationPlugins/
 ```
 
 Restart Fusion 360. The add-in loads automatically.
+
+> **Important:** Do not use **"Create Script or Add-In"** for installation. That workflow creates a sample project (e.g., "Command Dialog Sample") and will not install CADAgent.
 
 ## Usage
 
