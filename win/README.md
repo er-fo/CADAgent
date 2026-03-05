@@ -2,16 +2,16 @@
 
 ## Installation
 
-1. Download and extract `CADAgent.bundle`
+1. Download and extract the zip
 
-2. Copy the entire `CADAgent.bundle` folder to:
+2. Copy the entire `CADAgent` folder to:
    ```
    %AppData%\Autodesk\ApplicationPlugins\
    ```
 
    Full path example:
    ```
-   C:\Users\YourName\AppData\Roaming\Autodesk\ApplicationPlugins\CADAgent.bundle\
+   C:\Users\YourName\AppData\Roaming\Autodesk\ApplicationPlugins\CADAgent\
    ```
 
 3. Restart Fusion 360
