@@ -6,17 +6,17 @@
 
 2. Copy the entire `CADAgent` folder to:
    ```
-   %AppData%\Autodesk\ApplicationPlugins\
+   %AppData%\Autodesk\Autodesk Fusion 360\API\AddIns\
    ```
 
    Full path example:
    ```
-   C:\Users\YourName\AppData\Roaming\Autodesk\ApplicationPlugins\CADAgent\
+   C:\Users\YourName\AppData\Roaming\Autodesk\Autodesk Fusion 360\API\AddIns\CADAgent\
    ```
 
 3. Restart Fusion 360
 
-Fusion will detect the add-in automatically on launch.
+4. Go to **Tools** > **Add-Ins**, find CADAgent, and click **Run**.
 
 ## Verify Installation
 

@@ -6,17 +6,17 @@
 
 2. Copy the entire `CADAgent` folder to:
    ```
-   ~/Library/Application Support/Autodesk/ApplicationPlugins/
+   ~/Library/Application Support/Autodesk/Autodesk Fusion 360/API/AddIns/
    ```
 
    **Mac App Store version of Fusion?** Use this path instead:
    ```
-   ~/Library/Containers/com.autodesk.mas.fusion360/Data/Library/Application Support/Autodesk/ApplicationPlugins/
+   ~/Library/Containers/com.autodesk.mas.fusion360/Data/Library/Application Support/Autodesk/Autodesk Fusion 360/API/AddIns/
    ```
 
 3. Restart Fusion 360
 
-Fusion will detect the add-in automatically on launch.
+4. Go to **Tools** > **Add-Ins**, find CADAgent, and click **Run**.
 
 ## Verify Installation
 
