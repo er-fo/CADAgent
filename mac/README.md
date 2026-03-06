@@ -6,7 +6,7 @@
 
 2. Copy the entire `CADAgent` folder to:
    ```
-   ~/Library/Application Support/Autodesk/ApplicationPlugins/
+   ~/Library/Application Support/Autodesk/Autodesk Fusion 360/API/AddIns/
    ```
 
    **Mac App Store version of Fusion?** Use this path instead:
