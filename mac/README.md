@@ -2,9 +2,9 @@
 
 ## Installation
 
-1. Download and extract `CADAgent.bundle`
+1. Download and extract the zip
 
-2. Copy the entire `CADAgent.bundle` folder to:
+2. Copy the entire `CADAgent` folder to:
    ```
    ~/Library/Application Support/Autodesk/ApplicationPlugins/
    ```
