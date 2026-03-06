@@ -12,13 +12,13 @@ AI-powered CAD modeling assistant. Describe what you want in plain English, and 
 ### Windows
 Copy the `CADAgent` folder to:
 ```
-%AppData%\Autodesk\ApplicationPlugins\
+%AppData%\Autodesk\Autodesk Fusion 360\API\AddIns
 ```
 
 ### macOS (Web Install)
 Copy the `CADAgent` folder to:
 ```
-~/Library/Application Support/Autodesk/ApplicationPlugins/
+~/Library/Application Support/Autodesk/Autodesk Fusion 360/API/AddIns/
 ```
 
 ### macOS (App Store)
