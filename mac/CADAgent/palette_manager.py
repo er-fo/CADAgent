@@ -913,6 +913,15 @@ class HTMLEventHandler(adsk.core.HTMLEventHandler):
             elif action_name == 'check_and_handle_signup':
                 email = payload.get('email', '').strip()
                 logger.info(f"← Check and handle signup request received (email={email})")
+                if self._controller.is_auth_bypass():
+                    logger.info("[auth] bypass enabled; skipping Supabase signup/login flow")
+                    self._palette_manager.send_message(
+                        'auth_success',
+                        message='Auth bypass enabled (dev)',
+                        user={'email': 'dev-bypass@cadagent.local'}
+                    )
+                    self._palette_manager.send_message('user_profile', profile={'email': 'dev-bypass@cadagent.local'})
+                    return
                 if not email:
                     logger.warning("Email is required for signup/login")
                     self._palette_manager.send_message('auth_error', message='Email is required')
@@ -945,6 +954,14 @@ class HTMLEventHandler(adsk.core.HTMLEventHandler):
             elif action_name == 'send_otp_code':
                 email = payload.get('email', '').strip()
                 logger.info(f"← Send OTP code request received (email={email})")
+                if self._controller.is_auth_bypass():
+                    logger.info("[auth] bypass enabled; ignoring OTP send request")
+                    self._palette_manager.send_message(
+                        'auth_success',
+                        message='Auth bypass enabled (dev)',
+                        user={'email': 'dev-bypass@cadagent.local'}
+                    )
+                    return
                 if not email:
                     logger.warning("Email is required for OTP code")
                     self._palette_manager.send_message('auth_error', message='Email is required')
@@ -966,6 +983,15 @@ class HTMLEventHandler(adsk.core.HTMLEventHandler):
                 email = payload.get('email', '').strip()
                 code = payload.get('code', '').strip()
                 logger.info(f"← Verify OTP code request received (email={email})")
+                if self._controller.is_auth_bypass():
+                    logger.info("[auth] bypass enabled; skipping OTP verification")
+                    self._palette_manager.send_message(
+                        'auth_success',
+                        message='Auth bypass enabled (dev)',
+                        user={'email': 'dev-bypass@cadagent.local'}
+                    )
+                    self._palette_manager.send_message('user_profile', profile={'email': 'dev-bypass@cadagent.local'})
+                    return
                 if not email or not code:
                     logger.warning("Email and code are required for OTP verification")
                     self._palette_manager.send_message('auth_error', message='Email and code are required')
@@ -1007,6 +1033,15 @@ class HTMLEventHandler(adsk.core.HTMLEventHandler):
                 access_token = payload.get('access_token', '').strip()
                 refresh_token = payload.get('refresh_token', '').strip()
                 logger.info("← Auth callback received")
+                if self._controller.is_auth_bypass():
+                    logger.info("[auth] bypass enabled; ignoring auth callback")
+                    self._palette_manager.send_message(
+                        'auth_success',
+                        message='Auth bypass enabled (dev)',
+                        user={'email': 'dev-bypass@cadagent.local'}
+                    )
+                    self._palette_manager.send_message('user_profile', profile={'email': 'dev-bypass@cadagent.local'})
+                    return
                 if not access_token or not refresh_token:
                     logger.warning("Missing tokens in auth callback")
                     self._palette_manager.send_message('auth_error', message='Missing authentication tokens')
