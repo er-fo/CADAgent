@@ -54,8 +54,8 @@ logger = logging.getLogger(__name__)
 # Message types that can arrive in high volume (streaming) and should not spam logs.
 _QUIET_MESSAGE_TYPES = {"reasoning_chunk", "plan_chunk"}
 
-DEFAULT_SUPABASE_URL = "https://wpgibucctvusoizwhsbz.supabase.co"
-DEFAULT_SUPABASE_PUBLISHABLE_KEY = "sb_publishable_VkJwtJWbZn8DwovnrKXIew_W0mr9ix_"
+DEFAULT_SUPABASE_URL = "https://fcxnngctkfwpfbbhrmbs.supabase.co"
+DEFAULT_SUPABASE_PUBLISHABLE_KEY = "sb_publishable_9pBlFZWV0LzXWNqYHgULpg_Gy86vf2j"
 
 
 def _fusion_probe(message: str) -> None:
