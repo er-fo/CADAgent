@@ -15,16 +15,10 @@ Copy the `CADAgent` folder to:
 %AppData%\Autodesk\Autodesk Fusion 360\API\AddIns
 ```
 
-### macOS (Web Install)
+### macOS
 Copy the `CADAgent` folder to:
 ```
-~/Library/Application Support/Autodesk/Autodesk Fusion 360/API/AddIns/
-```
-
-### macOS (App Store)
-Copy the `CADAgent` folder to:
-```
-~/Library/Containers/com.autodesk.mas.fusion360/Data/Library/Application Support/Autodesk/ApplicationPlugins/
+/Users/erikfornlund/Library/Application Support/Autodesk/Autodesk Fusion 360/API/AddIns
 ```
 
 Restart Fusion 360. The add-in loads automatically.
