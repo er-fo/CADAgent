@@ -54,6 +54,9 @@ logger = logging.getLogger(__name__)
 # Message types that can arrive in high volume (streaming) and should not spam logs.
 _QUIET_MESSAGE_TYPES = {"reasoning_chunk", "plan_chunk"}
 
+DEFAULT_SUPABASE_URL = "https://wpgibucctvusoizwhsbz.supabase.co"
+DEFAULT_SUPABASE_PUBLISHABLE_KEY = "sb_publishable_VkJwtJWbZn8DwovnrKXIew_W0mr9ix_"
+
 
 def _fusion_probe(message: str) -> None:
     """Best-effort bridge to Fusion's Text Commands log for field diagnostics."""
@@ -182,8 +185,8 @@ class AgentController:
         )
 
         # Supabase auth client
-        supabase_url = os.environ.get("SUPABASE_URL", "")
-        supabase_key = os.environ.get("SUPABASE_PUBLISHABLE_KEY", "")
+        supabase_url = os.environ.get("SUPABASE_URL", DEFAULT_SUPABASE_URL)
+        supabase_key = os.environ.get("SUPABASE_PUBLISHABLE_KEY", DEFAULT_SUPABASE_PUBLISHABLE_KEY)
         self._auth_client: Optional[SupabaseAuthClient] = None
         self._auth_error_emitted: bool = False  # Throttle repetitive auth_error spam
 
@@ -212,7 +215,7 @@ class AgentController:
             except Exception as e:
                 logger.warning(f"Failed to initialize Supabase auth client: {e}")
         else:
-            logger.warning("Supabase credentials not configured in .env")
+            logger.warning("Supabase credentials not configured; falling back to auth bypass")
             # Mirror backend behavior: when Supabase isn't configured, operate in auth bypass mode.
             self._auth_bypass = True
 
