@@ -71,6 +71,22 @@ def _fusion_probe(message: str) -> None:
         pass
 
 # Minimal .env loader (avoids dependency on python-dotenv in Fusion sandbox)
+def _strip_inline_env_comment(value: str) -> str:
+    """Strip inline comments from unquoted env values."""
+    in_single = False
+    in_double = False
+    for i, ch in enumerate(value):
+        if ch == '\"' and not in_single:
+            in_double = not in_double
+        elif ch == "'" and not in_double:
+            in_single = not in_single
+        elif ch == '#' and not in_single and not in_double:
+            # Treat as comment only when preceded by whitespace (KEY=VALUE # comment)
+            if i > 0 and value[i - 1].isspace():
+                return value[:i].rstrip()
+    return value
+
+
 def _load_env_file(path: Path) -> None:
     if not path.exists():
         logger.warning(f"Env file not found: {path}")
@@ -84,7 +100,9 @@ def _load_env_file(path: Path) -> None:
                 continue
             key, value = line.split('=', 1)
             key = key.strip()
-            value = value.strip().strip('"').strip("'")
+            value = value.strip()
+            value = _strip_inline_env_comment(value)
+            value = value.strip('"').strip("'")
             if key and key not in os.environ:
                 os.environ[key] = value
         logger.info(f"Loaded environment from {path}")
