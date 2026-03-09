@@ -18,7 +18,7 @@ Copy the `CADAgent` folder to:
 ### macOS
 Copy the `CADAgent` folder to:
 ```
-/Users/erikfornlund/Library/Application Support/Autodesk/Autodesk Fusion 360/API/AddIns
+~/Library/Application Support/Autodesk/Autodesk Fusion 360/API/AddIns
 ```
 
 Restart Fusion 360. The add-in loads automatically.

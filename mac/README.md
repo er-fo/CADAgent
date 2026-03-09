@@ -6,7 +6,7 @@
 
 2. Copy the entire `CADAgent` folder to:
    ```
-   /Users/erikfornlund/Library/Application Support/Autodesk/Autodesk Fusion 360/API/AddIns
+   ~/Library/Application Support/Autodesk/Autodesk Fusion 360/API/AddIns
    ```
 
 3. Restart Fusion 360
