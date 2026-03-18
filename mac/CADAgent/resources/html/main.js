@@ -107,6 +107,9 @@ const docStates = new Map();
 let currentDocId = null;
 const pendingMessagesByDoc = new Map();
 const docOrder = [];
+const MARKETING_CONSENT_SOURCE = 'fusion_addin_signup';
+const MARKETING_CONSENT_TEXT_VERSION = '2026-03-18-marketing-optin-v1';
+const MARKETING_CONSENT_TEXT = 'Email me about CADAgent product updates, launches, and new features.';
 
 // Track consecutive substantive messages for different doc (for self-heal after reconnect)
 let consecutiveMessagesForDifferentDoc = { docId: null, count: 0 };
@@ -272,6 +275,7 @@ const elements = {
     loginCta: document.getElementById('loginCta'),
     emailRow: document.getElementById('emailRow'),
     tosConsent: document.getElementById('tosConsent'),
+    marketingConsent: document.getElementById('marketingConsent'),
     loginVersion: document.getElementById('loginVersion'),
     passwordRow: document.getElementById('passwordRow'),
     passwordInput: document.getElementById('passwordInput'),
@@ -1102,7 +1106,12 @@ function handleSendOtp(event) {
     // Ensure account exists, then always require OTP verification.
     sendToAddin({
         action: 'check_and_handle_signup',
-        email: email
+        email: email,
+        marketing_consent: Boolean(elements.marketingConsent && elements.marketingConsent.checked),
+        consent_source: MARKETING_CONSENT_SOURCE,
+        consent_text_version: MARKETING_CONSENT_TEXT_VERSION,
+        consent_text: MARKETING_CONSENT_TEXT,
+        consent_collected_at: new Date().toISOString()
     });
 
     // Note: Response will be handled in dispatchAddinMessage via auth_otp_required.

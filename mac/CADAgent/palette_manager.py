@@ -912,6 +912,11 @@ class HTMLEventHandler(adsk.core.HTMLEventHandler):
 
             elif action_name == 'check_and_handle_signup':
                 email = payload.get('email', '').strip()
+                marketing_consent = bool(payload.get('marketing_consent', False))
+                consent_source = str(payload.get('consent_source', 'fusion_addin_signup') or 'fusion_addin_signup')
+                consent_text_version = str(payload.get('consent_text_version', '') or '')
+                consent_text = str(payload.get('consent_text', '') or '')
+                consent_collected_at = str(payload.get('consent_collected_at', '') or '')
                 logger.info(f"← Check and handle signup request received (email={email})")
                 if self._controller.is_auth_bypass():
                     logger.info("[auth] bypass enabled; skipping Supabase signup/login flow")
@@ -929,7 +934,14 @@ class HTMLEventHandler(adsk.core.HTMLEventHandler):
                     # Run in background thread to avoid blocking palette event handler
                     def _do_check_and_signup():
                         try:
-                            result = self._controller.check_and_handle_signup(email)
+                            result = self._controller.check_and_handle_signup(
+                                email,
+                                marketing_consent=marketing_consent,
+                                consent_source=consent_source,
+                                consent_text_version=consent_text_version,
+                                consent_text=consent_text,
+                                consent_collected_at=consent_collected_at,
+                            )
                             if not result.get('needs_otp'):
                                 logger.warning(f"[auth] Unexpected response format: {result}")
                                 self._palette_manager.send_message('auth_error', message='Unexpected authentication response')

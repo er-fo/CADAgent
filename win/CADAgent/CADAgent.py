@@ -54,8 +54,8 @@ logger = logging.getLogger(__name__)
 # Message types that can arrive in high volume (streaming) and should not spam logs.
 _QUIET_MESSAGE_TYPES = {"reasoning_chunk", "plan_chunk"}
 
-DEFAULT_SUPABASE_URL = "https://fcxnngctkfwpfbbhrmbs.supabase.co"
-DEFAULT_SUPABASE_PUBLISHABLE_KEY = "sb_publishable_9pBlFZWV0LzXWNqYHgULpg_Gy86vf2j"
+DEFAULT_SUPABASE_URL = "https://wpgibucctvusoizwhsbz.supabase.co"
+DEFAULT_SUPABASE_PUBLISHABLE_KEY = "sb_publishable_VkJwtJWbZn8DwovnrKXIew_W0mr9ix_"
 
 
 def _fusion_probe(message: str) -> None:
@@ -2649,7 +2649,15 @@ class AgentController:
         logger.info(f"[auth] send_otp_code called (email={email})")
         return self._auth_client.send_otp_code(email)
 
-    def check_and_handle_signup(self, email: str) -> Dict[str, Any]:
+    def check_and_handle_signup(
+        self,
+        email: str,
+        marketing_consent: bool = False,
+        consent_source: str = "fusion_addin_signup",
+        consent_text_version: str = "",
+        consent_text: str = "",
+        consent_collected_at: str = "",
+    ) -> Dict[str, Any]:
         """
         Smart signup/login handler:
         - For NEW users: Creates account instantly without OTP (frictionless)
@@ -2658,7 +2666,14 @@ class AgentController:
         if not self._auth_client:
             raise Exception("Supabase auth not configured")
         logger.info(f"[auth] check_and_handle_signup called (email={email})")
-        return self._auth_client.check_and_handle_signup(email)
+        return self._auth_client.check_and_handle_signup(
+            email,
+            marketing_consent=marketing_consent,
+            consent_source=consent_source,
+            consent_text_version=consent_text_version,
+            consent_text=consent_text,
+            consent_collected_at=consent_collected_at,
+        )
 
     def login_with_password(self, email: str, password: str) -> Dict[str, Any]:
         """

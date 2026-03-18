@@ -82,6 +82,7 @@ class SupabaseAuthClient:
         self.supabase_url = supabase_url.rstrip('/')
         self.supabase_key = supabase_key
         self._session: Optional[SimpleSession] = None
+        self._pending_marketing_consent: Dict[str, Dict[str, Any]] = {}
 
         # Session storage path (in user's home directory)
         self.session_file = Path.home() / ".cadagent" / "session.json"
@@ -255,7 +256,16 @@ class SupabaseAuthClient:
             logger.error(f"[auth] Instant signup failed for {email}: {detail}")
             raise Exception(f"Instant signup failed: {detail}")
 
-    def check_and_handle_signup(self, email: str) -> Dict[str, Any]:
+    def check_and_handle_signup(
+        self,
+        email: str,
+        *,
+        marketing_consent: bool = False,
+        consent_source: str = "fusion_addin_signup",
+        consent_text_version: str = "",
+        consent_text: str = "",
+        consent_collected_at: str = "",
+    ) -> Dict[str, Any]:
         """Ensure account exists, then require OTP verification to log in."""
         try:
             email = self._normalize_email(email)
@@ -263,6 +273,13 @@ class SupabaseAuthClient:
                 raise Exception("Email is required")
 
             logger.info(f"[auth] Checking user status for {email}")
+            self._pending_marketing_consent[email] = {
+                "consent_status": bool(marketing_consent),
+                "consent_source": (consent_source or "fusion_addin_signup").strip() or "fusion_addin_signup",
+                "consent_text_version": (consent_text_version or "").strip(),
+                "consent_text": (consent_text or "").strip(),
+                "consent_timestamp": (consent_collected_at or datetime.utcnow().isoformat()).strip(),
+            }
             created_new_user = False
 
             try:
@@ -362,6 +379,7 @@ class SupabaseAuthClient:
                 if session:
                     self._session = session
                     self.save_session(session)
+                    self._persist_marketing_consent(email, session)
                     logger.info(f"[auth] OTP verified and session saved")
                     return {
                         "success": True,
@@ -378,6 +396,55 @@ class SupabaseAuthClient:
             detail = str(e)
             logger.error(f"[auth] OTP verification failed for {email}: {detail}")
             raise Exception(f"OTP verification failed: {detail}")
+
+    def _persist_marketing_consent(self, email: str, session: SimpleSession) -> None:
+        """Persist marketing consent proof (non-fatal on failure)."""
+        email = self._normalize_email(email)
+        consent = self._pending_marketing_consent.pop(email, None)
+        if not consent:
+            return
+
+        user_id = str((session.user or {}).get("id") or "").strip()
+        if not user_id:
+            logger.warning("[auth] Skipping marketing consent persistence: missing user id in session")
+            return
+
+        consent_status = bool(consent.get("consent_status"))
+        consent_timestamp = str(consent.get("consent_timestamp") or datetime.utcnow().isoformat()).strip()
+        withdrawn_at = str(consent.get("withdrawn_at") or "").strip()
+        if not consent_status and withdrawn_at:
+            withdrawn_value: Optional[str] = withdrawn_at
+        else:
+            withdrawn_value = None
+
+        payload = {
+            "user_id": user_id,
+            "email": email,
+            "consent_status": consent_status,
+            "consent_timestamp": consent_timestamp,
+            "consent_source": str(consent.get("consent_source") or "fusion_addin_signup").strip(),
+            "consent_text_version": str(consent.get("consent_text_version") or "").strip(),
+            "consent_text": str(consent.get("consent_text") or "").strip(),
+            "withdrawn_at": withdrawn_value,
+        }
+
+        headers = self._get_authenticated_headers(session.access_token).copy()
+        headers["Prefer"] = "return=minimal,resolution=merge-duplicates"
+        url = f"{self.supabase_url}/rest/v1/marketing_email_consents?on_conflict=user_id"
+
+        try:
+            with httpx.Client(timeout=30.0) as client:
+                response = client.post(url, json=payload, headers=headers)
+            if response.status_code not in (200, 201):
+                logger.warning(
+                    "[auth] Marketing consent persistence failed (status=%s): %s",
+                    response.status_code,
+                    response.text,
+                )
+            else:
+                logger.info("[auth] Marketing consent persisted for %s", email)
+        except Exception as consent_error:
+            logger.warning(f"[auth] Marketing consent persistence error for {email}: {consent_error}")
 
     def set_session_from_callback(self, access_token: str, refresh_token: str) -> Dict[str, Any]:
         """Set the session from auth callback tokens (magic link clicked)."""
