@@ -82,7 +82,7 @@ let state = {
     visualContextEnabled: false,
     captureRunLogs: false,
     activeRun: null,
-    selectedModel: 'gpt-5.2',
+    selectedModel: 'gpt-5.4',
     reasoningEffort: 'medium',  // Default for OpenAI; 'off' for Anthropic
     reasoning: {
         activeSession: null,
@@ -5705,7 +5705,7 @@ const REASONING_DEFAULTS = {
 const MODEL_PROVIDER_MAP = {
     // OpenAI
     'gpt-5': 'openai',
-    'gpt-5.2': 'openai',
+    'gpt-5.4': 'openai',
     'gpt-5-mini': 'openai',
     'o1': 'openai',
     'o1-mini': 'openai',
@@ -5713,8 +5713,8 @@ const MODEL_PROVIDER_MAP = {
     'o3-mini': 'openai',
     'o4': 'openai',
     // Anthropic
-    'claude-sonnet-4.6': 'anthropic',
-    'claude-opus-4.6': 'anthropic',
+    'claude-sonnet-4.7': 'anthropic',
+    'claude-opus-4.7': 'anthropic',
 };
 
 /**
@@ -5783,7 +5783,7 @@ function updateImageUploadAvailability() {
         'title',
         hasOpenAIKey
             ? 'Attach sketch image'
-            : 'Add an OpenAI API key to use image uploads (GPT-5.2)'
+            : 'Add an OpenAI API key to use image uploads (GPT-5.4)'
     );
 
     if (!hasOpenAIKey && state.attachedImage) {
