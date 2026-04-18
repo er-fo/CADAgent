@@ -22,8 +22,20 @@ AUTH_MESSAGE_TYPES = frozenset(['auth_success', 'auth_error', 'user_profile'])
 # Critical messages that should be dispatched as soon as palette exists (no visibility/handshake required)
 # Messages that must reach the palette even if the custom send event isn't available yet.
 CRITICAL_MESSAGE_TYPES = frozenset(['connection_status', 'auth_success', 'auth_error', 'user_profile', 'document_switched'])
+SUPPORT_CONTACT_LINE = "If issue persists, email erik@cadagent.co"
+SUPPORT_CONTACT_MESSAGE_TYPES = frozenset(['error', 'auth_error', 'api_keys_error'])
 
 logger = logging.getLogger(__name__)
+
+
+def _append_support_contact(message: str) -> str:
+    """Append support contact details to user-facing error messages."""
+    if not message:
+        return SUPPORT_CONTACT_LINE
+    if SUPPORT_CONTACT_LINE.lower() in message.lower():
+        return message
+    separator = "\n\n" if "\n" in message else " "
+    return f"{message}{separator}{SUPPORT_CONTACT_LINE}"
 
 
 class PaletteSendEventHandler(adsk.core.CustomEventHandler):
@@ -328,6 +340,10 @@ class PaletteManager:
             message_type: Type of message (e.g., 'log', 'connection_status')
             **kwargs: Additional message data
         """
+        if message_type in SUPPORT_CONTACT_MESSAGE_TYPES and isinstance(kwargs.get("message"), str):
+            kwargs = dict(kwargs)
+            kwargs["message"] = _append_support_contact(kwargs["message"])
+
         logger.info(f"→ send_message called: type={message_type}, doc_id={doc_id}, kwargs={kwargs}")
 
         # Recreate palette if it was destroyed (e.g., workspace change)
