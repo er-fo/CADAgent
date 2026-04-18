@@ -408,7 +408,27 @@ class AgentController:
             image_format: Image format (png, jpg, jpeg)
             reasoning_effort: User-selected reasoning effort level (off/low/medium/high/xhigh/on)
         """
+        # For production Supabase-backed deployments, block command execution until
+        # we have a valid JWT. This prevents opening unauthenticated WS sessions
+        # that backend v2 rejects with "no token provided".
+        token_required = bool(self._auth_client) and not self._auth_bypass
+        if token_required and not self._get_user_token():
+            self._palette_manager.send_message('auth_error', message='Please sign in before sending requests.')
+            general_utils.show_message_box(
+                "CADAgent Authentication Required",
+                "Please sign in to CADAgent before sending requests.",
+                adsk.core.MessageBoxIconTypes.WarningIconType
+            )
+            return
+
         client = self._get_active_ws_client()
+        if not client or not client.is_connected():
+            # Try to establish/recover the active document session just-in-time.
+            try:
+                self._activate_session_for_current_document()
+            except Exception as e:
+                logger.warning(f"Failed to activate document session before submit: {e}")
+            client = self._get_active_ws_client()
         if not client or not client.is_connected():
             general_utils.show_message_box(
                 "CADAgent Connection Error",
@@ -2524,6 +2544,8 @@ class AgentController:
 
     def _ensure_session_for_doc(self, doc: adsk.core.Document) -> Dict[str, Any]:
         doc_id, name = self._doc_identity(doc)
+        token_required = bool(self._auth_client) and not self._auth_bypass
+
         if doc_id in self._sessions:
             info = self._sessions[doc_id]
             info['doc_name'] = name
@@ -2539,8 +2561,14 @@ class AgentController:
                     ws_url = config.build_ws_url(session_id)
                     # Get user token for usage tracking
                     user_token = self._get_user_token()
+                    if token_required and not user_token:
+                        logger.info(
+                            "Deferring reconnect for '%s' until authentication is available",
+                            name,
+                        )
+                        return info
                     if not user_token:
-                        logger.info("Reconnecting '%s' with anonymous session (no auth token)", name)
+                        logger.info("Reconnecting '%s' in auth-bypass mode (no auth token)", name)
                     new_client = FusionWebSocketClient(ws_url, user_token=user_token)
                     # Set API keys for BYOK
                     api_keys = self.get_api_keys_for_backend()
@@ -2577,8 +2605,26 @@ class AgentController:
         ws_url = config.build_ws_url(session_id)
         # Get user token for usage tracking
         user_token = self._get_user_token()
+        if token_required and not user_token:
+            logger.info(
+                "Deferring WebSocket creation for '%s' until authentication is available",
+                name,
+            )
+            info = {
+                'session_id': session_id,
+                'ws_client': None,
+                'created_at': time.time(),
+                'last_active': time.time(),
+                'doc_name': name,
+                'document': doc,
+            }
+            design = self._resolve_design_reference(doc)
+            if design:
+                info['design'] = design
+            self._sessions[doc_id] = info
+            return info
         if not user_token:
-            logger.info("Creating '%s' with anonymous session (no auth token)", name)
+            logger.info("Creating '%s' in auth-bypass mode (no auth token)", name)
         client = FusionWebSocketClient(ws_url, user_token=user_token)
         # Set API keys for BYOK
         api_keys = self.get_api_keys_for_backend()
