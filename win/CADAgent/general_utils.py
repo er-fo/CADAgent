@@ -13,6 +13,17 @@ from typing import Optional
 
 import adsk.core
 
+SUPPORT_CONTACT_LINE = "If issue persists, email erik@cadagent.co"
+
+
+def _append_support_contact(message: str) -> str:
+    if not message:
+        return SUPPORT_CONTACT_LINE
+    if SUPPORT_CONTACT_LINE.lower() in message.lower():
+        return message
+    separator = "\n\n" if "\n" in message else " "
+    return f"{message}{separator}{SUPPORT_CONTACT_LINE}"
+
 
 def show_message_box(
     title: str,
@@ -29,7 +40,13 @@ def show_message_box(
         app = adsk.core.Application.get()
         ui: Optional[adsk.core.UserInterface] = app.userInterface if app else None
         if ui:
-            ui.messageBox(message, title, icon)
+            text = message
+            if icon in (
+                adsk.core.MessageBoxIconTypes.WarningIconType,
+                adsk.core.MessageBoxIconTypes.CriticalIconType,
+            ):
+                text = _append_support_contact(message)
+            ui.messageBox(text, title, icon)
     except Exception as exc:  # noqa: BLE001 - best-effort logging only
         logging.getLogger(__name__).debug("Failed to show message box: %s", exc, exc_info=True)
 
