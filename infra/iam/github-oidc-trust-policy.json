@@ -12,7 +12,7 @@
           "token.actions.githubusercontent.com:aud": "sts.amazonaws.com"
         },
         "StringLike": {
-          "token.actions.githubusercontent.com:sub": "repo:e-adango/cadagent-backend-legacy:ref:refs/heads/main"
+          "token.actions.githubusercontent.com:sub": "repo:er-fo/cadagent-backend-legacy:ref:refs/heads/main"
         }
       }
     }
