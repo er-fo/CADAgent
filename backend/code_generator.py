@@ -51,6 +51,10 @@ PARAM_ALIASES: Dict[str, Dict[str, str]] = {
         "reference_face_ref": "reference_face_token",
         "reference_edge_ref": "reference_edge_token",
         "face_ref": "face_token",
+        "datum_plane": "base_datum_plane",
+        "reference_plane": "base_datum_plane",
+        "offset": "offset_cm",
+        "offset_distance": "offset_cm",
     },
     
     # Pattern feature

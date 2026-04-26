@@ -83,6 +83,24 @@ def test_extrude_profile_nonnumeric_profile_indices_still_rejected():
         )
 
 
+@pytest.mark.parametrize("plane_alias", ["datum_plane", "reference_plane"])
+@pytest.mark.parametrize("offset_alias", ["offset", "offset_distance"])
+def test_create_construction_plane_offset_aliases_are_normalized(plane_alias, offset_alias):
+    code = translate_tool_call(
+        "create_construction_plane",
+        {
+            "plane_id": "p1",
+            "mode": "offset_from_datum",
+            "description": "offset plane",
+            plane_alias: "xy",
+            offset_alias: 1.25,
+        },
+    )
+
+    assert 'base_datum_plane="XY"' in code
+    assert "offset_cm=1.25" in code
+
+
 # --- list_sketch_profiles enricher hint tests ---
 
 def _import_enricher():
@@ -142,4 +160,3 @@ def test_extrude_profile_only_profile_indices_no_profile_index():
     assert "_profile_indices = [0, 1, 2]" in code
     # The fallback guard is present but won't execute since _profile_indices is not None
     assert "if _profile_indices is None:" in code
-

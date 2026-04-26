@@ -75,3 +75,29 @@ def test_create_sketch_unresolved_face_ref_includes_candidate_refs():
 
     asyncio.run(_run())
 
+
+def test_create_sketch_unresolved_face_ref_without_entities_raises_instead_of_xy_fallback():
+    async def _run():
+        store = EntityStore()
+        manager = _ManagerStub(store)
+
+        try:
+            _resolve_codegen_entity_refs(
+                "s1",
+                manager,
+                "create_sketch",
+                {
+                    "plane_id": "face_0",
+                    "sketch_id": "s",
+                    "sketch_name": "s",
+                    "description": "x",
+                },
+            )
+            assert False, "Expected SelectionToolCallError for unresolved face ref with empty context"
+        except SelectionToolCallError as exc:
+            msg = str(exc)
+            assert "create_sketch plane_id could not be resolved: face_0" in msg
+            assert "No design entities are loaded in the current entity context." in msg
+            assert "Call list_features to refresh entity context" in msg
+
+    asyncio.run(_run())

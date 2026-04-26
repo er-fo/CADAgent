@@ -287,6 +287,10 @@ _PARAM_ALIASES: Dict[str, Dict[str, str]] = {
         "reference_face_ref": "reference_face_token",
         "reference_edge_ref": "reference_edge_token",
         "face_ref": "face_token",
+        "datum_plane": "base_datum_plane",
+        "reference_plane": "base_datum_plane",
+        "offset": "offset_cm",
+        "offset_distance": "offset_cm",
     },
     
     # Pattern feature
@@ -2922,6 +2926,53 @@ async def _execute_workflow_loop(
                         session_id, manager, tool_name
                     )
                     if not is_valid:
+                        logger.warning(
+                            "Session %s entity validation failed for '%s'; attempting one-time context recovery: %s",
+                            session_id,
+                            tool_name,
+                            validation_warning,
+                        )
+                        try:
+                            store = _get_entity_store(session_id, manager)
+                            fresh_context = await _refresh_entity_context_with_retry(
+                                session_id,
+                                manager,
+                                tool_name,
+                                prev_signature=store.get_signature(),
+                                max_attempts=1,
+                                operation_was_noop=True,
+                            )
+                            store.soft_clear()
+                            await _prepopulate_entity_store(session_id, manager, fresh_context)
+                            current_tokens = _extract_tokens_from_context(fresh_context)
+                            store.prune_stale_tokens(current_tokens)
+                            store.store_signature()
+
+                            is_valid, validation_warning = _validate_entity_store_for_tool(
+                                session_id, manager, tool_name
+                            )
+                            if is_valid:
+                                logger.info(
+                                    "Session %s entity context recovery succeeded for '%s'; continuing execution.",
+                                    session_id,
+                                    tool_name,
+                                )
+                            else:
+                                logger.warning(
+                                    "Session %s entity context recovery completed but validation still failed for '%s': %s",
+                                    session_id,
+                                    tool_name,
+                                    validation_warning,
+                                )
+                        except Exception as exc:
+                            logger.warning(
+                                "Session %s entity context recovery failed for '%s': %s",
+                                session_id,
+                                tool_name,
+                                exc,
+                            )
+
+                    if not is_valid:
                         # Entity context is missing - return error to LLM with guidance
                         error_text = (
                             f"SPATIAL VALIDATION FAILED:\n{validation_warning}\n\n"
@@ -3102,6 +3153,45 @@ async def _execute_workflow_loop(
 
             # Remove narrative-only fields before translation to keep tool schema strict.
             codegen_input = dict(tool_input)
+
+            # If create_sketch targets a face_N ref but faces are not loaded, try one
+            # context recovery before reference resolution to avoid stale/empty-context misses.
+            if tool_name == "create_sketch":
+                plane_id = str(codegen_input.get("plane_id", "")).strip()
+                if re.match(r"^face_\d+$", plane_id):
+                    store = _get_entity_store(session_id, manager)
+                    if not store.get_refs_by_kind("face"):
+                        logger.warning(
+                            "Session %s create_sketch on '%s' has no face refs loaded; attempting one-time context recovery.",
+                            session_id,
+                            plane_id,
+                        )
+                        try:
+                            fresh_context = await _refresh_entity_context_with_retry(
+                                session_id,
+                                manager,
+                                tool_name,
+                                prev_signature=store.get_signature(),
+                                max_attempts=1,
+                                operation_was_noop=True,
+                            )
+                            store.soft_clear()
+                            await _prepopulate_entity_store(session_id, manager, fresh_context)
+                            current_tokens = _extract_tokens_from_context(fresh_context)
+                            store.prune_stale_tokens(current_tokens)
+                            store.store_signature()
+                            logger.info(
+                                "Session %s create_sketch context recovery completed before resolving '%s'.",
+                                session_id,
+                                plane_id,
+                            )
+                        except Exception as exc:
+                            logger.warning(
+                                "Session %s create_sketch context recovery failed for '%s': %s",
+                                session_id,
+                                plane_id,
+                                exc,
+                            )
 
             try:
                 codegen_input = _resolve_codegen_entity_refs(session_id, manager, tool_name, codegen_input)
@@ -6761,33 +6851,11 @@ def _resolve_codegen_entity_refs(
                 body_refs = store.get_refs_by_kind("body")
 
                 if not face_refs and not body_refs:
-                    # If we have a feature snapshot suggesting geometry already exists, do NOT fall back
-                    # to a datum plane. That creates sketches on the origin plane and commonly causes
-                    # cut operations to miss the body entirely.
-                    snapshot = manager.get_feature_snapshot(session_id)
-                    snapshot_has_bodies = False
-                    try:
-                        if snapshot:
-                            for feat in (snapshot.get("features") or []):
-                                if feat.get("bodies"):
-                                    snapshot_has_bodies = True
-                                    break
-                    except Exception:
-                        snapshot_has_bodies = False
-
-                    if snapshot_has_bodies:
-                        raise SelectionToolCallError(
-                            f"create_sketch plane_id could not be resolved: {plane_id}. {error}. "
-                            "Entity refs are missing but the feature snapshot indicates bodies exist. "
-                            "Call list_features to refresh entity context and then retry with a real face ref "
-                            "(e.g., face_0) or a datum plane (XY/XZ/YZ)."
-                        )
-
-                    # No bodies, no faces — fall back to XY datum plane for any face_N ref
-                    resolved_input["plane_id"] = "XY"
-                    logger.info(
-                        "Mapped unresolved face ref '%s' to datum plane 'XY' for create_sketch (no bodies/faces in context).",
-                        plane_id,
+                    raise SelectionToolCallError(
+                        f"create_sketch plane_id could not be resolved: {plane_id}. {error}. "
+                        "No design entities are loaded in the current entity context. "
+                        "Call list_features to refresh entity context, then retry with plane_id as a real face ref "
+                        "(e.g., face_0) or provide an explicit datum plane (XY/XZ/YZ)."
                     )
                 elif not face_refs:
                     raise SelectionToolCallError(
