@@ -8,7 +8,7 @@ for the CADAgent add-in with real-time feedback and activity logging.
 import adsk.core
 import json
 import logging
-import os
+from pathlib import Path
 import threading
 import time
 import webbrowser
@@ -185,22 +185,19 @@ class PaletteManager:
         logger.info("Creating (or recreating) palette instance")
 
         # Acquire HTML path
-        html_file = os.path.join(
-            os.path.dirname(__file__),
-            'resources',
-            'html',
-            'index.html'
-        )
-        if not os.path.exists(html_file):
+        html_file = Path(__file__).resolve().parent / 'resources' / 'html' / 'index.html'
+        if not html_file.exists():
             raise FileNotFoundError(f"HTML file not found: {html_file}")
 
+        html_url = html_file.as_uri()
         logger.info(f"HTML file exists: ✓ ({html_file})")
+        logger.info(f"Using palette HTML URL: {html_url}")
 
         # Create palette
         self._palette = palettes.add(
             self.PALETTE_ID,
             self.PALETTE_NAME,
-            html_file,
+            html_url,
             True,   # showCloseButton
             True,   # isResizable
             False,  # isVisible (keep hidden until workspace ready)

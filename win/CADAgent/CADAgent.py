@@ -2024,7 +2024,7 @@ class AgentController:
         # Extract fresh entity context with a short retry loop to avoid transient empties
         entity_context: Optional[Dict[str, Any]] = None
         for attempt in range(3):
-            entity_context = self._extract_entity_context()
+            entity_context = self._extract_entity_context(design)
             total_entities = 0
             if entity_context:
                 total_entities = (
@@ -2333,7 +2333,10 @@ class AgentController:
             "height": target_height,
         }
 
-    def _extract_entity_context(self) -> Optional[Dict[str, Any]]:
+    def _extract_entity_context(
+        self,
+        design: Optional[adsk.fusion.Design] = None,
+    ) -> Optional[Dict[str, Any]]:
         """
         Extract all bodies, faces, and edges from the active design.
 
@@ -2350,9 +2353,14 @@ class AgentController:
         try:
             context: Dict[str, Any] = {}
 
+            if design is None or not getattr(design, "isValid", True):
+                design = adsk.fusion.Design.cast(self._app.activeProduct)
+            if not design or not getattr(design, "isValid", True):
+                return None
+
             # Extract bodies
             try:
-                bodies, body_units = body_tools.list_bodies(self._app)
+                bodies, body_units = body_tools.list_bodies(self._app, design)
                 context["bodies"] = bodies
                 context["body_units"] = body_units
             except Exception as exc:
@@ -2362,7 +2370,7 @@ class AgentController:
 
             # Extract faces
             try:
-                faces, face_units = face_tools.list_faces(self._app)
+                faces, face_units = face_tools.list_faces(self._app, design)
                 context["faces"] = faces
                 context["face_units"] = face_units
             except Exception as exc:
@@ -2372,7 +2380,7 @@ class AgentController:
 
             # Extract edges
             try:
-                edges, edge_units = edge_tools.list_edges(self._app)
+                edges, edge_units = edge_tools.list_edges(self._app, design)
                 context["edges"] = edges
                 context["edge_units"] = edge_units
             except Exception as exc:

@@ -65,7 +65,10 @@ def _collect_vertices(body: adsk.fusion.BRepBody) -> List[Dict[str, Any]]:
     return vertices
 
 
-def list_bodies(app: adsk.core.Application) -> Tuple[List[Dict[str, Any]], Dict[str, str]]:
+def list_bodies(
+    app: adsk.core.Application,
+    design: Optional[adsk.fusion.Design] = None,
+) -> Tuple[List[Dict[str, Any]], Dict[str, str]]:
     """
     Collect metadata for every body in the active design, including basic
     physical properties, bounding box coordinates, and vertices.
@@ -74,7 +77,8 @@ def list_bodies(app: adsk.core.Application) -> Tuple[List[Dict[str, Any]], Dict[
         Tuple where the first value is a list of body dictionaries and the second
         value is a mapping of unit identifiers (`length`, `area`, `volume`, `mass`, `density`).
     """
-    design = _require_design(app)
+    if design is None or not getattr(design, "isValid", True):
+        design = _require_design(app)
     root_component = design.rootComponent
     units_manager = design.unitsManager
 
