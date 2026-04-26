@@ -576,6 +576,7 @@ def _extract_tokens_from_context(entity_context: Mapping[str, Any]) -> List[str]
     Used for pruning stale tokens from the persistent cache.
     """
     tokens: List[str] = []
+    seen_tokens: Set[str] = set()
 
     def _get_token(obj: Optional[Mapping[str, Any]]) -> Optional[str]:
         """Extract token from object, trying both field names."""
@@ -583,44 +584,41 @@ def _extract_tokens_from_context(entity_context: Mapping[str, Any]) -> List[str]
             return None
         return obj.get("token") or obj.get("entity_token")
 
-    # Check for nested spatial_context structure
+    def _append_token(token: Optional[str]) -> None:
+        if not token or token in seen_tokens:
+            return
+        seen_tokens.add(token)
+        tokens.append(token)
+
+    # Use nested spatial_context only when it actually contains body entries.
+    # Some clients send flat entities with an empty spatial_context.bodies list.
     spatial_context = entity_context.get("spatial_context")
-    if spatial_context and isinstance(spatial_context, dict):
+    spatial_bodies: List[Mapping[str, Any]] = []
+    if isinstance(spatial_context, dict):
+        maybe_bodies = spatial_context.get("bodies", [])
+        if isinstance(maybe_bodies, list):
+            spatial_bodies = maybe_bodies
+
+    if spatial_bodies:
         bodies_data = spatial_context.get("bodies", [])
         for body in bodies_data:
-            token = _get_token(body)
-            if token:
-                tokens.append(token)
+            _append_token(_get_token(body))
             for face in body.get("faces", []):
-                token = _get_token(face)
-                if token:
-                    tokens.append(token)
+                _append_token(_get_token(face))
             for edge in body.get("edges", []):
-                token = _get_token(edge)
-                if token:
-                    tokens.append(token)
+                _append_token(_get_token(edge))
             for vertex in body.get("vertices", []):
-                token = _get_token(vertex)
-                if token:
-                    tokens.append(token)
+                _append_token(_get_token(vertex))
     else:
         # Flat structure
         for body in entity_context.get("bodies", []):
-            token = _get_token(body)
-            if token:
-                tokens.append(token)
+            _append_token(_get_token(body))
         for face in entity_context.get("faces", []):
-            token = _get_token(face)
-            if token:
-                tokens.append(token)
+            _append_token(_get_token(face))
         for edge in entity_context.get("edges", []):
-            token = _get_token(edge)
-            if token:
-                tokens.append(token)
+            _append_token(_get_token(edge))
         for vertex in entity_context.get("vertices", []):
-            token = _get_token(vertex)
-            if token:
-                tokens.append(token)
+            _append_token(_get_token(vertex))
 
     return tokens
 
@@ -657,11 +655,16 @@ async def _prepopulate_entity_store(
     """
     store = _get_entity_store(session_id, manager)
 
-    # Support both flat structure and new nested per-body structure
-    # Check if we have the new spatial_context format
+    # Support both flat structure and new nested per-body structure.
+    # Only treat as nested when bodies are present; otherwise fall back to flat.
     spatial_context = entity_context.get("spatial_context")
-    if spatial_context and isinstance(spatial_context, dict):
-        bodies_data = spatial_context.get("bodies", [])
+    bodies_data: List[Mapping[str, Any]] = []
+    if isinstance(spatial_context, dict):
+        maybe_bodies = spatial_context.get("bodies", [])
+        if isinstance(maybe_bodies, list):
+            bodies_data = maybe_bodies
+
+    if bodies_data:
         # Process nested per-body structure
         await _prepopulate_from_spatial_context(store, bodies_data, entity_context)
         return
@@ -4331,10 +4334,16 @@ def _compute_face_topology(entity_context: Mapping[str, Any], cap: int = 6) -> D
     from collections import defaultdict
     topology: Dict[str, set] = defaultdict(set)
 
-    # Handle spatial_context (nested) format
+    # Handle spatial_context (nested) format only when bodies are present.
     spatial_context = entity_context.get("spatial_context")
-    if spatial_context and isinstance(spatial_context, dict):
-        for body in spatial_context.get("bodies", []):
+    spatial_bodies: List[Mapping[str, Any]] = []
+    if isinstance(spatial_context, dict):
+        maybe_bodies = spatial_context.get("bodies", [])
+        if isinstance(maybe_bodies, list):
+            spatial_bodies = maybe_bodies
+
+    if spatial_bodies:
+        for body in spatial_bodies:
             for edge in body.get("edges", []):
                 adj = edge.get("adjacent_faces", [])
                 if len(adj) == 2:
@@ -4435,8 +4444,14 @@ def _compute_parallel_face_pairs(entity_context: Mapping[str, Any]) -> Dict[str,
             pairs_by_body[body_key] = body_pairs[:MAX_PARALLEL_PAIRS_PER_BODY]
 
     spatial_context = entity_context.get("spatial_context")
-    if spatial_context and isinstance(spatial_context, dict):
-        for body in spatial_context.get("bodies", []):
+    spatial_bodies: List[Mapping[str, Any]] = []
+    if isinstance(spatial_context, dict):
+        maybe_bodies = spatial_context.get("bodies", [])
+        if isinstance(maybe_bodies, list):
+            spatial_bodies = maybe_bodies
+
+    if spatial_bodies:
+        for body in spatial_bodies:
             body_key = body.get("entity_ref", body.get("id", "body_?"))
             _process_faces(body.get("faces", []), body_key)
     else:
@@ -4473,9 +4488,15 @@ def _format_unified_context(entity_context: Mapping[str, Any]) -> str:
     if not entity_context:
         return ""
 
-    # Determine format (spatial_context nested vs flat)
+    # Determine format (spatial_context nested vs flat). Some clients include
+    # an empty spatial_context.bodies alongside populated flat entities.
     spatial_context = entity_context.get("spatial_context")
-    is_nested = spatial_context and isinstance(spatial_context, dict)
+    spatial_bodies: List[Mapping[str, Any]] = []
+    if isinstance(spatial_context, dict):
+        maybe_bodies = spatial_context.get("bodies", [])
+        if isinstance(maybe_bodies, list):
+            spatial_bodies = maybe_bodies
+    is_nested = bool(spatial_bodies)
 
     lines = ["design_entities:"]
 
@@ -4484,7 +4505,11 @@ def _format_unified_context(entity_context: Mapping[str, Any]) -> str:
     if is_nested:
         units = spatial_context.get("units", "mm")
     else:
-        units = entity_context.get("units", "mm")
+        units = entity_context.get("units")
+        if units is None and isinstance(spatial_context, dict):
+            units = spatial_context.get("units")
+        if units is None:
+            units = "mm"
     lines.append(f"  units: {units}")
 
     # Notation legend
@@ -4805,7 +4830,12 @@ def _format_design_entities_xml(entity_context: Mapping[str, Any]) -> str:
 
     # Check for new nested spatial_context structure
     spatial_context = entity_context.get("spatial_context")
-    if spatial_context and isinstance(spatial_context, dict):
+    spatial_bodies: List[Mapping[str, Any]] = []
+    if isinstance(spatial_context, dict):
+        maybe_bodies = spatial_context.get("bodies", [])
+        if isinstance(maybe_bodies, list):
+            spatial_bodies = maybe_bodies
+    if spatial_bodies:
         return _format_spatial_context_xml(spatial_context)
 
     # Fall back to flat structure
@@ -5075,7 +5105,12 @@ def _format_entity_context(entity_context: Mapping[str, Any]) -> str:
 
     # Check for new nested spatial_context structure
     spatial_context = entity_context.get("spatial_context")
-    if spatial_context and isinstance(spatial_context, dict):
+    spatial_bodies: List[Mapping[str, Any]] = []
+    if isinstance(spatial_context, dict):
+        maybe_bodies = spatial_context.get("bodies", [])
+        if isinstance(maybe_bodies, list):
+            spatial_bodies = maybe_bodies
+    if spatial_bodies:
         return _format_spatial_context_text(spatial_context)
 
     # Fall back to flat structure
