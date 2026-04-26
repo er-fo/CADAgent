@@ -1,0 +1,145 @@
+import pytest
+
+try:
+    # When collected as part of the `backend` package (pytest default for this repo layout).
+    from .code_generator import CodeGenerationError, translate_tool_call
+except ImportError:  # pragma: no cover - fallback for alternate import contexts
+    from backend.backend.code_generator import CodeGenerationError, translate_tool_call
+
+
+def test_extrude_profile_empty_profile_indices_is_treated_as_omitted_and_uses_profile_index():
+    # LLM failure mode: includes profile_indices=[] while also providing profile_index.
+    code = translate_tool_call(
+        "extrude_profile",
+        {
+            "sketch_id": "sk1",
+            "distance": 1.0,
+            "profile_index": 2,
+            "profile_indices": [],
+            "description": "x",
+        },
+    )
+    # After normalization, profile_indices should behave as omitted (template sees None default).
+    assert "_profile_indices = None" in code
+    assert "if _profile_indices is None:" in code
+    assert "_profile_indices = [2]" in code
+
+
+def test_extrude_profile_empty_profile_indices_is_treated_as_omitted_and_defaults_to_profile_index_0():
+    # LLM failure mode: includes profile_indices=[] but does not provide profile_index.
+    code = translate_tool_call(
+        "extrude_profile",
+        {
+            "sketch_id": "sk1",
+            "distance": 1.0,
+            "profile_indices": [],
+            "description": "x",
+        },
+    )
+    assert "_profile_indices = [0]" in code
+
+
+def test_extrude_profile_nonempty_profile_indices_wins_over_profile_index():
+    code = translate_tool_call(
+        "extrude_profile",
+        {
+            "sketch_id": "sk1",
+            "distance": 1.0,
+            "profile_index": 0,
+            "profile_indices": [0, 1],
+            "description": "x",
+        },
+    )
+    # Multi-profile path should be used; conflict is resolved silently.
+    assert "_profile_indices = [0, 1]" in code
+    assert "adsk.core.ObjectCollection.create()" in code
+    assert "for _idx in _profile_indices" in code
+
+
+def test_extrude_profile_negative_profile_indices_still_rejected():
+    with pytest.raises(CodeGenerationError) as exc:
+        translate_tool_call(
+            "extrude_profile",
+            {
+                "sketch_id": "sk1",
+                "distance": 1.0,
+                "profile_indices": [-1],
+                "description": "x",
+            },
+        )
+    assert '"profile_indices" entries must be zero or greater.' in str(exc.value)
+
+
+def test_extrude_profile_nonnumeric_profile_indices_still_rejected():
+    with pytest.raises(CodeGenerationError):
+        translate_tool_call(
+            "extrude_profile",
+            {
+                "sketch_id": "sk1",
+                "distance": 1.0,
+                "profile_indices": ["a"],
+                "description": "x",
+            },
+        )
+
+
+# --- list_sketch_profiles enricher hint tests ---
+
+def _import_enricher():
+    """Import the enricher function, setting a dummy API key if needed."""
+    import os
+    os.environ.setdefault("OPENAI_API_KEY", "test-key-not-used")
+    try:
+        from .agent_workflow import _enrich_list_sketch_profiles_result
+    except ImportError:
+        from backend.backend.agent_workflow import _enrich_list_sketch_profiles_result
+    return _enrich_list_sketch_profiles_result
+
+
+def test_list_sketch_profiles_enricher_hint_for_multiple_profiles():
+    """When list_sketch_profiles returns 2+ profiles, the enricher should add a HINT suggesting profile_indices."""
+    enricher = _import_enricher()
+    result = {
+        "sketch_id": "sketch_base",
+        "profile_count": 3,
+        "profiles": [
+            {"index": 0, "area_cm2": None, "centroid_world_cm": None, "outer_loop_count": 1, "inner_loop_count": 0},
+            {"index": 1, "area_cm2": None, "centroid_world_cm": None, "outer_loop_count": 1, "inner_loop_count": 0},
+            {"index": 2, "area_cm2": None, "centroid_world_cm": None, "outer_loop_count": 1, "inner_loop_count": 0},
+        ],
+    }
+    text = enricher("list_sketch_profiles", result, {})
+    assert "HINT" in text
+    assert "profile_indices=[0, 1, 2]" in text
+    assert "omit profile_index" in text
+
+
+def test_list_sketch_profiles_enricher_no_hint_for_single_profile():
+    """When list_sketch_profiles returns only 1 profile, no hint should be added."""
+    enricher = _import_enricher()
+    result = {
+        "sketch_id": "sketch_base",
+        "profile_count": 1,
+        "profiles": [
+            {"index": 0, "area_cm2": 5.0, "centroid_world_cm": [0, 0, 0], "outer_loop_count": 1, "inner_loop_count": 0},
+        ],
+    }
+    text = enricher("list_sketch_profiles", result, {})
+    assert "HINT" not in text
+
+
+def test_extrude_profile_only_profile_indices_no_profile_index():
+    """When only profile_indices is provided (profile_index omitted), the template should use them."""
+    code = translate_tool_call(
+        "extrude_profile",
+        {
+            "sketch_id": "sk1",
+            "distance": 2.0,
+            "profile_indices": [0, 1, 2],
+            "description": "Extruding all overlapping profiles as one shape",
+        },
+    )
+    assert "_profile_indices = [0, 1, 2]" in code
+    # The fallback guard is present but won't execute since _profile_indices is not None
+    assert "if _profile_indices is None:" in code
+

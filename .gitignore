@@ -1,0 +1,16 @@
+.pytest_cache/
+.venv/
+.venv*/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+.DS_Store
+
+backend-from-aws/
+latest-addin/
+.claude/
+
+deployment.zip
+cadagent*.log

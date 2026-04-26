@@ -1,0 +1,12 @@
+fastapi>=0.104.0
+uvicorn>=0.24.0
+anthropic>=0.30.0
+openai>=1.0.0
+websockets>=12.0
+python-dotenv>=1.0.0
+supabase>=2.0.0
+httpx>=0.24.0
+Pillow>=10.0.0
+PyJWT>=2.8.0
+Markdown>=3.6
+build123d>=0.8.0

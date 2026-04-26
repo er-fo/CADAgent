@@ -1,0 +1,68 @@
+name: Deploy backend legacy to EC2
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: eu-north-1
+  S3_BUCKET: cadagent-backend-legacy-deploy-598566032640
+  S3_KEY_PREFIX: backend-legacy
+  CODEDEPLOY_APPLICATION: cadagent-backend-legacy
+  CODEDEPLOY_DEPLOYMENT_GROUP: cadagent-backend-legacy-ec2
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::598566032640:role/github-actions-cadagent-backend-legacy-deploy-role
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: Run tests
+        env:
+          PYTHONPATH: .
+        run: pytest
+
+      - name: Create deployment bundle
+        run: |
+          zip -r deployment.zip \
+            appspec.yml \
+            backend \
+            requirements.txt \
+            start_backend.py \
+            scripts
+
+      - name: Upload bundle to S3
+        run: |
+          aws s3 cp deployment.zip \
+            "s3://${S3_BUCKET}/${S3_KEY_PREFIX}/deployment-${GITHUB_SHA}.zip"
+
+      - name: Create CodeDeploy deployment
+        run: |
+          aws deploy create-deployment \
+            --application-name "${CODEDEPLOY_APPLICATION}" \
+            --deployment-group-name "${CODEDEPLOY_DEPLOYMENT_GROUP}" \
+            --s3-location "bucket=${S3_BUCKET},key=${S3_KEY_PREFIX}/deployment-${GITHUB_SHA}.zip,bundleType=zip"
