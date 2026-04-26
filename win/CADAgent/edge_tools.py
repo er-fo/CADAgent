@@ -162,7 +162,10 @@ def _vertex_info_mm(vertex: Optional[adsk.fusion.BRepVertex]) -> Optional[Dict[s
         return None
 
 
-def list_edges(app: adsk.core.Application) -> Tuple[List[Dict[str, Any]], str]:
+def list_edges(
+    app: adsk.core.Application,
+    design: Optional[adsk.fusion.Design] = None,
+) -> Tuple[List[Dict[str, Any]], str]:
     """
     Collect metadata for every edge in the active design.
 
@@ -170,7 +173,8 @@ def list_edges(app: adsk.core.Application) -> Tuple[List[Dict[str, Any]], str]:
         Tuple where the first value is a list of edge dictionaries and the second
         value is the length unit identifier (always "mm").
     """
-    design = _require_design(app)
+    if design is None or not getattr(design, "isValid", True):
+        design = _require_design(app)
     root_component = design.rootComponent
     units_manager = design.unitsManager
     # Units in mm (convert from Fusion internal cm)

@@ -100,7 +100,10 @@ def _extract_face_frame(face: adsk.fusion.BRepFace) -> Optional[Dict[str, List[f
         return None
 
 
-def list_faces(app: adsk.core.Application) -> Tuple[List[Dict[str, Any]], Dict[str, str]]:
+def list_faces(
+    app: adsk.core.Application,
+    design: Optional[adsk.fusion.Design] = None,
+) -> Tuple[List[Dict[str, Any]], Dict[str, str]]:
     """
     Collect metadata for every face in the active design, including boundary edges.
 
@@ -108,7 +111,8 @@ def list_faces(app: adsk.core.Application) -> Tuple[List[Dict[str, Any]], Dict[s
         Tuple where the first value is a list of face dictionaries and the second
         value is a mapping of unit identifiers (`length`, `area`).
     """
-    design = _require_design(app)
+    if design is None or not getattr(design, "isValid", True):
+        design = _require_design(app)
     root_component = design.rootComponent
     units_manager = design.unitsManager
 
