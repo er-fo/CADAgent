@@ -65,4 +65,5 @@ jobs:
           aws deploy create-deployment \
             --application-name "${CODEDEPLOY_APPLICATION}" \
             --deployment-group-name "${CODEDEPLOY_DEPLOYMENT_GROUP}" \
+            --file-exists-behavior OVERWRITE \
             --s3-location "bucket=${S3_BUCKET},key=${S3_KEY_PREFIX}/deployment-${GITHUB_SHA}.zip,bundleType=zip"
