@@ -5713,7 +5713,7 @@ const MODEL_PROVIDER_MAP = {
     'o3-mini': 'openai',
     'o4': 'openai',
     // Anthropic
-    'claude-sonnet-4.7': 'anthropic',
+    'claude-sonnet-4.6': 'anthropic',
     'claude-opus-4.7': 'anthropic',
 };
 
