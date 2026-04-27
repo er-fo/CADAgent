@@ -5,7 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Literal, Optional, TypedDict, Union
 
-IRPlane = Literal["XY", "XZ", "YZ"]
+DatumPlane = Literal["XY", "XZ", "YZ"]
+IRPlane = str
 IRDirection = Literal["positive", "negative"]
 IROperationMode = Literal["new", "join", "cut", "intersect"]
 IROperationType = Literal["create_sketch", "add_rectangle", "add_circle", "extrude"]

@@ -19,6 +19,9 @@ class UnsupportedToolMappingError(ValueError):
     """Raised when a planner tool call cannot be mapped to shared IR."""
 
 
+_DATUM_PLANES = {"XY", "XZ", "YZ"}
+
+
 def _to_float(value: Any, default: float = 0.0) -> float:
     try:
         return float(value)
@@ -53,6 +56,24 @@ def _extract_tool_input(tool_call: Mapping[str, Any]) -> Dict[str, Any]:
     return {}
 
 
+def _normalize_create_sketch_plane(raw_value: Any, *, metadata: Optional[IRMetadata]) -> str:
+    raw_plane = str(raw_value or "XY").strip()
+    if not raw_plane:
+        return "XY"
+
+    datum_plane = raw_plane.upper()
+    if datum_plane in _DATUM_PLANES:
+        return datum_plane
+
+    source = str((metadata or {}).get("source") or "").strip().lower()
+    if source == "studio":
+        # build123d currently supports only datum planes.
+        return "XY"
+
+    # Fusion path: preserve face refs and custom construction plane IDs.
+    return raw_plane
+
+
 def map_tool_call_to_ir(
     tool_call: Mapping[str, Any],
     doc_state: IRDocumentState,
@@ -66,10 +87,10 @@ def map_tool_call_to_ir(
 
     if name == "create_sketch":
         sketch_id = str(params.get("sketch_id") or f"sketch_{len(doc_state.operations)}").strip()
-        plane_raw = str(params.get("plane") or params.get("plane_id") or "XY").strip().upper()
-        if plane_raw not in {"XY", "XZ", "YZ"}:
-            # Preserve current Fusion behavior: unknown plane IDs default to XY.
-            plane_raw = "XY"
+        plane_raw = _normalize_create_sketch_plane(
+            params.get("plane") or params.get("plane_id"),
+            metadata=metadata,
+        )
         return IROperation(
             id=operation_id,
             type="create_sketch",

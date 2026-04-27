@@ -12,6 +12,8 @@ from .types import (
     IROperation,
 )
 
+_DATUM_PLANES = {"XY", "XZ", "YZ"}
+
 
 def _is_nonempty_string(value: object) -> bool:
     return isinstance(value, str) and bool(value.strip())
@@ -26,8 +28,12 @@ def validate_operation(operation: IROperation) -> List[str]:
         if not isinstance(params, CreateSketchParams):
             errors.append("create_sketch params must be CreateSketchParams")
             return errors
-        if params.plane not in {"XY", "XZ", "YZ"}:
-            errors.append("create_sketch plane must be one of XY/XZ/YZ")
+        if not _is_nonempty_string(params.plane):
+            errors.append("create_sketch plane must be provided")
+            return errors
+        source = str((operation.metadata or {}).get("source") or "").strip().lower()
+        if source == "studio" and str(params.plane).strip().upper() not in _DATUM_PLANES:
+            errors.append("create_sketch plane for studio target must be one of XY/XZ/YZ")
         if not _is_nonempty_string(params.sketch):
             errors.append("create_sketch sketch must be a non-empty identifier")
         return errors

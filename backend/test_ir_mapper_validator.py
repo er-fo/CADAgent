@@ -71,3 +71,36 @@ def test_mapper_raises_for_unsupported_tool():
     state = IRDocumentState()
     with pytest.raises(UnsupportedToolMappingError):
         map_tool_call_to_ir({"name": "apply_fillet", "input": {}}, state)
+
+
+def test_mapper_preserves_non_datum_create_sketch_planes_for_fusion():
+    state = IRDocumentState()
+
+    face_op = map_tool_call_to_ir(
+        {"name": "create_sketch", "input": {"plane_id": "face_0", "sketch_id": "face_sketch"}},
+        state,
+        metadata={"source": "fusion"},
+    )
+    custom_plane_op = map_tool_call_to_ir(
+        {"name": "create_sketch", "input": {"plane_id": "port_plane", "sketch_id": "port_sketch"}},
+        state,
+        metadata={"source": "fusion"},
+    )
+
+    assert face_op.params.plane == "face_0"
+    assert custom_plane_op.params.plane == "port_plane"
+    assert not validate_operation(face_op)
+    assert not validate_operation(custom_plane_op)
+
+
+def test_mapper_keeps_studio_create_sketch_datum_only():
+    state = IRDocumentState()
+
+    op = map_tool_call_to_ir(
+        {"name": "create_sketch", "input": {"plane_id": "face_0", "sketch_id": "studio_sketch"}},
+        state,
+        metadata={"source": "studio"},
+    )
+
+    assert op.params.plane == "XY"
+    assert not validate_operation(op)
