@@ -126,6 +126,7 @@ MODEL_CLAUDE_HAIKU_45 = "claude-haiku-4-5-20250929"
 MODEL_CLAUDE_OPUS_45 = "claude-opus-4-5-20251101"
 MODEL_GPT_5 = "gpt-5"
 MODEL_GPT_52 = "gpt-5.2"
+MODEL_GPT_54 = "gpt-5.4"
 MODEL_GPT_5_MINI = "gpt-5-mini"
 MODEL_DEFAULT = MODEL_CLAUDE_SONNET_45
 MODEL_GEMINI_3_PRO_PREVIEW = "gemini-3-pro-preview"
@@ -145,6 +146,8 @@ MODEL_MAP = {
     "gpt5": MODEL_GPT_5,
     "gpt-5.2": MODEL_GPT_52,
     "gpt5.2": MODEL_GPT_52,
+    "gpt-5.4": MODEL_GPT_54,
+    "gpt5.4": MODEL_GPT_54,
     "gpt-5-mini": MODEL_GPT_5_MINI,
     "gpt5-mini": MODEL_GPT_5_MINI,
     "gemini-3-pro-preview": MODEL_GEMINI_3_PRO_PREVIEW,
