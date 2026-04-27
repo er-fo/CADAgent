@@ -4,8 +4,8 @@ AI-powered CAD modeling assistant. Describe what you want in plain English, and 
 
 ## Download
 
-- **Windows**: [Download CADAgent-Windows.zip](https://github.com/er-fo/CADAgent/releases/download/v1.0-win/CADAgent-Windows.zip)
-- **macOS**: [Download CADAgent-macOS.zip](https://github.com/er-fo/CADAgent/releases/download/v1.0-mac/CADAgent-macOS.zip)
+- **Windows**: [Download CADAgent-Windows.zip](https://github.com/er-fo/CADAgent/releases/download/v1.0.4-win/CADAgent-Windows.zip)
+- **macOS**: [Download CADAgent-macOS.zip](https://github.com/er-fo/CADAgent/releases/download/v1.0.4-mac/CADAgent-macOS.zip)
 
 ## Installation
 
