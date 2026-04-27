@@ -2014,6 +2014,8 @@ class AgentController:
 
         session_id = session_info.get("session_id")
         client: Optional[FusionWebSocketClient] = session_info.get("ws_client")
+        context_request_id = message.get("context_request_id")
+        message_id = message.get("message_id")
 
         # Always force fresh design resolution before entity extraction to avoid stale references
         # This is critical because cached design references can become invalid after timeline operations
@@ -2047,6 +2049,12 @@ class AgentController:
             "session_id": session_id,
             "doc_id": doc_id,
         }
+        if context_request_id is not None:
+            payload["context_request_id"] = context_request_id
+            payload["message_id"] = context_request_id if message_id is None else message_id
+        elif message_id is not None:
+            payload["message_id"] = message_id
+            payload["context_request_id"] = message_id
 
         if entity_context:
             payload["entity_context"] = entity_context
