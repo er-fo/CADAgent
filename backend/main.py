@@ -257,11 +257,17 @@ async def _cancel_session_task(session_id: str, reason: str = "cancelled"):
             # Python versions without cancel(message)
             task.cancel()
 
-    # Flush any orphaned results that may have arrived before/during cancellation
-    # to prevent them from being consumed by subsequent operations
-    flushed = manager.flush_pending_results(session_id)
-    if flushed:
-        logger.debug("Flushed %d stale result(s) after cancelling task for session %s", flushed, session_id)
+    # Flush any orphaned queue entries that may have arrived before/during cancellation
+    # to prevent them from being consumed by subsequent operations.
+    flushed_results = manager.flush_pending_results(session_id)
+    flushed_context = manager.flush_pending_entity_context(session_id)
+    if flushed_results or flushed_context:
+        logger.debug(
+            "Flushed %d stale result(s) and %d stale entity-context payload(s) after cancelling task for session %s",
+            flushed_results,
+            flushed_context,
+            session_id,
+        )
 
 
 @asynccontextmanager
@@ -411,7 +417,14 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
             elif message_type == "entity_context_response":
                 entity_context = data.get("entity_context")
                 if entity_context:
-                    await manager.store_entity_context(session_id, entity_context)
+                    queued_entity_context = dict(entity_context)
+                    context_request_id = data.get("context_request_id")
+                    message_id = data.get("message_id")
+                    if context_request_id is not None:
+                        queued_entity_context["context_request_id"] = context_request_id
+                    if message_id is not None:
+                        queued_entity_context["message_id"] = message_id
+                    await manager.store_entity_context(session_id, queued_entity_context)
                     logger.debug(f"Entity context stored for session {session_id}: {len(entity_context.get('bodies', []))} bodies, {len(entity_context.get('faces', []))} faces, {len(entity_context.get('edges', []))} edges")
                 else:
                     logger.warning(f"Received entity_context_response without entity_context data for session {session_id}")

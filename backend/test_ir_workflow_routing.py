@@ -28,6 +28,7 @@ class _FakeManager:
         self.sent_messages: List[Dict[str, Any]] = []
         self.history: List[Dict[str, Any]] = []
         self.reasoning_context = _FakeReasoningContext()
+        self.active_build_plan: Optional[Dict[str, Any]] = None
 
     def get_user_token(self, session_id: str) -> Optional[str]:
         return "token"
@@ -43,6 +44,9 @@ class _FakeManager:
 
     def set_conversation_history(self, session_id: str, messages: List[Dict[str, Any]]) -> None:
         self.history = list(messages)
+
+    def get_active_build_plan(self, session_id: str) -> Optional[Dict[str, Any]]:
+        return self.active_build_plan
 
 
 def _tool_use_response() -> Dict[str, Any]:
@@ -120,11 +124,23 @@ def test_execute_workflow_routes_ir_tools_to_fusion_adapter(monkeypatch: pytest.
 
     async def fake_execute_operation(self, session_id, operation, tool_use_id, description=""):
         call_count["fusion_exec"] += 1
-        return TargetExecutionResult(success=True, target="fusion", message="ok")
+        return TargetExecutionResult(
+            success=True,
+            target="fusion",
+            message="ok",
+            raw_result={"success": True, "tool_use_id": tool_use_id, "message": f"{operation.type} ok"},
+        )
 
     monkeypatch.setattr(agent_workflow, "USE_PROMPT_ROUTING", False)
     monkeypatch.setattr(agent_workflow, "call_claude_with_tools", fake_call_claude_with_tools)
     monkeypatch.setattr(agent_workflow.FusionTargetExecutor, "execute_operation", fake_execute_operation)
+
+    refresh_payloads = []
+
+    async def fake_refresh_after_success(session_id, manager, tool_name, result, messages):
+        refresh_payloads.append({"tool_name": tool_name, "tool_use_id": result.get("tool_use_id")})
+
+    monkeypatch.setattr(agent_workflow, "_refresh_and_enrich_after_success", fake_refresh_after_success)
 
     asyncio.run(
         agent_workflow._execute_workflow_loop(
@@ -140,6 +156,47 @@ def test_execute_workflow_routes_ir_tools_to_fusion_adapter(monkeypatch: pytest.
     )
 
     assert call_count["fusion_exec"] == 3
+    assert [item["tool_use_id"] for item in refresh_payloads] == ["toolu_1", "toolu_2", "toolu_3"]
+
+
+def test_execute_workflow_initial_routing_includes_active_build_plan(monkeypatch: pytest.MonkeyPatch):
+    manager = _FakeManager()
+    manager.active_build_plan = {
+        "design_name": "Bracket",
+        "steps": [{"step_number": 1, "operation": "create_shell", "description": "Shell the body"}],
+        "completed_steps": 0,
+    }
+    captured: Dict[str, Any] = {}
+
+    async def fake_route_request(user_request, conversation_history, build_plan=None, api_keys=None):
+        captured["build_plan"] = build_plan
+        return {"required": ["core"], "optional": [], "reasoning": "test"}
+
+    def fake_build_prompt(routing_result):
+        return "system", []
+
+    async def fake_call_claude_with_tools(*args, **kwargs):
+        return _end_turn_response()
+
+    monkeypatch.setattr(agent_workflow, "USE_PROMPT_ROUTING", True)
+    monkeypatch.setattr(agent_workflow, "route_request", fake_route_request)
+    monkeypatch.setattr(agent_workflow, "build_prompt", fake_build_prompt)
+    monkeypatch.setattr(agent_workflow, "call_claude_with_tools", fake_call_claude_with_tools)
+
+    asyncio.run(
+        agent_workflow._execute_workflow_loop(
+            session_id="s-route",
+            messages=[{"role": "user", "content": [{"type": "text", "text": "Continue the active plan"}]}],
+            max_iterations=2,
+            model_name=None,
+            manager=manager,  # type: ignore[arg-type]
+            last_user_message_sent=None,
+            request={"execution_target": "fusion", "request_id": "route-1"},
+            feature_snapshot=None,
+        )
+    )
+
+    assert captured["build_plan"] == manager.active_build_plan
 
 
 def test_target_resolution_and_deterministic_fallback_helpers():
@@ -147,6 +204,8 @@ def test_target_resolution_and_deterministic_fallback_helpers():
     assert agent_workflow._resolve_execution_target({"execution_target": "build123d"}) == "build123d"
     assert agent_workflow._resolve_execution_target({"execution_target": "fusion"}) == "fusion"
     assert agent_workflow._resolve_execution_target({}) == "fusion"
+    with pytest.raises(agent_workflow.UnsupportedExecutionTargetError):
+        agent_workflow._resolve_execution_target({"execution_target": "unknown"})
 
     cube_calls = agent_workflow._deterministic_mvp_tool_calls("Create a 50mm cube")
     assert cube_calls and len(cube_calls) == 3
@@ -215,3 +274,83 @@ def test_deterministic_fallback_runs_once_then_ends_turn(monkeypatch: pytest.Mon
     assert call_count["build_exec"] == 3
     assert len([m for m in manager.sent_messages if m.get("type") == "runtime_fallback"]) == 1
     assert any(m.get("type") == "completed" for m in manager.sent_messages)
+
+
+def test_execute_workflow_rejects_unknown_execution_target_without_fallback(monkeypatch: pytest.MonkeyPatch):
+    manager = _FakeManager()
+    call_count = {"llm": 0}
+
+    async def fake_call_claude_with_tools(*args, **kwargs):
+        call_count["llm"] += 1
+        return _end_turn_response()
+
+    monkeypatch.setattr(agent_workflow, "call_claude_with_tools", fake_call_claude_with_tools)
+
+    asyncio.run(
+        agent_workflow._execute_workflow_loop(
+            session_id="s-target-error",
+            messages=[{"role": "user", "content": [{"type": "text", "text": "Create a cube"}]}],
+            max_iterations=2,
+            model_name=None,
+            manager=manager,  # type: ignore[arg-type]
+            last_user_message_sent=None,
+            request={"execution_target": "unknown-target", "request_id": "r-target-error"},
+            feature_snapshot=None,
+        )
+    )
+
+    assert call_count["llm"] == 0
+    error_messages = [m for m in manager.sent_messages if m.get("type") == "error"]
+    assert error_messages
+    assert error_messages[0]["message"] == "Invalid execution target"
+    assert "unknown-target" in error_messages[0]["details"]
+
+
+def test_execute_workflow_reports_ir_mapping_errors_for_invalid_numeric_inputs(monkeypatch: pytest.MonkeyPatch):
+    manager = _FakeManager()
+    call_count = {"llm": 0, "build_exec": 0}
+
+    def tool_use_with_invalid_numeric() -> Dict[str, Any]:
+        return {
+            "stop_reason": "tool_use",
+            "content": [
+                {"type": "text", "text": "Planning geometry."},
+                {
+                    "type": "tool_use",
+                    "id": "toolu_invalid",
+                    "name": "add_circle",
+                    "input": {"sketch_id": "sketch_0", "center_u": 0, "center_v": 0, "radius": "bad"},
+                },
+            ],
+        }
+
+    async def fake_call_claude_with_tools(*args, **kwargs):
+        call_count["llm"] += 1
+        return tool_use_with_invalid_numeric() if call_count["llm"] == 1 else _end_turn_response()
+
+    async def fake_execute_document(session_id, document, request_id=None):
+        call_count["build_exec"] += 1
+        return TargetExecutionResult(success=True, target="build123d", message="ok", data={"entities": {}})
+
+    monkeypatch.setattr(agent_workflow, "USE_PROMPT_ROUTING", False)
+    monkeypatch.setattr(agent_workflow, "call_claude_with_tools", fake_call_claude_with_tools)
+    monkeypatch.setattr(agent_workflow._BUILD123D_EXECUTOR, "execute_document", fake_execute_document)
+
+    asyncio.run(
+        agent_workflow._execute_workflow_loop(
+            session_id="s-mapping-error",
+            messages=[{"role": "user", "content": [{"type": "text", "text": "Create a circle"}]}],
+            max_iterations=3,
+            model_name=None,
+            manager=manager,  # type: ignore[arg-type]
+            last_user_message_sent=None,
+            request={"execution_target": "build123d", "request_id": "r-mapping-error"},
+            feature_snapshot=None,
+        )
+    )
+
+    assert call_count["build_exec"] == 0
+    error_messages = [m for m in manager.sent_messages if m.get("type") == "error"]
+    assert error_messages
+    assert any(msg.get("message") == "IR mapping failed" for msg in error_messages)
+    assert any("radius" in msg.get("details", "") for msg in error_messages)

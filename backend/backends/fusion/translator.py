@@ -23,14 +23,27 @@ def _parse_profile_reference(profile: str) -> Tuple[str, int]:
         (sketch_id, profile_index)
     """
     if ":" not in profile:
-        return "", 0
+        raise ValueError(
+            f"Unsupported profile reference format '{profile}'. Expected '<sketch_id>:profile_<index>'."
+        )
     sketch_id, profile_part = profile.split(":", 1)
-    if profile_part.startswith("profile_"):
-        try:
-            return sketch_id, int(profile_part.split("_", 1)[1])
-        except (TypeError, ValueError):
-            return sketch_id, 0
-    return sketch_id, 0
+    if not sketch_id:
+        raise ValueError(
+            f"Unsupported profile reference format '{profile}'. Sketch identifier must not be empty."
+        )
+    if not profile_part.startswith("profile_"):
+        raise ValueError(
+            f"Unsupported profile reference format '{profile}'. Expected profile part to start with 'profile_'."
+        )
+
+    try:
+        profile_index = int(profile_part.split("_", 1)[1])
+    except (IndexError, TypeError, ValueError) as exc:
+        raise ValueError(
+            f"Unsupported profile reference format '{profile}'. Expected numeric profile index."
+        ) from exc
+
+    return sketch_id, profile_index
 
 
 def translate_ir_to_fusion_tool_call(operation: IROperation) -> Tuple[str, Dict[str, Any]]:
@@ -90,7 +103,9 @@ def translate_ir_to_fusion_tool_call(operation: IROperation) -> Tuple[str, Dict[
             profile_index = parsed_index
 
         signed_distance = params.distance if params.direction == "positive" else -params.distance
-        fusion_operation = _OPERATION_TO_FUSION.get(params.operation, "NewBody")
+        fusion_operation = _OPERATION_TO_FUSION.get(params.operation)
+        if fusion_operation is None:
+            raise ValueError(f"Unsupported Fusion extrude operation: {params.operation}")
 
         return "extrude_profile", {
             "sketch_id": sketch_id,

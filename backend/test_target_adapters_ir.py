@@ -6,6 +6,7 @@ import pytest
 
 try:
     from .backends.build123d import Build123dTargetExecutor
+    from .backends.build123d.translator import translate_ir_document_to_build123d
     from .backends.fusion.translator import translate_ir_to_fusion_tool_call
     from .ir.types import (
         AddCircleParams,
@@ -17,6 +18,7 @@ try:
     )
 except ImportError:  # pragma: no cover
     from backend.backend.backends.build123d import Build123dTargetExecutor
+    from backend.backend.backends.build123d.translator import translate_ir_document_to_build123d
     from backend.backend.backends.fusion.translator import translate_ir_to_fusion_tool_call
     from backend.backend.ir.types import (
         AddCircleParams,
@@ -64,6 +66,95 @@ def test_fusion_translator_maps_shared_ir_to_existing_tool_schema():
     assert tool_input["profile_index"] == 0
     assert tool_input["distance"] == 40.0
     assert tool_input["operation"] == "NewBody"
+
+
+def test_fusion_translator_rejects_unsupported_extrude_operation():
+    operation = IROperation(
+        id="op_bad_op",
+        type="extrude",
+        params=ExtrudeParams(
+            profile="sketch_0:profile_0",
+            distance=5.0,
+            direction="positive",
+            operation="unsupported",  # type: ignore[arg-type]
+            sketch="sketch_0",
+            profile_index=0,
+        ),
+    )
+
+    with pytest.raises(ValueError, match="Unsupported Fusion extrude operation"):
+        translate_ir_to_fusion_tool_call(operation)
+
+
+def test_fusion_translator_rejects_malformed_profile_reference():
+    operation = IROperation(
+        id="op_bad_profile",
+        type="extrude",
+        params=ExtrudeParams(
+            profile="malformed_profile_ref",
+            distance=5.0,
+            direction="positive",
+            operation="new",
+            sketch=None,
+            profile_index=None,
+        ),
+    )
+
+    with pytest.raises(ValueError, match="Unsupported profile reference format"):
+        translate_ir_to_fusion_tool_call(operation)
+
+
+def test_build123d_translator_rejects_unsupported_plane():
+    document = IRDocument(
+        version="1.0",
+        units="mm",
+        operations=[
+            IROperation(
+                id="op_bad_plane",
+                type="create_sketch",
+                params=CreateSketchParams(plane="AB", sketch="sketch_0"),  # type: ignore[arg-type]
+            )
+        ],
+        metadata={"source": "test"},
+    )
+
+    with pytest.raises(ValueError, match="Unsupported sketch plane for build123d translator"):
+        translate_ir_document_to_build123d(document)
+
+
+def test_build123d_translator_rejects_unsupported_extrude_operation():
+    document = IRDocument(
+        version="1.0",
+        units="mm",
+        operations=[
+            IROperation(
+                id="op_1",
+                type="create_sketch",
+                params=CreateSketchParams(plane="XY", sketch="sketch_0"),
+            ),
+            IROperation(
+                id="op_2",
+                type="add_rectangle",
+                params=AddRectangleParams(sketch="sketch_0", center=[0.0, 0.0], width=10.0, height=10.0),
+            ),
+            IROperation(
+                id="op_bad_mode",
+                type="extrude",
+                params=ExtrudeParams(
+                    profile="sketch_0:profile_0",
+                    distance=10.0,
+                    direction="positive",
+                    operation="unsupported",  # type: ignore[arg-type]
+                    sketch="sketch_0",
+                    profile_index=0,
+                ),
+            ),
+        ],
+        metadata={"source": "test"},
+    )
+
+    with pytest.raises(ValueError, match="Unsupported extrude operation for build123d translator"):
+        translate_ir_document_to_build123d(document)
 
 
 def _build_cube_document() -> IRDocument:

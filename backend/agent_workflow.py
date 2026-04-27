@@ -20,6 +20,7 @@ import re
 import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Mapping, NamedTuple, Optional, Sequence, Set, Tuple
+from uuid import uuid4
 
 try:
     from .code_generator import CodeGenerationError, format_error_for_llm, translate_tool_call
@@ -359,12 +360,24 @@ BUILD123D_TARGET_NAMES = {"build123d", "studio"}
 _BUILD123D_EXECUTOR = Build123dTargetExecutor()
 
 
+class UnsupportedExecutionTargetError(ValueError):
+    """Raised when execution_target is not a supported backend target."""
+
+
 def _resolve_execution_target(request: Optional[Mapping[str, Any]]) -> str:
-    """Resolve execution target while preserving Fusion as default."""
-    target = str((request or {}).get("execution_target") or "fusion").strip().lower()
+    """Resolve execution target while preserving Fusion as default for missing values."""
+    raw_target = (request or {}).get("execution_target")
+    if raw_target is None or (isinstance(raw_target, str) and not raw_target.strip()):
+        return "fusion"
+
+    target = str(raw_target).strip().lower()
     if target in BUILD123D_TARGET_NAMES:
         return "build123d"
-    return "fusion"
+    if target == "fusion":
+        return "fusion"
+    raise UnsupportedExecutionTargetError(
+        f"Unsupported execution_target '{raw_target}'. Expected one of: fusion, build123d, studio."
+    )
 
 
 def _is_missing_provider_key_error(exc: Exception) -> bool:
@@ -1100,7 +1113,7 @@ def _validate_entity_store_for_tool(
             f"No faces/edges/bodies are registered. This usually means:\n"
             f"1. No geometry has been created yet, OR\n"
             f"2. Entity context was not refreshed after the last operation.\n"
-            f"ACTION: Either create geometry first, or call list_features to refresh entity context."
+            f"ACTION: Either create geometry first, or wait for refreshed Design Entities after a successful geometry operation."
         )
 
     counts = store.get_entity_counts()
@@ -1227,13 +1240,19 @@ async def _refresh_entity_context_with_retry(
         attempt_start = time.perf_counter()
 
         # Send request to Fusion
+        context_request_id = f"ctx-{uuid4().hex}"
         await _send_message_safe(manager, session_id, {
-            "type": "request_entity_context"
+            "type": "request_entity_context",
+            "context_request_id": context_request_id,
         })
 
         # Wait for response
         try:
-            fresh_context = await manager.wait_for_entity_context(session_id, timeout=timeout)
+            fresh_context = await manager.wait_for_entity_context(
+                session_id,
+                timeout=timeout,
+                expected_context_request_id=context_request_id,
+            )
 
             # Explicit check for timeout (wait_for_entity_context returns None on timeout)
             if fresh_context is None:
@@ -1532,6 +1551,64 @@ async def _request_feature_snapshot(
 
     manager.set_feature_snapshot(session_id, result)
     return result
+
+
+async def _wait_for_matching_tool_result(
+    session_id: str,
+    manager: ConnectionManager,
+    *,
+    tool_name: str,
+    tool_use_id: str,
+    timeout: int = EXECUTION_TIMEOUT,
+    wait_context: str = "tool",
+) -> Mapping[str, Any]:
+    """
+    Wait for a Fusion result that matches the expected tool_use_id.
+
+    Mismatched results are held temporarily and re-queued before returning so
+    unrelated operations are not consumed by the wrong wait path.
+    """
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + max(0, int(timeout))
+    deferred_results: List[Mapping[str, Any]] = []
+
+    try:
+        while True:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                raise asyncio.TimeoutError
+
+            result = await manager.wait_for_fusion_result(session_id, timeout=remaining)
+            if not isinstance(result, Mapping):
+                return result
+
+            result_tool_use_id = result.get("tool_use_id")
+            result_tool_use_id_str = str(result_tool_use_id).strip() if result_tool_use_id is not None else ""
+            if result_tool_use_id_str and result_tool_use_id_str != tool_use_id:
+                logger.warning(
+                    "Session %s deferred %s result for tool_use_id %s while waiting for %s (%s)",
+                    session_id,
+                    wait_context,
+                    result_tool_use_id_str,
+                    tool_use_id,
+                    tool_name,
+                )
+                deferred_results.append(result)
+                continue
+
+            return result
+    finally:
+        for deferred in deferred_results:
+            try:
+                await manager.store_fusion_result(session_id, dict(deferred))
+            except Exception:
+                logger.exception(
+                    "Session %s failed to re-queue deferred %s result while waiting for %s (%s)",
+                    session_id,
+                    wait_context,
+                    tool_use_id,
+                    tool_name,
+                )
 
 
 async def _handle_list_features(
@@ -2168,17 +2245,26 @@ async def handle_execute_request(
     # Append new user request with current timeline state
     message_context = dict(request)
 
-    # Soft clear entity store at start of request (preserves persistent cache for stable refs),
-    # then repopulate if entity_context is available
+    # Request-start store guard:
+    # - With entity_context: clear active refs and repopulate from request payload.
+    # - Without entity_context: preserve existing refs if already populated to avoid
+    #   wiping usable context on short follow-up turns.
     store = _get_entity_store(session_id, manager)
-    store.soft_clear()
-
     entity_context = request.get("entity_context")
     if entity_context:
+        store.soft_clear()
         await _prepopulate_entity_store(session_id, manager, entity_context)
         # Prune stale tokens from persistent cache (entities no longer in model)
         current_tokens = _extract_tokens_from_context(entity_context)
         store.prune_stale_tokens(current_tokens)
+    elif store.is_empty():
+        logger.debug("Session %s has no entity_context and empty store at request start.", session_id)
+    else:
+        logger.debug(
+            "Session %s has no entity_context at request start; preserving %d active refs.",
+            session_id,
+            len(store.get_all_faces()) + len(store.get_all_edges()) + len(store.get_all_bodies()),
+        )
 
     timeline_state = message_context.get("timeline_state")
     feature_snapshot = await _ensure_feature_snapshot(session_id, manager, timeline_state)
@@ -2280,7 +2366,11 @@ async def _execute_workflow_loop(
     # Get user token for usage tracking
     user_token = manager.get_user_token(session_id)
     llm_api_keys = manager.get_llm_api_keys(session_id)
-    execution_target = _resolve_execution_target(request)
+    try:
+        execution_target = _resolve_execution_target(request)
+    except UnsupportedExecutionTargetError as exc:
+        await _send_error(manager, session_id, "Invalid execution target", str(exc))
+        return
     fusion_ir_executor = FusionTargetExecutor(manager, timeout_seconds=EXECUTION_TIMEOUT)
     ir_doc_state = IRDocumentState(
         metadata={
@@ -2312,6 +2402,7 @@ async def _execute_workflow_loop(
                     routing_result = await route_request(
                         user_request,
                         messages,
+                        build_plan=manager.get_active_build_plan(session_id),
                         api_keys=llm_api_keys,
                     )
 
@@ -2698,7 +2789,6 @@ async def _execute_workflow_loop(
                         target_result.message,
                     )
                 else:
-                    iteration_had_success = True
                     logger.info(
                         "Session %s IR tool '%s' executed on target %s",
                         session_id,
@@ -2706,6 +2796,7 @@ async def _execute_workflow_loop(
                         execution_target,
                     )
                     if execution_target == "build123d":
+                        iteration_had_success = True
                         await _send_message_safe(
                             manager,
                             session_id,
@@ -2715,6 +2806,47 @@ async def _execute_workflow_loop(
                                 "result": target_result.data,
                             },
                         )
+                    else:
+                        refresh_result: Dict[str, Any] = {}
+                        if isinstance(target_result.raw_result, Mapping):
+                            refresh_result = dict(target_result.raw_result)
+                        if "success" not in refresh_result:
+                            refresh_result["success"] = target_result.success
+                        if "message" not in refresh_result:
+                            refresh_result["message"] = target_result.message
+                        if tool_name in {"create_sketch", "add_rectangle", "add_circle"}:
+                            refresh_result.setdefault("no_op", True)
+
+                        try:
+                            await _refresh_and_enrich_after_success(
+                                session_id,
+                                manager,
+                                tool_name,
+                                refresh_result,
+                                messages,
+                            )
+                        except EntityRefreshError as exc:
+                            error_text = str(exc)
+                            await _send_error(
+                                manager,
+                                session_id,
+                                "Entity refresh failed",
+                                error_text,
+                            )
+                            messages.append(_tool_result_message(tool_use_id, error_text, is_error=True))
+                            iteration_had_failure = True
+                            if iteration_first_failure_intent is None:
+                                iteration_first_failure_intent = tool_intent_key
+                            manager.set_conversation_history(session_id, messages)
+                            logger.error(
+                                "Session %s: CRITICAL - Entity refresh failed after IR %s, stopping workflow: %s",
+                                session_id,
+                                tool_name,
+                                error_text,
+                            )
+                            iteration_force_stop = True
+                            break
+                        iteration_had_success = True
                 continue
 
             if tool_name in DUPLICATE_INTENT_GUARD_TOOLS:
@@ -3269,9 +3401,19 @@ async def _execute_workflow_loop(
             await _send_message_safe(manager, session_id, execute_payload)
 
             try:
-                result = await manager.wait_for_fusion_result(session_id, timeout=EXECUTION_TIMEOUT)
+                result = await _wait_for_matching_tool_result(
+                    session_id,
+                    manager,
+                    tool_name=tool_name,
+                    tool_use_id=tool_use_id,
+                    timeout=EXECUTION_TIMEOUT,
+                    wait_context="execute_code",
+                )
             except asyncio.TimeoutError:
-                error_text = f"Timed out waiting for Fusion to execute '{tool_name}'."
+                error_text = (
+                    f"Timed out waiting for Fusion to execute '{tool_name}' "
+                    f"(tool_use_id={tool_use_id})."
+                )
                 await _send_error(manager, session_id, "Fusion execution timeout", error_text)
                 messages.append(_tool_result_message(tool_use_id, error_text, is_error=True))
                 iteration_had_failure = True
@@ -6507,18 +6649,18 @@ async def _execute_geometry_tool_call(
     await _send_message_safe(manager, session_id, payload)
 
     try:
-        result = await manager.wait_for_fusion_result(session_id, timeout=EXECUTION_TIMEOUT)
-    except asyncio.TimeoutError as exc:
-        raise SelectionToolCallError(f"Timed out waiting for Fusion to finish '{tool_name}'.") from exc
-
-    if result.get("tool_use_id") and result.get("tool_use_id") != tool_use_id:
-        logger.warning(
-            "Session %s received %s result for tool_use_id %s while waiting for %s",
+        result = await _wait_for_matching_tool_result(
             session_id,
-            geometry_kind,
-            result.get("tool_use_id"),
-            tool_use_id,
+            manager,
+            tool_name=tool_name,
+            tool_use_id=tool_use_id,
+            timeout=EXECUTION_TIMEOUT,
+            wait_context=f"{geometry_kind}_operation",
         )
+    except asyncio.TimeoutError as exc:
+        raise SelectionToolCallError(
+            f"Timed out waiting for Fusion to finish '{tool_name}' (tool_use_id={tool_use_id})."
+        ) from exc
 
     success = bool(result.get("success"))
     message_text = result.get("message") or f"{tool_name} completed."
@@ -6926,19 +7068,19 @@ def _resolve_codegen_entity_refs(
                 body_refs = store.get_refs_by_kind("body")
 
                 if not face_refs and not body_refs:
-                    raise SelectionToolCallError(
-                        f"create_sketch plane_id could not be resolved: {plane_id}. {error}. "
-                        "No design entities are loaded in the current entity context. "
-                        "Call list_features to refresh entity context, then retry with plane_id as a real face ref "
-                        "(e.g., face_0) or provide an explicit datum plane (XY/XZ/YZ)."
-                    )
+                        raise SelectionToolCallError(
+                            f"create_sketch plane_id could not be resolved: {plane_id}. {error}. "
+                            "No design entities are loaded in the current entity context. "
+                            "Wait for refreshed Design Entities after a successful geometry operation, then retry "
+                            "with plane_id as a real face ref (e.g., face_0) or provide an explicit datum plane (XY/XZ/YZ)."
+                        )
                 elif not face_refs:
-                    raise SelectionToolCallError(
-                        f"create_sketch plane_id could not be resolved: {plane_id}. {error}. "
-                        "No face refs are loaded in the current entity context. "
-                        "Call list_features to refresh entity context (or perform a successful geometry op that refreshes entities), "
-                        "then retry with plane_id as a real face ref (e.g., face_0) or a datum plane (XY/XZ/YZ)."
-                    )
+                        raise SelectionToolCallError(
+                            f"create_sketch plane_id could not be resolved: {plane_id}. {error}. "
+                            "No face refs are loaded in the current entity context. "
+                            "Wait for refreshed Design Entities after a successful geometry operation, "
+                            "then retry with plane_id as a real face ref (e.g., face_0) or a datum plane (XY/XZ/YZ)."
+                        )
                 else:
                     face_preview = ", ".join(sorted(face_refs)[:25])
                     if len(face_refs) > 25:
@@ -7796,17 +7938,18 @@ async def _execute_feature_tool_call(
     await _send_message_safe(manager, session_id, payload)
 
     try:
-        result = await manager.wait_for_fusion_result(session_id, timeout=EXECUTION_TIMEOUT)
-    except asyncio.TimeoutError as exc:
-        raise SelectionToolCallError(f"Timed out waiting for Fusion to finish '{tool_name}'.") from exc
-
-    if result.get("tool_use_id") and result.get("tool_use_id") != tool_use_id:
-        logger.warning(
-            "Session %s received feature result for tool_use_id %s while waiting for %s",
+        result = await _wait_for_matching_tool_result(
             session_id,
-            result.get("tool_use_id"),
-            tool_use_id,
+            manager,
+            tool_name=tool_name,
+            tool_use_id=tool_use_id,
+            timeout=EXECUTION_TIMEOUT,
+            wait_context="feature_operation",
         )
+    except asyncio.TimeoutError as exc:
+        raise SelectionToolCallError(
+            f"Timed out waiting for Fusion to finish '{tool_name}' (tool_use_id={tool_use_id})."
+        ) from exc
 
     success = bool(result.get("success"))
     message_text = result.get("message") or f"{tool_name} completed."

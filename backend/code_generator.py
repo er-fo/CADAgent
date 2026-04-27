@@ -648,13 +648,16 @@ def _load_templates() -> Dict[str, str]:
             # Resolve feature from token
             _entities = design.findEntityByToken(_feature_token)
             if not _entities or len(_entities) == 0:
-                raise ValueError(f"Feature token not found in design. Token may be stale - call list_features to get current tokens.")
+                raise ValueError(
+                    "Feature token not found in design. Token may be stale - call list_features for the latest "
+                    "feature snapshot/tokens (list_features does not refresh face/edge/body refs)."
+                )
 
             # Disambiguate: reject multiple matches to prevent deleting the wrong entity
             if len(_entities) > 1:
                 raise ValueError(
                     f"Ambiguous token: findEntityByToken returned {{len(_entities)}} entities. "
-                    f"Cannot safely determine which to delete. Call list_features for current tokens."
+                    f"Cannot safely determine which to delete. Call list_features for the latest feature snapshot/tokens."
                 )
 
             # Get the entity and check if it has a timeline object
@@ -696,7 +699,7 @@ def _load_templates() -> Dict[str, str]:
             if _expected_index is not None and _expected_index != _timeline_index:
                 raise ValueError(
                     f"Safety check failed: expected timeline index {{_expected_index}} but found {{_timeline_index}}. "
-                    f"Timeline may have changed. Call list_features to get current state."
+                    f"Timeline may have changed. Call list_features for the latest feature snapshot/tokens before retrying."
                 )
 
             # Perform deletion.
@@ -1074,7 +1077,7 @@ def _validate_axis_spec(value: Any, field_name: str) -> Dict[str, Any]:
     Backward-compatible: accepts legacy axis strings ("x"/"y"/"z") or
     legacy objects that used type='datum_axis' or omitted type but supplied axis/axis_reference.
     """
-    # Auto-default when axis is completely missing/None
+    # Strict default only when axis is truly omitted upstream (None at validator boundary).
     if value is None:
         return {"type": "construction", "axis": "z"}
 
@@ -1117,9 +1120,8 @@ def _validate_axis_spec(value: Any, field_name: str) -> Dict[str, Any]:
     if not isinstance(value, Mapping):
         raise CodeGenerationError(f'"{field_name}" must be an object with a "type" field.')
 
-    # Empty object -> fall back to default construction Z (common when LLM omits axis details)
     if len(value) == 0:
-        return {"type": "construction", "axis": "z"}
+        raise CodeGenerationError(f'"{field_name}" cannot be an empty object.')
 
     # NOTE: We do NOT pre-filter fields here. Instead, we filter by the allowed set
     # for each axis type AFTER we determine the type. This correctly handles cases like:
@@ -1128,7 +1130,9 @@ def _validate_axis_spec(value: Any, field_name: str) -> Dict[str, Any]:
 
     # Normalise legacy aliases
     raw_type_value = value.get("type", None)
-    # If the discriminator isn't a string (e.g., {}), treat it as missing so we can fallback cleanly
+    has_type_field = "type" in value
+    if has_type_field and not isinstance(raw_type_value, str):
+        raise CodeGenerationError('"axis.type" must be a string.')
     if isinstance(raw_type_value, str):
         raw_type = raw_type_value.strip().lower()
     else:
@@ -1152,16 +1156,14 @@ def _validate_axis_spec(value: Any, field_name: str) -> Dict[str, Any]:
     if axis_type == "" and any(k in value for k in ("axis", "axis_reference", "datum_axis")):
         axis_type = "construction"
 
+    if axis_type == "":
+        raise CodeGenerationError(
+            '"axis.type" is required. Expected one of: construction, sketch_line, edge, face.'
+        )
     if axis_type not in valid_types:
-        # Last-resort fallback: treat unknown/empty as construction Z to keep execution flowing
-        if axis_type == "" and not value:
-            return {"type": "construction", "axis": "z"}
-        if axis_type == "" and any(k in value for k in ("axis", "axis_reference", "datum_axis")):
-            axis_type = "construction"
-        else:
-            raise CodeGenerationError(
-                f'Invalid axis type "{axis_type}". Expected one of: construction, sketch_line, edge, face.'
-            )
+        raise CodeGenerationError(
+            f'Invalid axis type "{axis_type}". Expected one of: construction, sketch_line, edge, face.'
+        )
 
     cleaned: Dict[str, Any] = {"type": axis_type}
 
@@ -1250,17 +1252,19 @@ def _validate_extent_spec(value: Any, field_name: str) -> Dict[str, Any]:
 
         raise CodeGenerationError(f'"{field_name}" must be an object with a "mode" field.')
 
-    raw_mode = value.get("mode", "")
-    # Discriminator may arrive as non-string (e.g., {}); normalize to empty so default kicks in
-    if isinstance(raw_mode, str):
-        mode = raw_mode.strip()
-    else:
-        mode = ""
+    raw_mode = value.get("mode", None)
+    if not isinstance(raw_mode, str):
+        raise CodeGenerationError('"extent.mode" must be a non-empty string.')
+    mode = raw_mode.strip()
+    if not mode:
+        raise CodeGenerationError('"extent.mode" must be a non-empty string.')
     mode_lower = mode.lower()
 
     # Legacy/alias modes
-    if mode_lower in {"none", "null", ""}:
-        mode = "full"
+    if mode_lower in {"none", "null"}:
+        raise CodeGenerationError(
+            'Invalid extent mode "none". Use mode="full" or omit "extent" for a full revolve.'
+        )
     elif mode_lower in {"symmetric", "symmetric_angle"}:
         # Map to angle extent with symmetric flag
         mode = "angle"
@@ -1273,6 +1277,9 @@ def _validate_extent_spec(value: Any, field_name: str) -> Dict[str, Any]:
         if "symmetric" not in value:
             value = dict(value)
             value["symmetric"] = False
+
+    elif mode_lower in {"full", "angle", "two_sides_angle", "to", "two_sides_to"}:
+        mode = mode_lower
 
     valid_modes = {"full", "angle", "two_sides_angle", "to", "two_sides_to"}
     if mode not in valid_modes:
@@ -1288,7 +1295,7 @@ def _validate_extent_spec(value: Any, field_name: str) -> Dict[str, Any]:
             raise CodeGenerationError(f'Unexpected field(s) for extent mode "{mode}": {", ".join(sorted(extra))}')
 
     if mode == "full":
-        # Accept and ignore any stray fields (e.g., angle_degrees/symmetric sent by the LLM)
+        _assert_only({"mode"})
         return cleaned
 
     if mode == "angle":
@@ -1521,23 +1528,14 @@ def _normalise_parameters(tool_name: str, parameters: Mapping[str, Any]) -> Dict
 
     # Tool-specific validations that must consider raw, user-provided params (not defaults).
     if tool_name == "extrude_profile":
-        # LLMs frequently include optional list fields as empty arrays instead of omitting the key.
-        # Treat empty profile_indices as "not provided" (silent normalization).
-        if "profile_indices" in normalized_params:
-            _pi = normalized_params.get("profile_indices")
-            if isinstance(_pi, (list, tuple)) and len(_pi) == 0:
-                del normalized_params["profile_indices"]
-            elif isinstance(_pi, str):
-                # Be tolerant of whitespace: " [ ] " should be treated as empty.
-                _compact = "".join(_pi.split())
-                if _compact == "[]":
-                    del normalized_params["profile_indices"]
+        if "profile_index" in normalized_params and "profile_indices" in normalized_params:
+            raise CodeGenerationError('Provide either "profile_index" or "profile_indices", not both.')
 
-        # Resolve mutual exclusivity silently and deterministically:
-        # - If profile_indices is provided (and non-empty after normalization), it wins.
-        # - Otherwise, profile_index is used (default applies later).
-        if "profile_indices" in normalized_params and normalized_params.get("profile_indices") is not None:
-            normalized_params.pop("profile_index", None)
+    if tool_name == "revolve_profile":
+        if "extent" in normalized_params and normalized_params["extent"] is None:
+            raise CodeGenerationError(
+                '"extent" must be an object when provided. Omit "extent" to use full revolve.'
+            )
     
     rules = PARAMETER_SPEC[tool_name]
     cleaned: Dict[str, Any] = {}

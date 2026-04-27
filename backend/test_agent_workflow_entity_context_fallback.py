@@ -121,34 +121,37 @@ def test_refresh_accepts_nested_spatial_payload_for_signature() -> None:
         manager.entity_stores[session_id] = EntityStore()
         manager.sketch_entity_stores[session_id] = SketchEntityStore()
 
-        async def _noop_send_message(session: str, message: dict) -> None:
-            return None
+        captured_request_ids: list[str] = []
 
-        manager.send_message = _noop_send_message  # type: ignore[method-assign]
-
-        context = {
-            "spatial_context": {
-                "units": "mm",
-                "bodies": [
-                    {
-                        "id": "body_0",
-                        "token": "body-token-0",
-                        "faces": [
+        async def _capture_send_message(session: str, message: dict) -> None:
+            if message.get("type") == "request_entity_context":
+                captured_request_ids.append(message.get("context_request_id", ""))
+                context = {
+                    "spatial_context": {
+                        "units": "mm",
+                        "bodies": [
                             {
-                                "id": "face_0",
-                                "token": "face-token-0",
-                                "normal": {"x": 0, "y": 1, "z": 0},
-                                "centroid": {"x": 10, "y": 12, "z": 14},
+                                "id": "body_0",
+                                "token": "body-token-0",
+                                "faces": [
+                                    {
+                                        "id": "face_0",
+                                        "token": "face-token-0",
+                                        "normal": {"x": 0, "y": 1, "z": 0},
+                                        "centroid": {"x": 10, "y": 12, "z": 14},
+                                    }
+                                ],
+                                "edges": [
+                                    {"id": "e0", "token": "edge-token-0"},
+                                ],
                             }
                         ],
-                        "edges": [
-                            {"id": "e0", "token": "edge-token-0"},
-                        ],
-                    }
-                ],
-            }
-        }
-        loop.run_until_complete(manager.pending_entity_context[session_id].put(context))
+                    },
+                    "context_request_id": message.get("context_request_id"),
+                }
+                await manager.pending_entity_context[session_id].put(context)
+
+        manager.send_message = _capture_send_message  # type: ignore[method-assign]
 
         refreshed = loop.run_until_complete(
             _refresh_entity_context_with_retry(
@@ -161,7 +164,9 @@ def test_refresh_accepts_nested_spatial_payload_for_signature() -> None:
             )
         )
 
-        assert refreshed == context
+        assert refreshed is not None
+        assert "spatial_context" in refreshed
+        assert len(captured_request_ids) == 1
     finally:
         asyncio.set_event_loop(None)
         loop.close()

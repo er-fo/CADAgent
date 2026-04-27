@@ -98,6 +98,6 @@ def test_create_sketch_unresolved_face_ref_without_entities_raises_instead_of_xy
             msg = str(exc)
             assert "create_sketch plane_id could not be resolved: face_0" in msg
             assert "No design entities are loaded in the current entity context." in msg
-            assert "Call list_features to refresh entity context" in msg
+            assert "Wait for refreshed Design Entities" in msg
 
     asyncio.run(_run())

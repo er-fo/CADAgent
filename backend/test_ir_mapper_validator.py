@@ -93,7 +93,7 @@ def test_mapper_preserves_non_datum_create_sketch_planes_for_fusion():
     assert not validate_operation(custom_plane_op)
 
 
-def test_mapper_keeps_studio_create_sketch_datum_only():
+def test_mapper_preserves_studio_non_datum_create_sketch_plane_for_validation():
     state = IRDocumentState()
 
     op = map_tool_call_to_ir(
@@ -102,5 +102,53 @@ def test_mapper_keeps_studio_create_sketch_datum_only():
         metadata={"source": "studio"},
     )
 
-    assert op.params.plane == "XY"
-    assert not validate_operation(op)
+    assert op.params.plane == "face_0"
+    errors = validate_operation(op)
+    assert errors
+    assert any("create_sketch plane for studio target must be one of XY/XZ/YZ" in error for error in errors)
+
+
+@pytest.mark.parametrize(
+    "tool_call, expected_error_fragment",
+    [
+        (
+            {
+                "name": "add_rectangle",
+                "input": {
+                    "sketch_id": "sketch_0",
+                    "corner1_u": "bad",
+                    "corner1_v": 0,
+                    "corner2_u": 10,
+                    "corner2_v": 10,
+                },
+            },
+            "corner1_u",
+        ),
+        (
+            {
+                "name": "add_circle",
+                "input": {"sketch_id": "sketch_0", "center_u": 0, "center_v": 0, "radius": "bad"},
+            },
+            "radius",
+        ),
+        (
+            {
+                "name": "extrude_profile",
+                "input": {"sketch_id": "sketch_0", "profile_index": "bad", "distance": 10},
+            },
+            "profile_index",
+        ),
+        (
+            {
+                "name": "extrude_profile",
+                "input": {"sketch_id": "sketch_0", "profile_index": 0, "distance": "bad"},
+            },
+            "distance",
+        ),
+    ],
+)
+def test_mapper_rejects_invalid_numeric_inputs(tool_call, expected_error_fragment):
+    state = IRDocumentState()
+
+    with pytest.raises(UnsupportedToolMappingError, match=expected_error_fragment):
+        map_tool_call_to_ir(tool_call, state)

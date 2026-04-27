@@ -10,6 +10,7 @@ import copy
 import logging
 import os
 from typing import Any, Dict, List, Optional
+from uuid import uuid4
 from fastapi import WebSocket
 from starlette.websockets import WebSocketState
 
@@ -350,9 +351,19 @@ class ConnectionManager:
 
         try:
             websocket = self.active_connections[session_id]
-            msg_type = message.get('type', 'unknown')
-            logger.info("→ [SEND] session=%s type=%s payload_keys=%s", session_id, msg_type, list(message.keys()))
-            await websocket.send_json(message)
+            outbound_message = dict(message)
+            msg_type = outbound_message.get('type', 'unknown')
+
+            # Ensure entity-context requests carry a correlation id.
+            if msg_type == "request_entity_context":
+                correlation_id = outbound_message.get("context_request_id") or outbound_message.get("message_id")
+                if not correlation_id:
+                    correlation_id = f"ctx-{uuid4().hex}"
+                outbound_message.setdefault("context_request_id", correlation_id)
+                outbound_message.setdefault("message_id", correlation_id)
+
+            logger.info("→ [SEND] session=%s type=%s payload_keys=%s", session_id, msg_type, list(outbound_message.keys()))
+            await websocket.send_json(outbound_message)
             logger.info("✓ [SEND_OK] session=%s type=%s", session_id, msg_type)
         except Exception as e:
             logger.error(f"Failed to send message to session {session_id}: type={message.get('type')} err={str(e)}")
@@ -482,7 +493,14 @@ class ConnectionManager:
         await self.pending_results[session_id].put(result)
         logger.debug(f"Result stored for session {session_id}")
 
-    async def wait_for_entity_context(self, session_id: str, timeout: float = 5.0) -> Optional[Dict[str, Any]]:
+    async def wait_for_entity_context(
+        self,
+        session_id: str,
+        timeout: float = 5.0,
+        *,
+        expected_context_request_id: Optional[str] = None,
+        expected_message_id: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
         """
         Wait for fresh entity context from Fusion 360 with timeout.
 
@@ -503,17 +521,48 @@ class ConnectionManager:
             logger.error(f"Attempted to wait for entity context from non-existent session: {session_id}")
             raise KeyError(f"Session {session_id} not found")
 
-        try:
-            logger.debug(f"Waiting for entity context from session {session_id} (timeout: {timeout}s)")
-            entity_context = await asyncio.wait_for(
-                self.pending_entity_context[session_id].get(),
-                timeout=timeout
+        expected_correlation_id = expected_context_request_id or expected_message_id
+        queue = self.pending_entity_context[session_id]
+        deadline = asyncio.get_event_loop().time() + timeout
+
+        while True:
+            remaining = deadline - asyncio.get_event_loop().time()
+            if remaining <= 0:
+                logger.warning(f"Timeout waiting for entity context from session {session_id}")
+                return None
+
+            try:
+                logger.debug(f"Waiting for entity context from session {session_id} (timeout: {remaining:.2f}s)")
+                entity_context = await asyncio.wait_for(queue.get(), timeout=remaining)
+            except asyncio.TimeoutError:
+                logger.warning(f"Timeout waiting for entity context from session {session_id}")
+                return None
+
+            if expected_correlation_id is None:
+                logger.debug(f"Entity context received from session {session_id}")
+                return entity_context
+
+            actual_correlation_id = None
+            if isinstance(entity_context, dict):
+                actual_correlation_id = (
+                    entity_context.get("context_request_id")
+                    or entity_context.get("message_id")
+                )
+
+            if actual_correlation_id == expected_correlation_id:
+                logger.debug(
+                    "Entity context received from session %s with matching correlation id=%s",
+                    session_id,
+                    expected_correlation_id,
+                )
+                return entity_context
+
+            logger.warning(
+                "Discarding stale entity context for session %s: expected correlation id=%s, got %s",
+                session_id,
+                expected_correlation_id,
+                actual_correlation_id,
             )
-            logger.debug(f"Entity context received from session {session_id}")
-            return entity_context
-        except asyncio.TimeoutError:
-            logger.warning(f"Timeout waiting for entity context from session {session_id}")
-            return None
 
     async def store_entity_context(self, session_id: str, entity_context: Dict[str, Any]):
         """
@@ -532,8 +581,45 @@ class ConnectionManager:
             logger.error(f"Attempted to store entity context for non-existent session: {session_id}")
             raise KeyError(f"Session {session_id} not found")
 
-        await self.pending_entity_context[session_id].put(entity_context)
+        payload = dict(entity_context)
+        correlation_id = payload.get("context_request_id") or payload.get("message_id")
+        if correlation_id is not None:
+            payload.setdefault("context_request_id", correlation_id)
+            payload.setdefault("message_id", correlation_id)
+
+        await self.pending_entity_context[session_id].put(payload)
         logger.debug(f"Entity context stored for session {session_id}")
+
+    def flush_pending_entity_context(self, session_id: str) -> int:
+        """
+        Drain all pending entity-context payloads from a session's queue.
+
+        Called when a task is cancelled or superseded to prevent stale context
+        responses from being consumed by subsequent operations.
+        """
+        if session_id not in self.pending_entity_context:
+            return 0
+
+        queue = self.pending_entity_context[session_id]
+        flushed = 0
+
+        while not queue.empty():
+            try:
+                context = queue.get_nowait()
+                flushed += 1
+                logger.debug(
+                    "Flushed stale entity context for session %s: context_request_id=%s message_id=%s",
+                    session_id,
+                    context.get("context_request_id"),
+                    context.get("message_id"),
+                )
+            except asyncio.QueueEmpty:
+                break
+
+        if flushed:
+            logger.info(f"Flushed {flushed} stale entity-context payload(s) for session {session_id}")
+
+        return flushed
 
     def get_conversation_history(self, session_id: str) -> List[Dict[str, Any]]:
         """

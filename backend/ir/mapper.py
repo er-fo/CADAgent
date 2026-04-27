@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from typing import Any, Dict, Mapping, Optional
 
 from .document import IRDocumentState
@@ -22,18 +23,33 @@ class UnsupportedToolMappingError(ValueError):
 _DATUM_PLANES = {"XY", "XZ", "YZ"}
 
 
-def _to_float(value: Any, default: float = 0.0) -> float:
+def _to_float(value: Any, *, field_name: str) -> float:
+    if value is None or (isinstance(value, str) and not value.strip()):
+        raise UnsupportedToolMappingError(f"Missing numeric value for '{field_name}'.")
+    if isinstance(value, bool):
+        raise UnsupportedToolMappingError(f"Invalid numeric value for '{field_name}': {value!r}")
     try:
-        return float(value)
+        parsed = float(value)
     except (TypeError, ValueError):
-        return default
+        raise UnsupportedToolMappingError(f"Invalid numeric value for '{field_name}': {value!r}") from None
+    if not math.isfinite(parsed):
+        raise UnsupportedToolMappingError(f"Invalid numeric value for '{field_name}': {value!r}")
+    return parsed
 
 
-def _to_int(value: Any, default: int = 0) -> int:
+def _to_int(value: Any, *, field_name: str, default: Optional[int] = None) -> int:
+    if value is None or (isinstance(value, str) and not value.strip()):
+        if default is not None:
+            return default
+        raise UnsupportedToolMappingError(f"Missing integer value for '{field_name}'.")
+    if isinstance(value, bool):
+        raise UnsupportedToolMappingError(f"Invalid integer value for '{field_name}': {value!r}")
+    if isinstance(value, float) and not value.is_integer():
+        raise UnsupportedToolMappingError(f"Invalid integer value for '{field_name}': {value!r}")
     try:
         return int(value)
     except (TypeError, ValueError):
-        return default
+        raise UnsupportedToolMappingError(f"Invalid integer value for '{field_name}': {value!r}") from None
 
 
 def _normalize_operation(value: Any) -> str:
@@ -56,7 +72,7 @@ def _extract_tool_input(tool_call: Mapping[str, Any]) -> Dict[str, Any]:
     return {}
 
 
-def _normalize_create_sketch_plane(raw_value: Any, *, metadata: Optional[IRMetadata]) -> str:
+def _normalize_create_sketch_plane(raw_value: Any) -> str:
     raw_plane = str(raw_value or "XY").strip()
     if not raw_plane:
         return "XY"
@@ -65,12 +81,7 @@ def _normalize_create_sketch_plane(raw_value: Any, *, metadata: Optional[IRMetad
     if datum_plane in _DATUM_PLANES:
         return datum_plane
 
-    source = str((metadata or {}).get("source") or "").strip().lower()
-    if source == "studio":
-        # build123d currently supports only datum planes.
-        return "XY"
-
-    # Fusion path: preserve face refs and custom construction plane IDs.
+    # Preserve face refs and custom construction plane IDs for downstream validation.
     return raw_plane
 
 
@@ -87,10 +98,7 @@ def map_tool_call_to_ir(
 
     if name == "create_sketch":
         sketch_id = str(params.get("sketch_id") or f"sketch_{len(doc_state.operations)}").strip()
-        plane_raw = _normalize_create_sketch_plane(
-            params.get("plane") or params.get("plane_id"),
-            metadata=metadata,
-        )
+        plane_raw = _normalize_create_sketch_plane(params.get("plane") or params.get("plane_id"))
         return IROperation(
             id=operation_id,
             type="create_sketch",
@@ -100,10 +108,10 @@ def map_tool_call_to_ir(
 
     if name == "add_rectangle":
         sketch_id = str(params.get("sketch_id") or "").strip()
-        c1u = _to_float(params.get("corner1_u"))
-        c1v = _to_float(params.get("corner1_v"))
-        c2u = _to_float(params.get("corner2_u"))
-        c2v = _to_float(params.get("corner2_v"))
+        c1u = _to_float(params.get("corner1_u"), field_name="corner1_u")
+        c1v = _to_float(params.get("corner1_v"), field_name="corner1_v")
+        c2u = _to_float(params.get("corner2_u"), field_name="corner2_u")
+        c2v = _to_float(params.get("corner2_v"), field_name="corner2_v")
         width = abs(c2u - c1u)
         height = abs(c2v - c1v)
         center = [(c1u + c2u) / 2.0, (c1v + c2v) / 2.0]
@@ -121,8 +129,11 @@ def map_tool_call_to_ir(
 
     if name == "add_circle":
         sketch_id = str(params.get("sketch_id") or "").strip()
-        center = [_to_float(params.get("center_u")), _to_float(params.get("center_v"))]
-        radius = _to_float(params.get("radius"))
+        center = [
+            _to_float(params.get("center_u"), field_name="center_u"),
+            _to_float(params.get("center_v"), field_name="center_v"),
+        ]
+        radius = _to_float(params.get("radius"), field_name="radius")
         return IROperation(
             id=operation_id,
             type="add_circle",
@@ -133,9 +144,9 @@ def map_tool_call_to_ir(
     if name in {"extrude_profile", "extrude"}:
         # Keep profile identity explicit while preserving Fusion-compatible sketch/profile metadata.
         sketch_id = str(params.get("sketch_id") or "").strip()
-        profile_index = _to_int(params.get("profile_index"), default=0)
+        profile_index = _to_int(params.get("profile_index"), field_name="profile_index", default=0)
         profile_ref = str(params.get("profile") or f"{sketch_id}:profile_{profile_index}").strip()
-        raw_distance = _to_float(params.get("distance"))
+        raw_distance = _to_float(params.get("distance"), field_name="distance")
         direction = "positive" if raw_distance >= 0 else "negative"
         distance = abs(raw_distance)
         operation = _normalize_operation(params.get("operation"))

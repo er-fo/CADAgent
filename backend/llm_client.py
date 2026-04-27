@@ -2255,7 +2255,7 @@ PLANNING GUIDELINES:
 1. Units: Sketch coordinates are in cm; hole center coordinates and hole/thread depths are in mm; diameters/radii default to mm unless stated—convert and restate user inputs.
 2. Break down the model into logical steps; state operation intent (NewBody/Join/Cut/Intersect for features).
 3. Choose planes/datum explicitly; call out offsets/angles for custom planes when needed.
-4. Order of operations: base solid → shell (if any) → edge treatments → holes/threads → patterns; refresh list_features before patterning.
+4. Order of operations: base solid → shell (if any) → edge treatments → holes/threads → patterns; confirm seed features via list_features and rely on refreshed Design Entities context from the latest geometry operation.
 5. Axis is required for revolutions—pick construction axis normal to sketch plane when unspecified.
 6. For holes/threads, specify face_token source, world coordinates in mm, diameters/depths, and fastener clearance.
 7. For fillets/chamfers, identify target edges (by selection source) and purpose (safety, clearance, aesthetics).

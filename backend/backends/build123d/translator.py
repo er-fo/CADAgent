@@ -14,20 +14,26 @@ class Build123dProgram:
 
 
 def _plane_expr(plane: str) -> str:
-    return {
+    plane_expr = {
         "XY": "Plane.XY",
         "XZ": "Plane.XZ",
         "YZ": "Plane.YZ",
-    }.get(plane, "Plane.XY")
+    }.get(plane)
+    if plane_expr is None:
+        raise ValueError(f"Unsupported sketch plane for build123d translator: {plane}")
+    return plane_expr
 
 
 def _mode_expr(operation: str) -> str:
-    return {
+    mode_expr = {
         "new": "Mode.ADD",
         "join": "Mode.ADD",
         "cut": "Mode.SUBTRACT",
         "intersect": "Mode.INTERSECT",
-    }.get(operation, "Mode.ADD")
+    }.get(operation)
+    if mode_expr is None:
+        raise ValueError(f"Unsupported extrude operation for build123d translator: {operation}")
+    return mode_expr
 
 
 def translate_ir_document_to_build123d(document: IRDocument) -> Build123dProgram:

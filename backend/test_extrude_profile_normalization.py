@@ -7,53 +7,33 @@ except ImportError:  # pragma: no cover - fallback for alternate import contexts
     from backend.backend.code_generator import CodeGenerationError, translate_tool_call
 
 
-def test_extrude_profile_empty_profile_indices_is_treated_as_omitted_and_uses_profile_index():
-    # LLM failure mode: includes profile_indices=[] while also providing profile_index.
-    code = translate_tool_call(
-        "extrude_profile",
-        {
-            "sketch_id": "sk1",
-            "distance": 1.0,
-            "profile_index": 2,
-            "profile_indices": [],
-            "description": "x",
-        },
-    )
-    # After normalization, profile_indices should behave as omitted (template sees None default).
-    assert "_profile_indices = None" in code
-    assert "if _profile_indices is None:" in code
-    assert "_profile_indices = [2]" in code
+def test_extrude_profile_empty_profile_indices_is_rejected():
+    with pytest.raises(CodeGenerationError) as exc:
+        translate_tool_call(
+            "extrude_profile",
+            {
+                "sketch_id": "sk1",
+                "distance": 1.0,
+                "profile_indices": [],
+                "description": "x",
+            },
+        )
+    assert '"profile_indices" cannot be empty.' in str(exc.value)
 
 
-def test_extrude_profile_empty_profile_indices_is_treated_as_omitted_and_defaults_to_profile_index_0():
-    # LLM failure mode: includes profile_indices=[] but does not provide profile_index.
-    code = translate_tool_call(
-        "extrude_profile",
-        {
-            "sketch_id": "sk1",
-            "distance": 1.0,
-            "profile_indices": [],
-            "description": "x",
-        },
-    )
-    assert "_profile_indices = [0]" in code
-
-
-def test_extrude_profile_nonempty_profile_indices_wins_over_profile_index():
-    code = translate_tool_call(
-        "extrude_profile",
-        {
-            "sketch_id": "sk1",
-            "distance": 1.0,
-            "profile_index": 0,
-            "profile_indices": [0, 1],
-            "description": "x",
-        },
-    )
-    # Multi-profile path should be used; conflict is resolved silently.
-    assert "_profile_indices = [0, 1]" in code
-    assert "adsk.core.ObjectCollection.create()" in code
-    assert "for _idx in _profile_indices" in code
+def test_extrude_profile_profile_index_and_profile_indices_conflict_is_rejected():
+    with pytest.raises(CodeGenerationError) as exc:
+        translate_tool_call(
+            "extrude_profile",
+            {
+                "sketch_id": "sk1",
+                "distance": 1.0,
+                "profile_index": 0,
+                "profile_indices": [0, 1],
+                "description": "x",
+            },
+        )
+    assert 'Provide either "profile_index" or "profile_indices", not both.' in str(exc.value)
 
 
 def test_extrude_profile_negative_profile_indices_still_rejected():
@@ -160,3 +140,60 @@ def test_extrude_profile_only_profile_indices_no_profile_index():
     assert "_profile_indices = [0, 1, 2]" in code
     # The fallback guard is present but won't execute since _profile_indices is not None
     assert "if _profile_indices is None:" in code
+
+
+def test_revolve_profile_axis_empty_object_is_rejected():
+    with pytest.raises(CodeGenerationError) as exc:
+        translate_tool_call(
+            "revolve_profile",
+            {
+                "sketch_id": "sk1",
+                "profile_index": 0,
+                "axis": {},
+                "description": "x",
+            },
+        )
+    assert '"axis" cannot be an empty object.' in str(exc.value)
+
+
+@pytest.mark.parametrize("mode_value", ["", None, "none"])
+def test_revolve_profile_extent_invalid_mode_is_rejected(mode_value):
+    with pytest.raises(CodeGenerationError):
+        translate_tool_call(
+            "revolve_profile",
+            {
+                "sketch_id": "sk1",
+                "profile_index": 0,
+                "axis": {"type": "construction", "axis": "z"},
+                "extent": {"mode": mode_value},
+                "description": "x",
+            },
+        )
+
+
+def test_revolve_profile_extent_full_with_extra_fields_is_rejected():
+    with pytest.raises(CodeGenerationError) as exc:
+        translate_tool_call(
+            "revolve_profile",
+            {
+                "sketch_id": "sk1",
+                "profile_index": 0,
+                "axis": {"type": "construction", "axis": "z"},
+                "extent": {"mode": "full", "angle_degrees": 30},
+                "description": "x",
+            },
+        )
+    assert 'Unexpected field(s) for extent mode "full": angle_degrees' in str(exc.value)
+
+
+def test_revolve_profile_extent_omitted_keeps_full_default():
+    code = translate_tool_call(
+        "revolve_profile",
+        {
+            "sketch_id": "sk1",
+            "profile_index": 0,
+            "axis": {"type": "construction", "axis": "z"},
+            "description": "x",
+        },
+    )
+    assert "extent_spec = {'mode': 'full'}" in code

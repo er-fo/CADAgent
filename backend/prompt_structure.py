@@ -339,7 +339,7 @@ CRITICAL RULES:
     ✓ World coordinate conversion: For holes - are my (x,y,z) coordinates in mm on the correct face?
     ✓ Material clearance: For holes/threads - is there 1.5× diameter from edges/voids?
     ✓ Entity availability: Do selected faces/edges exist in current design state?
-    ✓ Operation order: Shell before fillet? Pattern after refreshing list_features?
+    ✓ Operation order: Shell before fillet? Pattern after confirming seed features in list_features and using refreshed Design Entities context from the latest geometry operation?
 
     General design checks: Confirm driving dimensions, symmetry intent, datum choice, fastener clearances. Use entity refs from Design Entities context for selection/feature operations.
 
@@ -379,7 +379,7 @@ CRITICAL RULES:
    3) **Construction plane IDs** you created earlier via `create_construction_plane`
    For modification flows on existing solids, default to face-relative placement: use `face_N` directly or create a plane with `create_construction_plane(mode='face_normal', face_token=<existing face/plane>)`.
    Do NOT default to `XY`/`XZ`/`YZ` for modifications unless the user explicitly asks for world-datum placement.
-   If a face ref cannot be resolved, your Design Entities context is stale/empty. Call `list_features` to refresh, then retry.
+   If a face ref cannot be resolved, your Design Entities context is stale/empty. Do NOT treat `list_features` as an entity-ref refresh (it only provides a feature snapshot/tokens). Retry after a successful geometry operation or the next message with refreshed Design Entities.
 18. When using tools, ALWAYS provide a clear, brief description field explaining what you're doing in natural, conversational language (e.g., "Creating the base plate outline", "Rounding edges for safety").
 19. NEVER generate completion acknowledgments or summaries after tool calls. After executing a tool, STOP immediately and wait for the tool result.
     ❌ WRONG: Calling respond_to_user("Hi!"), then respond_to_user("How can I help?"), then generating "I've greeted the user and asked how to help."
@@ -393,7 +393,7 @@ CRITICAL RULES:
       * Verify target face exists and orientation matches expected operation
       * Plane choice for modifications: prefer `face_N` or `create_construction_plane(mode='face_normal', face_token=...)` tied to existing geometry
       * Do not use `XY`/`XZ`/`YZ` defaults here unless the user explicitly requests world datum placement
-      * If Design Entities is empty, call list_features before attempting modifications
+      * If Design Entities is empty, halt modifications and wait for refreshed Design Entities context (typically after a successful geometry operation); use list_features only for feature/timeline inspection
       * If the user asks to **replicate/copy existing holes**, prefer `list_features` and reuse the existing HoleFeature centers/diameter from `features_json` (hole centers are reported in mm when available) instead of asking the user to reconfirm.
     - When user says "use defaults" or similar, ACT with reasonable interpretations
     - Only ask for clarification when critical info is missing (e.g., no dimensions at all)
@@ -595,7 +595,7 @@ CRITICAL RULES:
 
 26. SPATIAL VALIDATION BLOCK - Gating checklist before hole/fillet/extrude operations:
 
-    □ ENTITIES PRESENT: If design_entities is empty or missing, HALT and call list_features
+    □ ENTITIES PRESENT: If design_entities is empty or missing, HALT and wait for refreshed Design Entities context (list_features does not refresh entity refs)
        - Never proceed with face_ref/edge_ref selection when design_entities is empty
        - If timeline_state is empty after geometry creation, something is wrong - refresh
 
