@@ -569,56 +569,93 @@ def _get_sketch_entity_store(session_id: str, manager: ConnectionManager) -> Ske
     return manager.get_sketch_entity_store(session_id)
 
 
-def _extract_tokens_from_context(entity_context: Mapping[str, Any]) -> List[str]:
-    """Extract all entity tokens from an entity context dict.
+def _extract_entity_token(entity: Optional[Mapping[str, Any]]) -> Optional[str]:
+    """Extract canonical entity token from either token or entity_token fields."""
+    if not entity or not isinstance(entity, Mapping):
+        return None
+    token = entity.get("entity_token") or entity.get("token")
+    if not isinstance(token, str):
+        return None
+    stripped = token.strip()
+    return stripped or None
 
-    Handles both flat structure and nested spatial_context structure.
-    Used for pruning stale tokens from the persistent cache.
+
+def _collect_context_entities(entity_context: Mapping[str, Any]) -> Dict[str, List[Mapping[str, Any]]]:
     """
-    tokens: List[str] = []
-    seen_tokens: Set[str] = set()
+    Collect entities from context in a uniform shape.
 
-    def _get_token(obj: Optional[Mapping[str, Any]]) -> Optional[str]:
-        """Extract token from object, trying both field names."""
-        if not obj or not isinstance(obj, Mapping):
-            return None
-        return obj.get("token") or obj.get("entity_token")
+    Prefers nested spatial_context when it actually contains bodies, otherwise
+    falls back to flat top-level entities.
+    """
 
-    def _append_token(token: Optional[str]) -> None:
-        if not token or token in seen_tokens:
-            return
-        seen_tokens.add(token)
-        tokens.append(token)
+    def _as_mapping_list(value: Any) -> List[Mapping[str, Any]]:
+        if not isinstance(value, list):
+            return []
+        return [item for item in value if isinstance(item, Mapping)]
 
-    # Use nested spatial_context only when it actually contains body entries.
-    # Some clients send flat entities with an empty spatial_context.bodies list.
     spatial_context = entity_context.get("spatial_context")
     spatial_bodies: List[Mapping[str, Any]] = []
     if isinstance(spatial_context, dict):
-        maybe_bodies = spatial_context.get("bodies", [])
-        if isinstance(maybe_bodies, list):
-            spatial_bodies = maybe_bodies
+        spatial_bodies = _as_mapping_list(spatial_context.get("bodies", []))
 
     if spatial_bodies:
-        bodies_data = spatial_context.get("bodies", [])
-        for body in bodies_data:
-            _append_token(_get_token(body))
-            for face in body.get("faces", []):
-                _append_token(_get_token(face))
-            for edge in body.get("edges", []):
-                _append_token(_get_token(edge))
-            for vertex in body.get("vertices", []):
-                _append_token(_get_token(vertex))
-    else:
-        # Flat structure
-        for body in entity_context.get("bodies", []):
-            _append_token(_get_token(body))
-        for face in entity_context.get("faces", []):
-            _append_token(_get_token(face))
-        for edge in entity_context.get("edges", []):
-            _append_token(_get_token(edge))
-        for vertex in entity_context.get("vertices", []):
-            _append_token(_get_token(vertex))
+        bodies: List[Mapping[str, Any]] = []
+        faces: List[Mapping[str, Any]] = []
+        edges: List[Mapping[str, Any]] = []
+        vertices: List[Mapping[str, Any]] = []
+        for body in spatial_bodies:
+            bodies.append(body)
+            faces.extend(_as_mapping_list(body.get("faces", [])))
+            edges.extend(_as_mapping_list(body.get("edges", [])))
+            vertices.extend(_as_mapping_list(body.get("vertices", [])))
+        return {
+            "bodies": bodies,
+            "faces": faces,
+            "edges": edges,
+            "vertices": vertices,
+        }
+
+    return {
+        "bodies": _as_mapping_list(entity_context.get("bodies", [])),
+        "faces": _as_mapping_list(entity_context.get("faces", [])),
+        "edges": _as_mapping_list(entity_context.get("edges", [])),
+        "vertices": _as_mapping_list(entity_context.get("vertices", [])),
+    }
+
+
+def _normalise_entities_for_registration(entities: Sequence[Mapping[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    Convert mixed nested/flat entities into register_entities-compatible payloads.
+
+    register_entities requires `entity_token`. Nested payloads often provide `token`.
+    """
+    normalised: List[Dict[str, Any]] = []
+    for entity in entities:
+        token = _extract_entity_token(entity)
+        if not token:
+            continue
+        if isinstance(entity, dict) and isinstance(entity.get("entity_token"), str) and entity.get("entity_token").strip():
+            normalised.append(entity)
+            continue
+        enriched = dict(entity)
+        enriched["entity_token"] = token
+        normalised.append(enriched)
+    return normalised
+
+
+def _extract_tokens_from_context(entity_context: Mapping[str, Any]) -> List[str]:
+    """Extract all entity tokens from an entity context dict."""
+    tokens: List[str] = []
+    seen_tokens: Set[str] = set()
+    entities = _collect_context_entities(entity_context)
+
+    for kind in ("bodies", "faces", "edges", "vertices"):
+        for entity in entities[kind]:
+            token = _extract_entity_token(entity)
+            if not token or token in seen_tokens:
+                continue
+            seen_tokens.add(token)
+            tokens.append(token)
 
     return tokens
 
@@ -1106,26 +1143,22 @@ def _validate_entity_context(context: Optional[Dict[str, Any]]) -> bool:
     if not context or not isinstance(context, dict):
         return False
 
-    # Must have at least the required keys
-    if not any(key in context for key in ("bodies", "faces", "edges")):
-        return False
+    entities = _collect_context_entities(context)
 
-    # Require at least one entity to avoid silently accepting empty contexts
+    # Require at least one body/face/edge to avoid silently accepting empty contexts.
     total_entities = (
-        len(context.get("bodies", [])) +
-        len(context.get("faces", [])) +
-        len(context.get("edges", []))
+        len(entities["bodies"]) +
+        len(entities["faces"]) +
+        len(entities["edges"])
     )
     if total_entities == 0:
         return False
 
-    # Validate that entity tokens are valid strings
-    for entity_list in (context.get("bodies", []), context.get("faces", []), context.get("edges", [])):
+    # Validate that entity tokens are valid strings in either token field.
+    for entity_list in (entities["bodies"], entities["faces"], entities["edges"]):
         for entity in entity_list:
-            if not isinstance(entity, dict):
-                return False
-            token = entity.get("entity_token")
-            if not token or not isinstance(token, str) or not token.strip():
+            token = _extract_entity_token(entity)
+            if not token:
                 return False
 
     return True
@@ -1226,19 +1259,26 @@ async def _refresh_entity_context_with_retry(
                 validation_fail_count += 1
                 continue
 
-            # Compute signature of fresh context to detect change
-            # Create temporary store to compute signature without polluting session store
+            # Compute signature of fresh context to detect change.
+            # Use normalised nested-or-flat entities so signature generation is consistent
+            # with the prepopulation path and does not discard spatial_context payloads.
+            fresh_entities = _collect_context_entities(fresh_context)
+            bodies_for_signature = _normalise_entities_for_registration(fresh_entities["bodies"])
+            faces_for_signature = _normalise_entities_for_registration(fresh_entities["faces"])
+            edges_for_signature = _normalise_entities_for_registration(fresh_entities["edges"])
+
+            # Create temporary store to compute signature without polluting session store.
             temp_store = EntityStore()
-            await temp_store.register_entities("body", fresh_context.get("bodies", []))
-            await temp_store.register_entities("face", fresh_context.get("faces", []))
-            await temp_store.register_entities("edge", fresh_context.get("edges", []))
+            await temp_store.register_entities("body", bodies_for_signature)
+            await temp_store.register_entities("face", faces_for_signature)
+            await temp_store.register_entities("edge", edges_for_signature)
             fresh_signature = temp_store.get_signature()
 
             # Extract entity counts for invariant checking (detect recycled topology IDs)
             fresh_counts = (
-                len(fresh_context.get("bodies", [])),
-                len(fresh_context.get("faces", [])),
-                len(fresh_context.get("edges", []))
+                len(bodies_for_signature),
+                len(faces_for_signature),
+                len(edges_for_signature),
             )
 
             # Check if signature changed from previous state
@@ -3350,26 +3390,15 @@ async def _execute_workflow_loop(
                             except Exception as exc:
                                 logger.warning("Failed to re-enrich tool result: %s", exc)
 
-                        # Format entity context as XML for injection into tool result
-                        # Wrapped in try/except to gracefully degrade if formatting fails
+                        # Append unified entity context to the tool result so LLM always
+                        # receives one consistent, robust context format.
                         try:
-                            entity_xml = _format_design_entities_xml(fresh_context)
-                            if entity_xml:
-                                # Append fresh entity context to the last tool result message
-                                if messages and messages[-1].get("role") == "user":
-                                    last_msg = messages[-1]
-                                    if "content" in last_msg and isinstance(last_msg["content"], list):
-                                        for content_block in last_msg["content"]:
-                                            if isinstance(content_block, dict) and content_block.get("type") == "tool_result":
-                                                if isinstance(content_block.get("content"), list):
-                                                    for text_block in content_block["content"]:
-                                                        if isinstance(text_block, dict) and text_block.get("type") == "text":
-                                                            text_block["text"] += f"\n\n{entity_xml}"
-                                                            break
+                            entity_text = _format_unified_context(fresh_context)
+                            if entity_text:
+                                _append_to_last_tool_result_text(messages, f"\n\n{entity_text}")
                         except Exception as exc:
-                            # Log warning but don't crash - entity context already in fresh_context
                             logger.warning(
-                                f"Failed to format entity XML after {tool_name}: {exc}. "
+                                f"Failed to format unified entity context after {tool_name}: {exc}. "
                                 f"Entity data still available in store."
                             )
 
@@ -3381,15 +3410,16 @@ async def _execute_workflow_loop(
 
                             # Cross-check created entity tokens with fresh_context to get refs
                             # Only announce entities that are confirmed to exist in refreshed context
+                            fresh_entities = _collect_context_entities(fresh_context)
                             for kind in ("bodies", "faces", "edges"):
                                 tokens_to_find = set(created_tokens.get(kind, []))
                                 if not tokens_to_find:
                                     continue
 
                                 # Find matching entities in fresh_context
-                                entities_in_context = fresh_context.get(kind, [])
+                                entities_in_context = fresh_entities.get(kind, [])
                                 for entity in entities_in_context:
-                                    token = entity.get("entity_token")
+                                    token = _extract_entity_token(entity)
                                     if token in tokens_to_find:
                                         # This entity was created by the tool and exists in fresh context
                                         entity_ref = entity.get("entity_ref")
@@ -4977,9 +5007,12 @@ def _format_spatial_context_xml(spatial_context: Mapping[str, Any]) -> str:
         
         bbox_attrs = ""
         if bbox:
-            min_pt = bbox.get("min", [0, 0, 0])
-            max_pt = bbox.get("max", [0, 0, 0])
-            bbox_attrs = f' bbox_min="[{min_pt[0]:.1f},{min_pt[1]:.1f},{min_pt[2]:.1f}]" bbox_max="[{max_pt[0]:.1f},{max_pt[1]:.1f},{max_pt[2]:.1f}]"'
+            min_x, min_y, min_z = _safe_vec3_extract(bbox.get("min"))
+            max_x, max_y, max_z = _safe_vec3_extract(bbox.get("max"))
+            bbox_attrs = (
+                f' bbox_min="[{min_x:.1f},{min_y:.1f},{min_z:.1f}]"'
+                f' bbox_max="[{max_x:.1f},{max_y:.1f},{max_z:.1f}]"'
+            )
         
         lines.append(f'  <body ref="{body_id}" name="{body_name}"{bbox_attrs}>')
         
@@ -4989,8 +5022,8 @@ def _format_spatial_context_xml(spatial_context: Mapping[str, Any]) -> str:
             lines.append("    <vertices>")
             for v in vertices:
                 v_id = v.get("entity_ref", v.get("id", "v?"))
-                p = v.get("p", [0, 0, 0])
-                lines.append(f'      <vertex ref="{v_id}" p="[{p[0]:.2f},{p[1]:.2f},{p[2]:.2f}]" />')
+                px, py, pz = _safe_vec3_extract(v.get("p"))
+                lines.append(f'      <vertex ref="{v_id}" p="[{px:.2f},{py:.2f},{pz:.2f}]" />')
             lines.append("    </vertices>")
         
         # Faces
@@ -5000,22 +5033,26 @@ def _format_spatial_context_xml(spatial_context: Mapping[str, Any]) -> str:
             for f in faces:
                 f_id = f.get("entity_ref", f.get("id", "f_?"))
                 surface_type = f.get("surface_type", "")
-                centroid = f.get("centroid", [0, 0, 0])
-                normal = f.get("normal", [0, 0, 1])
+                cx, cy, cz = _safe_vec3_extract(f.get("centroid"))
+                nx, ny, nz = _safe_vec3_extract(f.get("normal"))
                 
                 attrs = [f'ref="{f_id}"']
                 if surface_type:
                     attrs.append(f'type="{surface_type}"')
-                attrs.append(f'normal="[{normal[0]:.2f},{normal[1]:.2f},{normal[2]:.2f}]"')
-                attrs.append(f'centroid="[{centroid[0]:.1f},{centroid[1]:.1f},{centroid[2]:.1f}]"')
+                attrs.append(f'normal="[{nx:.2f},{ny:.2f},{nz:.2f}]"')
+                attrs.append(f'centroid="[{cx:.1f},{cy:.1f},{cz:.1f}]"')
 
                 # Add frame (u/v/n vectors) if present
                 frame = f.get("frame")
                 if frame and isinstance(frame, dict):
-                    u = frame.get("u", [0, 0, 0])
-                    v = frame.get("v", [0, 0, 0])
-                    n = frame.get("n", [0, 0, 0])
-                    frame_str = f'u=[{u[0]:.2f},{u[1]:.2f},{u[2]:.2f}] v=[{v[0]:.2f},{v[1]:.2f},{v[2]:.2f}] n=[{n[0]:.2f},{n[1]:.2f},{n[2]:.2f}]'
+                    ux, uy, uz = _safe_vec3_extract(frame.get("u"))
+                    vx, vy, vz = _safe_vec3_extract(frame.get("v"))
+                    fnx, fny, fnz = _safe_vec3_extract(frame.get("n"))
+                    frame_str = (
+                        f'u=[{ux:.2f},{uy:.2f},{uz:.2f}] '
+                        f'v=[{vx:.2f},{vy:.2f},{vz:.2f}] '
+                        f'n=[{fnx:.2f},{fny:.2f},{fnz:.2f}]'
+                    )
                     attrs.append(f'frame="{frame_str}"')
 
                 # Add loops (outer/inner) if present
@@ -5068,8 +5105,11 @@ def _format_spatial_context_xml(spatial_context: Mapping[str, Any]) -> str:
                 if v0 and v1:
                     attrs.append(f'vertices="{v0},{v1}"')
                 if adj_faces:
-                    attrs.append(f'faces="{",".join(adj_faces)}"')
-                attrs.append(f'length="{length:.2f}"')
+                    attrs.append(f'faces="{",".join(str(face) for face in adj_faces)}"')
+                try:
+                    attrs.append(f'length="{float(length):.2f}"')
+                except (TypeError, ValueError):
+                    pass
                 
                 lines.append(f'      <edge {" ".join(attrs)} />')
             lines.append("    </edges>")

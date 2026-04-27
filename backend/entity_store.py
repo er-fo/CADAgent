@@ -1106,8 +1106,8 @@ class EntityStore:
             # Include key spatial properties based on kind
             # Type-safe coercion with error handling
             if entry.kind == "face":
-                n = entry.metadata.get("normal")
-                c = entry.metadata.get("centroid")
+                n = entry.normal
+                c = entry.centroid
                 if n:
                     try:
                         parts.append(f"n:{float(n[0]):.5f},{float(n[1]):.5f},{float(n[2]):.5f}")
@@ -1120,7 +1120,7 @@ class EntityStore:
                         pass
             elif entry.kind == "edge":
                 length = entry.metadata.get("length")
-                m = entry.metadata.get("midpoint")
+                m = entry.midpoint
                 if length is not None:
                     try:
                         parts.append(f"len:{float(length):.4f}")
@@ -1132,7 +1132,7 @@ class EntityStore:
                     except (TypeError, ValueError, IndexError):
                         pass
             elif entry.kind == "body":
-                dims = entry.metadata.get("dimensions")
+                dims = entry.dimensions
                 if dims:
                     try:
                         parts.append(f"d:{float(dims[0]):.4f},{float(dims[1]):.4f},{float(dims[2]):.4f}")

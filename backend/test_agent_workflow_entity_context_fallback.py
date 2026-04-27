@@ -9,7 +9,13 @@ sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[1]
 # agent_workflow imports llm_client which instantiates an OpenAI client at import-time.
 os.environ.setdefault("OPENAI_API_KEY", "test-key")
 
-from backend.agent_workflow import _format_unified_context, _prepopulate_entity_store  # noqa: E402
+from backend.agent_workflow import (  # noqa: E402
+    _format_design_entities_xml,
+    _format_unified_context,
+    _prepopulate_entity_store,
+    _refresh_entity_context_with_retry,
+    _validate_entity_context,
+)
 from backend.websocket_manager import ConnectionManager  # noqa: E402
 from backend.entity_store import EntityStore  # noqa: E402
 from backend.sketch_entity_store import SketchEntityStore  # noqa: E402
@@ -78,3 +84,138 @@ def test_prepopulate_falls_back_to_flat_entities_when_spatial_bodies_empty() -> 
     finally:
         asyncio.set_event_loop(None)
         loop.close()
+
+
+def test_validate_entity_context_accepts_nested_spatial_payload() -> None:
+    context = {
+        "spatial_context": {
+            "units": "mm",
+            "bodies": [
+                {
+                    "id": "body_0",
+                    "token": "body-token-0",
+                    "faces": [
+                        {"id": "face_0", "token": "face-token-0"},
+                    ],
+                    "edges": [
+                        {"id": "e0", "token": "edge-token-0"},
+                    ],
+                }
+            ],
+        }
+    }
+
+    assert _validate_entity_context(context)
+
+
+def test_refresh_accepts_nested_spatial_payload_for_signature() -> None:
+    loop = asyncio.new_event_loop()
+    try:
+        asyncio.set_event_loop(loop)
+        manager = ConnectionManager()
+        session_id = "test-session-refresh"
+
+        manager.pending_results[session_id] = asyncio.Queue()
+        manager.pending_entity_context[session_id] = asyncio.Queue()
+        manager.conversation_history[session_id] = []
+        manager.entity_stores[session_id] = EntityStore()
+        manager.sketch_entity_stores[session_id] = SketchEntityStore()
+
+        async def _noop_send_message(session: str, message: dict) -> None:
+            return None
+
+        manager.send_message = _noop_send_message  # type: ignore[method-assign]
+
+        context = {
+            "spatial_context": {
+                "units": "mm",
+                "bodies": [
+                    {
+                        "id": "body_0",
+                        "token": "body-token-0",
+                        "faces": [
+                            {
+                                "id": "face_0",
+                                "token": "face-token-0",
+                                "normal": {"x": 0, "y": 1, "z": 0},
+                                "centroid": {"x": 10, "y": 12, "z": 14},
+                            }
+                        ],
+                        "edges": [
+                            {"id": "e0", "token": "edge-token-0"},
+                        ],
+                    }
+                ],
+            }
+        }
+        loop.run_until_complete(manager.pending_entity_context[session_id].put(context))
+
+        refreshed = loop.run_until_complete(
+            _refresh_entity_context_with_retry(
+                session_id,
+                manager,
+                "create_extrude",
+                prev_signature="",
+                max_attempts=1,
+                operation_was_noop=False,
+            )
+        )
+
+        assert refreshed == context
+    finally:
+        asyncio.set_event_loop(None)
+        loop.close()
+
+
+def test_design_entities_xml_handles_dict_vectors_in_spatial_context() -> None:
+    context = {
+        "spatial_context": {
+            "units": "mm",
+            "bodies": [
+                {
+                    "id": "body_0",
+                    "token": "body-token-0",
+                    "bbox": {
+                        "min": {"x": 0, "y": 5, "z": 0},
+                        "max": {"x": 20, "y": 25, "z": 30},
+                    },
+                    "vertices": [
+                        {
+                            "id": "v0",
+                            "token": "vertex-token-0",
+                            "p": {"x": 1.25, "y": 6.5, "z": 2.0},
+                        }
+                    ],
+                    "faces": [
+                        {
+                            "id": "face_0",
+                            "token": "face-token-0",
+                            "normal": {"x": 0, "y": 1, "z": 0},
+                            "centroid": {"x": 10, "y": 15, "z": 20},
+                            "frame": {
+                                "u": {"x": 1, "y": 0, "z": 0},
+                                "v": {"x": 0, "y": 0, "z": 1},
+                                "n": {"x": 0, "y": 1, "z": 0},
+                            },
+                        }
+                    ],
+                    "edges": [
+                        {
+                            "id": "e0",
+                            "token": "edge-token-0",
+                            "length": "12.5",
+                            "adjacent_faces": ["face_0"],
+                        }
+                    ],
+                }
+            ],
+        }
+    }
+
+    entity_xml = _format_design_entities_xml(context)
+
+    assert "<design_entities>" in entity_xml
+    assert '<body ref="body_0"' in entity_xml
+    assert 'bbox_min="[0.0,5.0,0.0]"' in entity_xml
+    assert '<vertex ref="v0" p="[1.25,6.50,2.00]" />' in entity_xml
+    assert '<face ref="face_0"' in entity_xml
