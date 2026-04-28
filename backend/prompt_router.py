@@ -1,16 +1,15 @@
 """
 Intelligent prompt routing system for CADAgent.
 
-Routes user requests to appropriate tool clusters using a fast, cheap LLM
-(GPT-4.1 Nano) to minimize context usage while maintaining
-full functionality.
+Routes user requests to appropriate tool clusters using a configurable LLM to
+minimize context usage while maintaining full functionality.
 
 The router analyzes the user's request and returns a hierarchical selection
 of required and optional tool clusters. The prompt builder then assembles
 the final prompt with only the relevant tools and documentation.
 
 Performance:
-- Router latency: low (using GPT-4.1 Nano)
+- Router latency: low (using the configured router model)
 - Token savings: 60-80% on input tokens
 - Cost: <$0.0001 per routing decision
 
@@ -44,19 +43,42 @@ logger = logging.getLogger(__name__)
 
 def _build_routing_client(api_keys: Optional[Dict[str, str]] = None) -> Optional[AsyncOpenAI]:
     """Create routing client from per-session BYOK key with env fallback."""
+    if _router_uses_bedrock():
+        api_key = os.environ.get("AWS_BEARER_TOKEN_BEDROCK")
+        if not api_key or not api_key.strip():
+            return None
+        return AsyncOpenAI(api_key=api_key.strip(), base_url=ROUTER_BEDROCK_BASE_URL)
+
     api_key = None
     if api_keys:
         api_key = api_keys.get("openai_api_key") or api_keys.get("OPENAI_API_KEY")
     if not api_key:
         api_key = os.environ.get("OPENAI_API_KEY")
-    if not api_key:
+    if not api_key or not api_key.strip():
         return None
-    return AsyncOpenAI(api_key=api_key)
+
+    client_kwargs: Dict[str, Any] = {"api_key": api_key.strip()}
+    openai_base_url = os.environ.get("OPENAI_BASE_URL")
+    if openai_base_url and openai_base_url.strip():
+        client_kwargs["base_url"] = openai_base_url.strip()
+    return AsyncOpenAI(**client_kwargs)
+
 
 # Router model configuration
-ROUTER_MODEL = "gpt-4.1-nano"
+ROUTER_MODEL = os.environ.get("ROUTER_MODEL", "gpt-4.1-nano")
+ROUTER_BEDROCK_BASE_URL = os.environ.get(
+    "ROUTER_BEDROCK_BASE_URL",
+    "https://bedrock-mantle.us-east-1.api.aws/v1",
+)
 ROUTER_MAX_TOKENS = 500
 ROUTER_TEMPERATURE = 0.0  # Deterministic routing
+_BEDROCK_ROUTER_PREFIXES = ("minimax.",)
+
+
+def _router_uses_bedrock() -> bool:
+    """Return True when the configured router model should use Bedrock."""
+    model_name = (ROUTER_MODEL or "").strip().lower()
+    return any(model_name.startswith(prefix) for prefix in _BEDROCK_ROUTER_PREFIXES)
 
 # Router system prompt (system role)
 ROUTER_PROMPT = """You are a tool routing classifier for a CAD modeling agent.
@@ -276,9 +298,9 @@ async def route_request(
     """
     Route user request to appropriate tool clusters.
 
-    Uses GPT-4.1 Nano to quickly classify the request and determine which
-    tool clusters are needed. Returns a hierarchical selection with required
-    and optional clusters.
+    Uses the configured router model to quickly classify the request and
+    determine which tool clusters are needed. Returns a hierarchical selection
+    with required and optional clusters.
 
     Args:
         user_request: The user's natural language CAD request
@@ -330,7 +352,7 @@ async def route_request(
 
         user_message = "\n\n".join(message_parts)
 
-        # Call routing LLM (OpenAI)
+        # Call the configured OpenAI-compatible routing LLM
         response = await routing_client.chat.completions.create(
             model=ROUTER_MODEL,
             # GPT-5.1 requires max_completion_tokens instead of max_tokens

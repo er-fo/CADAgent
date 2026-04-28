@@ -6,10 +6,12 @@ import os
 sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[1]))
 os.environ.setdefault("OPENAI_API_KEY", "test-key")
 
+from backend import prompt_router
 from backend.prompt_router import (
     _fallback_routing,
     _extract_conversation_context,
     _extract_operations_from_build_plan,
+    _build_routing_client,
     get_routing_summary,
     ROUTING_PATTERNS,
 )
@@ -100,6 +102,83 @@ def test_fallback_safety_clusters_when_nothing_matches():
     """When no keywords match, provide sensible defaults."""
     result = _fallback_routing("jksdflksdjf")
     assert len(result["required"]) > 1  # more than just core
+
+
+def test_build_routing_client_uses_openai_key_for_default_router(monkeypatch):
+    captured = {}
+
+    class FakeAsyncOpenAI:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.setattr(prompt_router, "AsyncOpenAI", FakeAsyncOpenAI)
+    monkeypatch.setattr(prompt_router, "ROUTER_MODEL", "gpt-4.1-nano")
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-openai-router")
+
+    client = _build_routing_client()
+
+    assert client is not None
+    assert captured == {"api_key": "sk-openai-router"}
+
+
+def test_build_routing_client_uses_bedrock_token_for_minimax_router(monkeypatch):
+    captured = {}
+
+    class FakeAsyncOpenAI:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.setattr(prompt_router, "AsyncOpenAI", FakeAsyncOpenAI)
+    monkeypatch.setattr(prompt_router, "ROUTER_MODEL", "minimax.minimax-m2.5")
+    monkeypatch.setattr(
+        prompt_router,
+        "ROUTER_BEDROCK_BASE_URL",
+        "https://bedrock-mantle.us-east-1.api.aws/v1",
+    )
+    monkeypatch.setenv("AWS_BEARER_TOKEN_BEDROCK", "bedrock-token")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+    client = _build_routing_client()
+
+    assert client is not None
+    assert captured == {
+        "api_key": "bedrock-token",
+        "base_url": "https://bedrock-mantle.us-east-1.api.aws/v1",
+    }
+
+
+def test_build_routing_client_returns_none_when_minimax_token_missing(monkeypatch):
+    monkeypatch.setattr(prompt_router, "ROUTER_MODEL", "minimax.minimax-m2.5")
+    monkeypatch.delenv("AWS_BEARER_TOKEN_BEDROCK", raising=False)
+
+    assert _build_routing_client() is None
+
+
+def test_route_request_falls_back_when_minimax_token_missing(monkeypatch):
+    monkeypatch.setattr(prompt_router, "ROUTER_MODEL", "minimax.minimax-m2.5")
+    monkeypatch.delenv("AWS_BEARER_TOKEN_BEDROCK", raising=False)
+
+    called = {}
+
+    def fake_fallback(user_request):
+        called["user_request"] = user_request
+        return {
+            "required": ["core"],
+            "optional": [],
+            "reasoning": "fallback",
+            "confidence": "low",
+            "fallback": True,
+        }
+
+    monkeypatch.setattr(prompt_router, "_fallback_routing", fake_fallback)
+
+    import asyncio
+
+    result = asyncio.run(prompt_router.route_request("drill a hole in the plate"))
+
+    assert result["fallback"] is True
+    assert called["user_request"] == "drill a hole in the plate"
 
 
 # ------------------------------------------------------------------ #

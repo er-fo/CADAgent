@@ -30,6 +30,10 @@ python start_backend.py
 - Runtime env file path used by the template unit: `/opt/backend-legacy/.env`
 - Systemd unit template (manual apply): `infra/systemd/cadagent-backend-legacy.service`
 - Nginx site template (manual apply): `infra/nginx/cadagent-backend-legacy.conf`
+- Prompt routing model: `ROUTER_MODEL`
+  - default: `gpt-4.1-nano`
+  - MiniMax M2.5: `minimax.minimax-m2.5`
+  - MiniMax uses `AWS_BEARER_TOKEN_BEDROCK` plus the Bedrock OpenAI-compatible endpoint in `ROUTER_BEDROCK_BASE_URL`
 
 ## WebSocket BYOK behavior
 
