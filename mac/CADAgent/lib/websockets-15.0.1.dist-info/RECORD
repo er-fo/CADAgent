@@ -4,7 +4,7 @@ websockets-15.0.1.dist-info/LICENSE,sha256=PWoMBQ2L7FL6utUC5F-yW9ArytvXDeo01Ee2o
 websockets-15.0.1.dist-info/METADATA,sha256=VR5K6egG_PpJ2-GQ4hyd-Ck1geIlRMLQpvhB5qfnElQ,6817
 websockets-15.0.1.dist-info/RECORD,,
 websockets-15.0.1.dist-info/REQUESTED,sha256=47DEQpj8HBSa-_TImW-5JCeuQeRkm5NMpJWZG3hSuFU,0
-websockets-15.0.1.dist-info/WHEEL,sha256=jP__Xq8Zheop8oqtsve4LAEkvZvYEAZJ-SbmcizN3MY,107
+websockets-15.0.1.dist-info/WHEEL,sha256=s9Qepq-rbSAzRXMu2ebLaLpFVEK77cKNCRNg8zN3U4g,109
 websockets-15.0.1.dist-info/entry_points.txt,sha256=Dnhn4dm5EsI4ZMAsHldGF6CwBXZrGXnR7cnK2-XR7zY,51
 websockets-15.0.1.dist-info/top_level.txt,sha256=CMpdKklxKsvZgCgyltxUWOHibZXZ1uYIVpca9xsQ8Hk,11
 websockets/__init__.py,sha256=AC2Hq92uSc_WOo9_xvITpGshJ7Dy0Md5m2_ywsdSt_Y,7058
@@ -44,7 +44,7 @@ websockets/protocol.py,sha256=Fyog1EsV8xthnJdX3MH9-bHbEGgPRC0tqwGWCPK4Jrg,26537
 websockets/py.typed,sha256=47DEQpj8HBSa-_TImW-5JCeuQeRkm5NMpJWZG3hSuFU,0
 websockets/server.py,sha256=o2lPQgY7sgHaqst-wMcDtsixaEssapW_A7yZHGBzLiE,21565
 websockets/speedups.c,sha256=j-damnT02MKRoYw8MtTT45qLGX6z6TnriqhTkyfcNZE,5767
-websockets/speedups.cpython-39-darwin.so,sha256=mxsX0fw3NJHbCZWlDXaB47ePobT8X7JS0e3IXdet0vk,51376
+websockets/speedups.cpython-312-darwin.so,sha256=g8p_l-4rAdlpyaozBZuobZW99jjC8hUsVgrqSSVmZw8,51376
 websockets/speedups.pyi,sha256=NikZ3sAxs9Z2uWH_ZvctvMJUBbsHeC2D1L954EVSwJc,55
 websockets/streams.py,sha256=kcI0JXNRqVPoVEhL67-urICwi0sgLNyPyWdccFzBuVU,4047
 websockets/sync/__init__.py,sha256=47DEQpj8HBSa-_TImW-5JCeuQeRkm5NMpJWZG3hSuFU,0
