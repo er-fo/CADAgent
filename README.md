@@ -49,6 +49,42 @@ git push main
   -> EC2 installs dependencies and restarts cadagent-backend-legacy.service
 ```
 
+## Correct CI/CD usage
+
+Use this flow when you want production to match the latest backend code:
+
+1. Work in a branch and run the full test suite locally with Python `3.11`.
+2. Fast-forward or merge the approved changes onto `main`.
+3. Push `main` to GitHub.
+4. Let `.github/workflows/deploy.yml` run the tests, build the bundle, upload to S3, and create the CodeDeploy deployment.
+5. Verify both:
+   - the GitHub Actions run completed successfully
+   - the AWS CodeDeploy deployment completed successfully
+6. Verify service health after deploy:
+   - public: `https://ws.cadagentpro.com/health`
+   - host-local: `http://127.0.0.1:8001/health`
+
+Recommended local verification:
+
+```bash
+python3.11 -m venv .venv311
+source .venv311/bin/activate
+pip install -r requirements-dev.txt
+pytest -q
+```
+
+Important limits:
+
+- The production deployment source of truth is **GitHub `main`**, not a local working tree and not the AWS filesystem.
+- Do **not** patch production code directly on the EC2 host.
+- The deploy bundle only ships runtime files:
+  - `appspec.yml`
+  - `backend/`
+  - `requirements.txt`
+  - `start_backend.py`
+  - `scripts/`
+- Repo-only reference artifacts such as `infra/`, `.env.example`, `README.md`, `docs/`, and `RECONCILIATION.md` are versioned in GitHub but are **not** copied to `/opt/backend-legacy` by the current pipeline.
+
 ## Deployment files
 
 - `appspec.yml`
