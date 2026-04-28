@@ -282,6 +282,7 @@ def _extract_session_context(
     system_prompt: Optional[str] = None,
     tools: Optional[List[Dict[str, Any]]] = None,
     spatial_context: Optional[Dict[str, Any]] = None,
+    entity_context: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
     Extract session-unique context for logging.
@@ -304,6 +305,7 @@ def _extract_session_context(
         system_prompt: Actual system prompt sent to LLM (optional)
         tools: Actual tools array sent to LLM (optional)
         spatial_context: New spatial context structure (optional)
+        entity_context: Full latest entity context payload (optional)
 
     Returns:
         Dictionary containing session-unique context
@@ -425,6 +427,14 @@ def _extract_session_context(
                 }
                 for b in bodies[:5]  # First 5 bodies only
             ],
+        }
+
+    if entity_context:
+        context["entity_context_summary"] = {
+            "body_count": len(entity_context.get("bodies", []) or []),
+            "face_count": len(entity_context.get("faces", []) or []),
+            "edge_count": len(entity_context.get("edges", []) or []),
+            "vertex_count": len(entity_context.get("vertices", []) or []),
         }
 
     # Routing result

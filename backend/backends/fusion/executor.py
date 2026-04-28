@@ -21,6 +21,31 @@ class FusionTargetExecutor:
         self._manager = manager
         self._timeout_seconds = timeout_seconds
 
+    async def _wait_for_matching_tool_result(self, session_id: str, tool_use_id: str) -> dict:
+        """Wait for a Fusion result with the expected tool_use_id, re-queuing mismatches."""
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + max(0, int(self._timeout_seconds))
+        deferred_results = []
+
+        try:
+            while True:
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    raise asyncio.TimeoutError
+                raw_result = await self._manager.wait_for_fusion_result(session_id, timeout=remaining)
+                result_tool_use_id = raw_result.get("tool_use_id") if isinstance(raw_result, dict) else None
+                result_tool_use_id_str = str(result_tool_use_id).strip() if result_tool_use_id is not None else ""
+                if result_tool_use_id_str != tool_use_id:
+                    deferred_results.append(raw_result)
+                    continue
+                return raw_result
+        finally:
+            for deferred in deferred_results:
+                try:
+                    await self._manager.store_fusion_result(session_id, dict(deferred))
+                except Exception:
+                    pass
+
     async def execute_operation(
         self,
         session_id: str,
@@ -58,7 +83,7 @@ class FusionTargetExecutor:
         await self._manager.send_message(session_id, payload)
 
         try:
-            raw_result = await self._manager.wait_for_fusion_result(session_id, timeout=self._timeout_seconds)
+            raw_result = await self._wait_for_matching_tool_result(session_id, tool_use_id)
         except asyncio.TimeoutError:
             return TargetExecutionResult(
                 success=False,
@@ -67,7 +92,15 @@ class FusionTargetExecutor:
             )
 
         success = bool(raw_result.get("success", raw_result.get("type") != "error"))
-        message = str(raw_result.get("message") or f"{tool_name} executed in Fusion.")
+        if success:
+            message = str(raw_result.get("message") or f"{tool_name} executed in Fusion.")
+        else:
+            message = str(
+                raw_result.get("error")
+                or raw_result.get("details")
+                or raw_result.get("message")
+                or f"{tool_name} failed in Fusion."
+            )
         return TargetExecutionResult(
             success=success,
             target=self.target_name,

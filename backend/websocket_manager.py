@@ -68,6 +68,7 @@ class ConnectionManager:
         self.active_connections: Dict[str, WebSocket] = {}
         self.pending_results: Dict[str, asyncio.Queue] = {}
         self.pending_entity_context: Dict[str, asyncio.Queue] = {}
+        self.latest_entity_contexts: Dict[str, Dict[str, Any]] = {}
         self.conversation_history: Dict[str, List[Dict[str, Any]]] = {}
         self.message_checkpoints: Dict[str, List[Dict[str, Any]]] = {}
         self.feature_snapshots: Dict[str, Dict[str, Any]] = {}
@@ -176,6 +177,9 @@ class ConnectionManager:
 
         if session_id in self.pending_entity_context:
             del self.pending_entity_context[session_id]
+
+        if session_id in self.latest_entity_contexts:
+            del self.latest_entity_contexts[session_id]
 
         if session_id in self.conversation_history:
             del self.conversation_history[session_id]
@@ -309,6 +313,7 @@ class ConnectionManager:
         sketch_store = self.sketch_entity_stores.get(session_id)
         if sketch_store:
             sketch_store.clear()
+        self.clear_latest_entity_context(session_id)
 
     def set_feature_snapshot(self, session_id: str, snapshot: Dict[str, Any]) -> None:
         """Store the most recent feature snapshot for a session."""
@@ -323,6 +328,20 @@ class ConnectionManager:
         """Remove any cached feature snapshot for a session."""
         if session_id in self.feature_snapshots:
             del self.feature_snapshots[session_id]
+
+    def set_latest_entity_context(self, session_id: str, entity_context: Dict[str, Any]) -> None:
+        """Store the most recent full entity context for a session."""
+        self.latest_entity_contexts[session_id] = copy.deepcopy(entity_context)
+
+    def get_latest_entity_context(self, session_id: str) -> Optional[Dict[str, Any]]:
+        """Retrieve the latest known full entity context for a session."""
+        context = self.latest_entity_contexts.get(session_id)
+        return copy.deepcopy(context) if context is not None else None
+
+    def clear_latest_entity_context(self, session_id: str) -> None:
+        """Remove any cached latest entity context for a session."""
+        if session_id in self.latest_entity_contexts:
+            del self.latest_entity_contexts[session_id]
 
     def get_connection_stats(self) -> Dict[str, int]:
         """Expose capacity stats for health/debug endpoints."""
@@ -361,6 +380,10 @@ class ConnectionManager:
                     correlation_id = f"ctx-{uuid4().hex}"
                 outbound_message.setdefault("context_request_id", correlation_id)
                 outbound_message.setdefault("message_id", correlation_id)
+            elif msg_type == "feature_snapshot_request":
+                message_id = outbound_message.get("message_id")
+                if not message_id:
+                    outbound_message["message_id"] = f"fs-{uuid4().hex}"
 
             logger.info("→ [SEND] session=%s type=%s payload_keys=%s", session_id, msg_type, list(outbound_message.keys()))
             await websocket.send_json(outbound_message)
@@ -587,6 +610,7 @@ class ConnectionManager:
             payload.setdefault("context_request_id", correlation_id)
             payload.setdefault("message_id", correlation_id)
 
+        self.set_latest_entity_context(session_id, payload)
         await self.pending_entity_context[session_id].put(payload)
         logger.debug(f"Entity context stored for session {session_id}")
 

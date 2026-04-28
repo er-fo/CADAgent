@@ -1037,7 +1037,7 @@ async def _ensure_feature_snapshot(
 ) -> Optional[Dict[str, Any]]:
     """Fetch a fresh feature snapshot from Fusion when the cache is stale."""
     expected_count = _timeline_count_from_state(timeline_state)
-    cached_snapshot = manager.get_feature_snapshot(session_id)
+    cached_snapshot = _manager_get_feature_snapshot(manager, session_id)
 
     if cached_snapshot is not None and expected_count is not None:
         cached_count = cached_snapshot.get("timeline_count")
@@ -1051,6 +1051,7 @@ async def _ensure_feature_snapshot(
         "type": "feature_snapshot_request",
         "reason": "refresh_before_prompt",
         "max_features": FEATURE_SNAPSHOT_LIMIT,
+        "message_id": f"feature_snapshot_{uuid4().hex}",
     }
 
     if expected_count is not None:
@@ -1064,7 +1065,13 @@ async def _ensure_feature_snapshot(
     await _send_message_safe(manager, session_id, request_payload)
 
     try:
-        result = await manager.wait_for_fusion_result(session_id, timeout=EXECUTION_TIMEOUT)
+        result = await _wait_for_matching_fusion_message_id(
+            session_id,
+            manager,
+            expected_message_id=str(request_payload["message_id"]),
+            timeout=EXECUTION_TIMEOUT,
+            wait_context="feature_snapshot_refresh_before_prompt",
+        )
     except asyncio.TimeoutError:
         return cached_snapshot
 
@@ -1175,6 +1182,46 @@ def _validate_entity_context(context: Optional[Dict[str, Any]]) -> bool:
                 return False
 
     return True
+
+
+def _count_entities_in_context(context: Optional[Mapping[str, Any]]) -> Dict[str, int]:
+    """Return body/face/edge counts for a raw entity context payload."""
+    if not isinstance(context, Mapping):
+        return {"body": 0, "face": 0, "edge": 0}
+    entities = _collect_context_entities(context)
+    return {
+        "body": len(entities["bodies"]),
+        "face": len(entities["faces"]),
+        "edge": len(entities["edges"]),
+    }
+
+
+def _manager_get_feature_snapshot(manager: Any, session_id: str) -> Optional[Dict[str, Any]]:
+    getter = getattr(manager, "get_feature_snapshot", None)
+    if callable(getter):
+        snapshot = getter(session_id)
+        return snapshot if isinstance(snapshot, dict) else None
+    return None
+
+
+def _manager_set_latest_entity_context(manager: Any, session_id: str, entity_context: Mapping[str, Any]) -> None:
+    setter = getattr(manager, "set_latest_entity_context", None)
+    if callable(setter):
+        setter(session_id, dict(entity_context))
+
+
+def _manager_get_latest_entity_context(manager: Any, session_id: str) -> Optional[Dict[str, Any]]:
+    getter = getattr(manager, "get_latest_entity_context", None)
+    if callable(getter):
+        context = getter(session_id)
+        return context if isinstance(context, dict) else None
+    return None
+
+
+def _manager_clear_latest_entity_context(manager: Any, session_id: str) -> None:
+    clearer = getattr(manager, "clear_latest_entity_context", None)
+    if callable(clearer):
+        clearer(session_id)
 
 
 async def _refresh_entity_context_with_retry(
@@ -1322,6 +1369,7 @@ async def _refresh_entity_context_with_retry(
                 tool_name, attempt_num, max_attempts, attempt_elapsed_ms,
                 total_refresh_ms, entity_count, fresh_counts[0], fresh_counts[1], fresh_counts[2]
             )
+            _manager_set_latest_entity_context(manager, session_id, fresh_context)
             return fresh_context
 
         except Exception as exc:
@@ -1348,6 +1396,7 @@ async def _refresh_entity_context_with_retry(
                 "total_refresh=%.1fms avg_round_trip=%.1fms",
                 tool_name, len(attempt_timings_ms), total_refresh_ms, avg_round_trip_ms
             )
+            _manager_set_latest_entity_context(manager, session_id, last_valid_context)
             return last_valid_context
         elif operation_was_noop:
             logger.info(
@@ -1355,6 +1404,7 @@ async def _refresh_entity_context_with_retry(
                 "total_refresh=%.1fms avg_round_trip=%.1fms",
                 tool_name, len(attempt_timings_ms), total_refresh_ms, avg_round_trip_ms
             )
+            _manager_set_latest_entity_context(manager, session_id, last_valid_context)
             return last_valid_context
         else:
             # CRITICAL: Geometry-modifying tool should have changed the signature
@@ -1394,6 +1444,71 @@ async def _refresh_entity_context_with_retry(
     error_parts.append("Cannot proceed without valid spatial data.")
 
     raise EntityRefreshError(" ".join(error_parts))
+
+
+async def _ensure_runtime_entity_context_synced(
+    session_id: str,
+    manager: ConnectionManager,
+    *,
+    reason: str,
+) -> Optional[Dict[str, Any]]:
+    """
+    Ensure runtime entity context is present whenever the store has active refs.
+
+    Fail-closed behavior:
+    - If the entity store is non-empty but the latest runtime entity context is
+      missing/empty, force a refresh.
+    - If forced refresh cannot produce valid non-empty context, raise
+      EntityRefreshError and stop execution.
+    """
+    if not callable(getattr(manager, "get_entity_store", None)):
+        return None
+
+    store = _get_entity_store(session_id, manager)
+    store_counts = {
+        "body": len(store.get_all_bodies()),
+        "face": len(store.get_all_faces()),
+        "edge": len(store.get_all_edges()),
+    }
+    total_store_entities = sum(store_counts.values())
+    if total_store_entities == 0:
+        return None
+
+    latest_context = _manager_get_latest_entity_context(manager, session_id)
+    if _validate_entity_context(dict(latest_context) if isinstance(latest_context, Mapping) else None):
+        return dict(latest_context)  # type: ignore[arg-type]
+
+    logger.warning(
+        "Session %s runtime context missing while store has refs (reason=%s, store: %d bodies, %d faces, %d edges). "
+        "Forcing context refresh.",
+        session_id,
+        reason,
+        store_counts["body"],
+        store_counts["face"],
+        store_counts["edge"],
+    )
+
+    refreshed_context = await _refresh_entity_context_with_retry(
+        session_id,
+        manager,
+        tool_name="runtime_state_sync_guard",
+        prev_signature=store.get_signature(),
+        operation_was_noop=True,
+    )
+
+    refreshed_counts = _count_entities_in_context(refreshed_context)
+    if sum(refreshed_counts.values()) == 0:
+        raise EntityRefreshError(
+            "Runtime state sync guard failed: entity store has active refs, but refreshed entity context was empty. "
+            f"(store bodies={store_counts['body']} faces={store_counts['face']} edges={store_counts['edge']})"
+        )
+
+    store.soft_clear()
+    await _prepopulate_entity_store(session_id, manager, refreshed_context)
+    store.prune_stale_tokens(_extract_tokens_from_context(refreshed_context))
+    store.store_signature()
+    _manager_set_latest_entity_context(manager, session_id, refreshed_context)
+    return refreshed_context
 
 
 def _replace_last_tool_result_text(messages: List[Dict[str, Any]], new_text: str) -> None:
@@ -1476,6 +1591,7 @@ async def _refresh_and_enrich_after_success(
     await _prepopulate_entity_store(session_id, manager, fresh_context)
     current_tokens = _extract_tokens_from_context(fresh_context)
     store.prune_stale_tokens(current_tokens)
+    _manager_set_latest_entity_context(manager, session_id, fresh_context)
     store_update_ms = (time.perf_counter() - store_update_start) * 1000.0
     full_refresh_ms = (time.perf_counter() - full_refresh_start) * 1000.0
     logger.info(
@@ -1485,6 +1601,19 @@ async def _refresh_and_enrich_after_success(
         store_update_ms,
     )
     store.store_signature()
+
+    # Keep feature snapshot aligned with refreshed runtime state.
+    try:
+        refreshed_snapshot = await _request_feature_snapshot(
+            session_id,
+            manager,
+            reason=f"post_{tool_name}",
+            max_features=FEATURE_SNAPSHOT_LIMIT,
+        )
+        if refreshed_snapshot and refreshed_snapshot.get("success", True):
+            manager.set_feature_snapshot(session_id, refreshed_snapshot)
+    except Exception as exc:
+        logger.warning("Failed to refresh feature snapshot after %s: %s", tool_name, exc)
 
     # Re-enrich the tool result (tool-specific summary) using fresh entity context.
     if tool_name in _TOOL_RESULT_ENRICHERS:
@@ -1506,6 +1635,39 @@ async def _refresh_and_enrich_after_success(
             exc,
         )
 
+    # Announce newly created refs only after cross-checking with refreshed context.
+    created_entities = result.get("created_entities")
+    if isinstance(created_entities, Mapping):
+        announced_refs: List[str] = []
+        for kind in ("bodies", "faces", "edges"):
+            created_tokens = created_entities.get(kind, []) or []
+            pending_tokens = {str(token) for token in created_tokens if str(token).strip()}
+            if not pending_tokens:
+                continue
+            context_entities = fresh_context.get(kind, []) or []
+            for entity in context_entities:
+                if not isinstance(entity, Mapping):
+                    continue
+                token = entity.get("entity_token")
+                if token in pending_tokens:
+                    entity_ref = entity.get("entity_ref")
+                    if entity_ref:
+                        announced_refs.append(str(entity_ref))
+                    pending_tokens.discard(token)
+            if pending_tokens:
+                logger.warning(
+                    "Session %s: %d created %s not found in refreshed context after %s",
+                    session_id,
+                    len(pending_tokens),
+                    kind,
+                    tool_name,
+                )
+        if announced_refs:
+            _append_to_last_tool_result_text(
+                messages,
+                f"\n\nNew entities available: {', '.join(announced_refs)}",
+            )
+
 
 async def _request_feature_snapshot(
     session_id: str,
@@ -1520,12 +1682,19 @@ async def _request_feature_snapshot(
         "type": "feature_snapshot_request",
         "reason": reason,
         "max_features": max_features,
+        "message_id": f"feature_snapshot_{uuid4().hex}",
     }
 
     await _send_message_safe(manager, session_id, payload)
 
     try:
-        result = await manager.wait_for_fusion_result(session_id, timeout=EXECUTION_TIMEOUT)
+        result = await _wait_for_matching_fusion_message_id(
+            session_id,
+            manager,
+            expected_message_id=str(payload["message_id"]),
+            timeout=EXECUTION_TIMEOUT,
+            wait_context=f"feature_snapshot_{reason}",
+        )
     except asyncio.TimeoutError:
         logger.warning("Timed out waiting for feature snapshot (%s) for session %s", reason, session_id)
         return None
@@ -1551,6 +1720,61 @@ async def _request_feature_snapshot(
 
     manager.set_feature_snapshot(session_id, result)
     return result
+
+
+async def _wait_for_matching_fusion_message_id(
+    session_id: str,
+    manager: ConnectionManager,
+    *,
+    expected_message_id: str,
+    timeout: int = EXECUTION_TIMEOUT,
+    wait_context: str = "message_id_wait",
+) -> Mapping[str, Any]:
+    """
+    Wait for a Fusion payload with an exact matching message_id.
+
+    Non-matching payloads are deferred and re-queued so unrelated operations are
+    not accidentally consumed by the wrong wait path.
+    """
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + max(0, int(timeout))
+    deferred_results: List[Mapping[str, Any]] = []
+
+    try:
+        while True:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                raise asyncio.TimeoutError
+
+            result = await manager.wait_for_fusion_result(session_id, timeout=remaining)
+            if not isinstance(result, Mapping):
+                continue
+
+            result_message_id = result.get("message_id")
+            result_message_id_str = str(result_message_id).strip() if result_message_id is not None else ""
+            if result_message_id_str != expected_message_id:
+                logger.warning(
+                    "Session %s deferred %s result for message_id %s while waiting for %s",
+                    session_id,
+                    wait_context,
+                    result_message_id_str or "<missing>",
+                    expected_message_id,
+                )
+                deferred_results.append(result)
+                continue
+
+            return result
+    finally:
+        for deferred in deferred_results:
+            try:
+                await manager.store_fusion_result(session_id, dict(deferred))
+            except Exception:
+                logger.exception(
+                    "Session %s failed to re-queue deferred %s result while waiting for message_id %s",
+                    session_id,
+                    wait_context,
+                    expected_message_id,
+                )
 
 
 async def _wait_for_matching_tool_result(
@@ -1580,16 +1804,16 @@ async def _wait_for_matching_tool_result(
 
             result = await manager.wait_for_fusion_result(session_id, timeout=remaining)
             if not isinstance(result, Mapping):
-                return result
+                continue
 
             result_tool_use_id = result.get("tool_use_id")
             result_tool_use_id_str = str(result_tool_use_id).strip() if result_tool_use_id is not None else ""
-            if result_tool_use_id_str and result_tool_use_id_str != tool_use_id:
+            if result_tool_use_id_str != tool_use_id:
                 logger.warning(
                     "Session %s deferred %s result for tool_use_id %s while waiting for %s (%s)",
                     session_id,
                     wait_context,
-                    result_tool_use_id_str,
+                    result_tool_use_id_str or "<missing>",
                     tool_use_id,
                     tool_name,
                 )
@@ -1632,7 +1856,7 @@ async def _handle_list_features(
     snapshot = await _request_feature_snapshot(session_id, manager, reason="list_features")
 
     if snapshot is None:
-        cached = manager.get_feature_snapshot(session_id)
+        cached = _manager_get_feature_snapshot(manager, session_id)
         if cached is None:
             return False, (
                 "Feature snapshot unavailable. Ask the user to create or modify a feature so the cache can be populated."
@@ -1928,7 +2152,7 @@ async def _prepare_pattern_feature(
 
     snapshot = await _request_feature_snapshot(session_id, manager, reason="create_pattern_feature")
     if snapshot is None:
-        snapshot = manager.get_feature_snapshot(session_id)
+        snapshot = _manager_get_feature_snapshot(manager, session_id)
         if snapshot is None:
             raise SelectionToolCallError(
                 "No feature snapshot available. Patterning requires at least one recent feature; run a feature operation first."
@@ -2254,10 +2478,12 @@ async def handle_execute_request(
     if entity_context:
         store.soft_clear()
         await _prepopulate_entity_store(session_id, manager, entity_context)
+        _manager_set_latest_entity_context(manager, session_id, dict(entity_context))
         # Prune stale tokens from persistent cache (entities no longer in model)
         current_tokens = _extract_tokens_from_context(entity_context)
         store.prune_stale_tokens(current_tokens)
     elif store.is_empty():
+        _manager_clear_latest_entity_context(manager, session_id)
         logger.debug("Session %s has no entity_context and empty store at request start.", session_id)
     else:
         logger.debug(
@@ -2462,6 +2688,30 @@ async def _execute_workflow_loop(
         else:
             reasoning_effort = _re_raw  # pass through: low/medium/high/xhigh
 
+        feature_snapshot = _manager_get_feature_snapshot(manager, session_id) or feature_snapshot
+
+        runtime_entity_context: Optional[Dict[str, Any]] = _manager_get_latest_entity_context(manager, session_id)
+        try:
+            synced_context = await _ensure_runtime_entity_context_synced(
+                session_id,
+                manager,
+                reason=f"iteration_{iteration + 1}_pre_llm",
+            )
+            if synced_context is not None:
+                runtime_entity_context = synced_context
+        except EntityRefreshError as exc:
+            error_text = str(exc)
+            await _send_error(manager, session_id, "Runtime state sync failed", error_text)
+            messages.append(_user_text_message(f"Runtime state sync failed: {error_text}"))
+            manager.set_conversation_history(session_id, messages)
+            logger.error(
+                "Session %s: CRITICAL runtime sync failure before LLM call at iteration %d: %s",
+                session_id,
+                iteration + 1,
+                error_text,
+            )
+            return
+
         # Build session context for logging
         session_context = None
         if session_path and request:
@@ -2478,8 +2728,8 @@ async def _execute_workflow_loop(
             if routed_tools:
                 loaded_tools = [tool.get("name") for tool in routed_tools if "name" in tool]
 
-            # Extract spatial_context from entity_context if present
-            entity_context_for_logging = request.get("entity_context") or {}
+            # Use latest runtime context for logging, falling back to request context.
+            entity_context_for_logging = runtime_entity_context or request.get("entity_context") or {}
             spatial_context_data = entity_context_for_logging.get("spatial_context")
 
             # Build context using session_logger helper
@@ -2493,6 +2743,7 @@ async def _execute_workflow_loop(
                 loaded_tools=loaded_tools,
                 model_name=model_name,
                 spatial_context=spatial_context_data,
+                entity_context=entity_context_for_logging,
                 reasoning_effort=reasoning_effort,
                 iteration=iteration + 1,
                 max_iterations=max_iterations,
@@ -3447,184 +3698,35 @@ async def _execute_workflow_loop(
                 iteration_had_success = True
                 logger.info("Session %s completed tool '%s' successfully", session_id, tool_name)
 
-                # Refresh feature snapshot if sketch was created
-                if result.get("created_sketches"):
-                    try:
-                        refreshed_snapshot = await _request_feature_snapshot(
-                            session_id,
-                            manager,
-                            reason="sketch_created",
-                            max_features=FEATURE_SNAPSHOT_LIMIT
-                        )
-                        if refreshed_snapshot:
-                            manager.set_feature_snapshot(session_id, refreshed_snapshot)
-                            logger.debug(
-                                "Refreshed feature snapshot after sketch creation in session %s",
-                                session_id
-                            )
-                    except Exception as exc:
-                        logger.warning(
-                            "Failed to refresh feature snapshot after sketch creation: %s",
-                            exc
-                        )
-
-                # Refresh entity context if geometry/timeline was modified
-                # Skip refresh entirely if Fusion reported no-op (saves 100-200ms round-trip)
-                # Guard: only skip if store is already populated, otherwise refresh is needed
-                # Only treat no_op as true if Fusion explicitly reported a boolean True.
-                # This avoids accidental skips when upstream sends a truthy non-bool (e.g., "false").
-                operation_was_noop = (result.get("no_op") is True)
-                store = _get_entity_store(session_id, manager)
-                can_skip_refresh = operation_was_noop and not store.is_empty()
-                if tool_name in REFRESH_ON_SUCCESS_TOOLS and can_skip_refresh:
-                    logger.info(
-                        "Skipping entity context refresh for %s (no_op=True, saving ~150ms)",
-                        tool_name
+                try:
+                    await _refresh_and_enrich_after_success(
+                        session_id,
+                        manager,
+                        tool_name,
+                        result,
+                        messages,
                     )
-                elif tool_name in REFRESH_ON_SUCCESS_TOOLS:
-                    try:
-                        # Capture signature before refresh (store already fetched above)
-                        prev_signature = store.get_signature()
-                        full_refresh_start = time.perf_counter()
-
-                        # Use retry helper to ensure we get valid entity context with changed signature
-                        fresh_context = await _refresh_entity_context_with_retry(
-                            session_id, manager, tool_name,
-                            prev_signature=prev_signature,
-                            operation_was_noop=False  # We already checked no_op above
-                        )
-
-                        # Update entity store:
-                        # - Timeline-modifying tools (delete_feature, jump_to_timeline_position)
-                        #   invalidate ALL entity refs → full clear (persistent cache too)
-                        # - Geometry-modifying tools preserve persistent cache for stable ref IDs
-                        store_update_start = time.perf_counter()
-                        if tool_name in TIMELINE_MODIFYING_TOOLS:
-                            store.clear()
-                        else:
-                            store.soft_clear()
-                        await _prepopulate_entity_store(session_id, manager, fresh_context)
-                        # Prune stale tokens from persistent cache
-                        current_tokens = _extract_tokens_from_context(fresh_context)
-                        store.prune_stale_tokens(current_tokens)
-                        store_update_ms = (time.perf_counter() - store_update_start) * 1000.0
-                        full_refresh_ms = (time.perf_counter() - full_refresh_start) * 1000.0
-                        logger.info(f"[PERF] ENTITY_REFRESH tool={tool_name} duration={full_refresh_ms/1000:.3f}s")
-                        store.store_signature()  # Save new signature for future comparisons
-
-                        # Re-enrich the tool result with fresh spatial context
-                        if tool_name in _TOOL_RESULT_ENRICHERS:
-                            try:
-                                _, enriched_text = _summarise_execution_result(
-                                    tool_name, result, fresh_context
-                                )
-                                # Replace result_text in the last message
-                                if messages and messages[-1].get("role") == "user":
-                                    last_msg = messages[-1]
-                                    if "content" in last_msg and isinstance(last_msg["content"], list):
-                                        for content_block in last_msg["content"]:
-                                            if isinstance(content_block, dict) and content_block.get("type") == "tool_result":
-                                                if isinstance(content_block.get("content"), list):
-                                                    for text_block in content_block["content"]:
-                                                        if isinstance(text_block, dict) and text_block.get("type") == "text":
-                                                            text_block["text"] = enriched_text
-                                                            break
-                            except Exception as exc:
-                                logger.warning("Failed to re-enrich tool result: %s", exc)
-
-                        # Append unified entity context to the tool result so LLM always
-                        # receives one consistent, robust context format.
-                        try:
-                            entity_text = _format_unified_context(fresh_context)
-                            if entity_text:
-                                _append_to_last_tool_result_text(messages, f"\n\n{entity_text}")
-                        except Exception as exc:
-                            logger.warning(
-                                f"Failed to format unified entity context after {tool_name}: {exc}. "
-                                f"Entity data still available in store."
-                            )
-
-                        # Announce newly created entities (cross-checked with fresh context)
-                        # This runs AFTER refresh to ensure we only announce refs that actually exist
-                        if success and "created_entities" in result:
-                            created_tokens = result["created_entities"]
-                            new_refs = []
-
-                            # Cross-check created entity tokens with fresh_context to get refs
-                            # Only announce entities that are confirmed to exist in refreshed context
-                            fresh_entities = _collect_context_entities(fresh_context)
-                            for kind in ("bodies", "faces", "edges"):
-                                tokens_to_find = set(created_tokens.get(kind, []))
-                                if not tokens_to_find:
-                                    continue
-
-                                # Find matching entities in fresh_context
-                                entities_in_context = fresh_entities.get(kind, [])
-                                for entity in entities_in_context:
-                                    token = _extract_entity_token(entity)
-                                    if token in tokens_to_find:
-                                        # This entity was created by the tool and exists in fresh context
-                                        entity_ref = entity.get("entity_ref")
-                                        if entity_ref:
-                                            new_refs.append(entity_ref)
-                                            tokens_to_find.discard(token)  # Mark as found
-
-                                # Log any tokens that were created but not found in fresh context
-                                if tokens_to_find:
-                                    logger.warning(
-                                        f"Session {session_id}: {len(tokens_to_find)} created {kind} "
-                                        f"not found in refreshed context after {tool_name} "
-                                        f"(possible stale context or timing issue)"
-                                    )
-
-                            # Append announcement to tool result message
-                            if new_refs:
-                                if messages and messages[-1].get("role") == "user":
-                                    last_msg = messages[-1]
-                                    if "content" in last_msg and isinstance(last_msg["content"], list):
-                                        for content_block in last_msg["content"]:
-                                            if isinstance(content_block, dict) and content_block.get("type") == "tool_result":
-                                                if isinstance(content_block.get("content"), list):
-                                                    for text_block in content_block["content"]:
-                                                        if isinstance(text_block, dict) and text_block.get("type") == "text":
-                                                            announcement = f"\n\nNew entities available: {', '.join(new_refs)}"
-                                                            text_block["text"] += announcement
-                                                            logger.info(
-                                                                "Session %s: Announced %d new entities after %s: %s",
-                                                                session_id,
-                                                                len(new_refs),
-                                                                tool_name,
-                                                                ", ".join(new_refs)
-                                                            )
-                                                            break
-
-                    except EntityRefreshError as exc:
-                        # Entity refresh failed after all retries - STOP WORKFLOW
-                        error_text = str(exc)
-                        await _send_error(
-                            manager,
-                            session_id,
-                            "Entity refresh failed",
-                            error_text
-                        )
-                        # Add error to conversation
-                        messages.append(_tool_result_message(tool_use_id, error_text, is_error=True))
-                        iteration_had_failure = True
-                        if iteration_first_failure_intent is None:
-                            iteration_first_failure_intent = tool_intent_key
-
-                        # Persist conversation state before exiting (critical for session consistency)
-                        manager.set_conversation_history(session_id, messages)
-
-                        logger.error(
-                            "Session %s: CRITICAL - Entity refresh failed after %s, stopping workflow: %s",
-                            session_id,
-                            tool_name,
-                            error_text
-                        )
-                        # Break the iteration loop - cannot continue without valid entity data
-                        iteration_force_stop = True
-                        break
+                except EntityRefreshError as exc:
+                    error_text = str(exc)
+                    await _send_error(
+                        manager,
+                        session_id,
+                        "Entity refresh failed",
+                        error_text,
+                    )
+                    messages.append(_tool_result_message(tool_use_id, error_text, is_error=True))
+                    iteration_had_failure = True
+                    if iteration_first_failure_intent is None:
+                        iteration_first_failure_intent = tool_intent_key
+                    manager.set_conversation_history(session_id, messages)
+                    logger.error(
+                        "Session %s: CRITICAL - Entity refresh failed after %s, stopping workflow: %s",
+                        session_id,
+                        tool_name,
+                        error_text,
+                    )
+                    iteration_force_stop = True
+                    break
 
                 # Inject build plan context if active (for all successful tools)
                 plan_context = await _handle_build_plan_step(session_id, manager, tool_name, success)
@@ -3889,9 +3991,12 @@ async def _execute_planning_workflow(
     entity_context = request.get("entity_context")
     if entity_context:
         await _prepopulate_entity_store(session_id, manager, entity_context)
+        _manager_set_latest_entity_context(manager, session_id, dict(entity_context))
         # Prune stale tokens from persistent cache
         current_tokens = _extract_tokens_from_context(entity_context)
         store.prune_stale_tokens(current_tokens)
+    else:
+        _manager_clear_latest_entity_context(manager, session_id)
 
     # Build user request with entity context appended for planner awareness
     planning_request = user_request
