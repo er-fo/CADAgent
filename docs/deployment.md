@@ -7,6 +7,18 @@
 - Working directory: `/opt/backend-legacy`
 - Health check: `http://127.0.0.1:8001/health`
 
+## Canonical backend source
+
+- This repository (`cadagent-backend-legacy`) is the canonical source for backend app code and deploy scripts.
+- The AWS filesystem snapshot is forensic only and should not be deployed or merged wholesale.
+
+## Versioned but not enforced templates
+
+- `infra/systemd/cadagent-backend-legacy.service`, `infra/nginx/cadagent-backend-legacy.conf`, and `.env.example`
+  are versioned reference templates.
+- Current `deploy.yml` deployment bundle does **not** ship `infra/` or `.env.example`, so live host config can diverge
+  unless manually synchronized.
+
 ## Why the deploy scripts use `/opt/backend/.venv`
 
 The current systemd unit for the legacy backend starts uvicorn from
@@ -16,3 +28,16 @@ server as it exists today.
 
 If you later want to simplify this, change the systemd unit to use a dedicated virtual
 environment under `/opt/backend-legacy/.venv` and update the deploy hooks accordingly.
+
+## Runtime contracts
+
+- Systemd unit template: `infra/systemd/cadagent-backend-legacy.service` (includes `EnvironmentFile=-/opt/backend-legacy/.env`)
+- Nginx site template: `infra/nginx/cadagent-backend-legacy.conf` (minimal HTTP proxy template; add TLS/443/cert config for production)
+- Example env contract to seed `/opt/backend-legacy/.env`: `.env.example`
+
+## Python/runtime version
+
+- CI uses Python 3.11 (`.github/workflows/deploy.yml`).
+- Local/dev should align with Python 3.11 (`.python-version`).
+- Production currently runs the venv at `/opt/backend/.venv`; confirm its Python
+  version matches 3.11 during the next infra refresh.

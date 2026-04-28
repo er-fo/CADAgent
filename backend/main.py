@@ -363,7 +363,7 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
             message_type = data.get("type")
 
             # Enforce authentication first, allow only auth/heartbeat until verified
-            allowed_pre_auth = {"authenticate"}
+            allowed_pre_auth = {"authenticate", "update_api_keys"}
             if not AUTH_BYPASS and not manager.is_authenticated(session_id) and message_type not in allowed_pre_auth:
                 logger.warning("Rejecting message before auth for session %s: %s", session_id, message_type)
                 await manager.send_message(session_id, {
@@ -465,6 +465,12 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                 except Exception:
                     logger.debug("Could not send feedback ack to session %s", session_id)
 
+            elif message_type == "update_api_keys":
+                api_keys_payload = data.get("llm_api_keys") or data.get("api_keys")
+                manager.set_llm_api_keys(session_id, api_keys_payload)
+                logger.info("Updated API keys for session %s", session_id)
+                await manager.send_message(session_id, {"type": "api_keys_updated"})
+
             elif message_type == "authenticate":
                 if AUTH_BYPASS:
                     manager.set_user_id(session_id, "dev-bypass")
@@ -530,7 +536,7 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
 
                 # Store user's JWT token for usage tracking
                 manager.set_user_token(session_id, user_token)
-                manager.set_llm_api_keys(session_id, data.get("llm_api_keys"))
+                manager.set_llm_api_keys(session_id, data.get("llm_api_keys") or data.get("api_keys"))
                 manager.mark_authenticated(session_id, True)
                 logger.info(f"Authentication received for session {session_id}: authenticated")
                 await manager.send_message(session_id, {

@@ -41,6 +41,12 @@ logger = logging.getLogger(__name__)
 pytestmark = pytest.mark.anyio
 
 
+@pytest.fixture
+def anyio_backend():
+    # The backend stack and connection manager are asyncio-native.
+    return "asyncio"
+
+
 # =============================================================================
 # Unit Tests for reasoning_context.py
 # =============================================================================
