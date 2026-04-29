@@ -162,8 +162,9 @@ def test_route_request_falls_back_when_minimax_token_missing(monkeypatch):
 
     called = {}
 
-    def fake_fallback(user_request):
+    def fake_fallback(user_request, fallback_reason="fallback"):
         called["user_request"] = user_request
+        called["fallback_reason"] = fallback_reason
         return {
             "required": ["core"],
             "optional": [],
@@ -180,6 +181,29 @@ def test_route_request_falls_back_when_minimax_token_missing(monkeypatch):
 
     assert result["fallback"] is True
     assert called["user_request"] == "drill a hole in the plate"
+    assert called["fallback_reason"] == "missing_router_credentials"
+
+
+def test_extract_routing_response_text_from_dict_content_variant():
+    response = {
+        "choices": [
+            {
+                "message": {
+                    "content": {
+                        "type": "text",
+                        "text": "{\"required\": [\"core\"], \"optional\": [], \"reasoning\": \"dict_shape\"}",
+                    },
+                    "reasoning_content": None,
+                    "reasoning": None,
+                    "tool_calls": None,
+                }
+            }
+        ],
+        "output_text": None,
+    }
+
+    text = _extract_routing_response_text(response)
+    assert "dict_shape" in text
 
 
 def test_extract_routing_response_text_from_list_content_parts():
@@ -222,11 +246,80 @@ def test_extract_routing_response_text_from_choice_text_when_message_content_non
     assert "via_choice_text" in text
 
 
-def test_route_request_accepts_non_string_message_content(monkeypatch):
+def test_route_request_accepts_none_message_content_via_choice_text(monkeypatch):
+    class Message:
+        content = None
+        reasoning_content = None
+        reasoning = None
+        tool_calls = None
+
+    class Choice:
+        message = Message()
+        text = "{\"required\": [\"inspection\"], \"optional\": [], \"reasoning\": \"choice_text\"}"
+
+    class Response:
+        choices = [Choice()]
+        output_text = None
+
+    class FakeCompletions:
+        async def create(self, **kwargs):  # noqa: ARG002
+            return Response()
+
+    class FakeChat:
+        completions = FakeCompletions()
+
+    class FakeClient:
+        chat = FakeChat()
+
+    monkeypatch.setattr(prompt_router, "_build_routing_client", lambda api_keys=None: FakeClient())  # noqa: ARG005
+
+    import asyncio
+
+    result = asyncio.run(prompt_router.route_request("inspect this body"))
+    assert "core" in result["required"]
+    assert "inspection" in result["required"]
+    assert result["reasoning"] == "choice_text"
+    assert "fallback" not in result
+
+
+def test_route_request_accepts_list_part_message_content(monkeypatch):
     class Message:
         content = [
             {"type": "text", "text": "{\"required\": [\"core\", \"inspection\"], \"optional\": [], \"reasoning\": \"shape_ok\"}"}
         ]
+        reasoning_content = None
+        reasoning = None
+        tool_calls = None
+
+    response = {
+        "choices": [{"message": Message(), "text": None}],
+        "output_text": None,
+    }
+
+    class FakeCompletions:
+        async def create(self, **kwargs):  # noqa: ARG002
+            return response
+
+    class FakeChat:
+        completions = FakeCompletions()
+
+    class FakeClient:
+        chat = FakeChat()
+
+    monkeypatch.setattr(prompt_router, "_build_routing_client", lambda api_keys=None: FakeClient())  # noqa: ARG005
+
+    import asyncio
+
+    result = asyncio.run(prompt_router.route_request("inspect this body"))
+    assert "core" in result["required"]
+    assert "inspection" in result["required"]
+    assert result["reasoning"] == "shape_ok"
+    assert "fallback" not in result
+
+
+def test_route_request_repairs_obvious_truncated_json(monkeypatch):
+    class Message:
+        content = "{\"required\": [\"inspection\"], \"optional\": [], \"reasoning\": \"repairable\""
         reasoning_content = None
         reasoning = None
         tool_calls = None
@@ -256,7 +349,53 @@ def test_route_request_accepts_non_string_message_content(monkeypatch):
     result = asyncio.run(prompt_router.route_request("inspect this body"))
     assert "core" in result["required"]
     assert "inspection" in result["required"]
-    assert result["reasoning"] == "shape_ok"
+    assert result["reasoning"] == "repairable"
+    assert "fallback" not in result
+
+
+def test_route_request_falls_back_on_truncated_json_and_marks_reason(monkeypatch, caplog):
+    class Message:
+        content = "{\"required\":"
+        reasoning_content = None
+        reasoning = None
+        tool_calls = None
+
+    class Choice:
+        message = Message()
+        text = None
+
+    class Response:
+        choices = [Choice()]
+        output_text = None
+
+    class FakeCompletions:
+        async def create(self, **kwargs):  # noqa: ARG002
+            return Response()
+
+    class FakeChat:
+        completions = FakeCompletions()
+
+    class FakeClient:
+        chat = FakeChat()
+
+    monkeypatch.setattr(prompt_router, "ROUTER_MODEL", "gpt-4.1-nano")
+    monkeypatch.setattr(prompt_router, "_build_routing_client", lambda api_keys=None: FakeClient())  # noqa: ARG005
+
+    import asyncio
+    import logging
+
+    with caplog.at_level(logging.WARNING):
+        result = asyncio.run(prompt_router.route_request("inspect this body"))
+
+    assert result["fallback"] is True
+    assert result["fallback_reason"] == "parse_failure:truncated_json"
+    assert "parse_failure:truncated_json" in result["reasoning"]
+    assert any(
+        "provider=openai-compatible" in record.message
+        and "model=gpt-4.1-nano" in record.message
+        and "category=truncated_json" in record.message
+        for record in caplog.records
+    )
 
 
 # ------------------------------------------------------------------ #

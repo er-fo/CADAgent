@@ -34,7 +34,7 @@ Usage:
 import os
 import json
 import logging
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any, Optional, Tuple
 from openai import AsyncOpenAI
 
 from .prompt_structure import get_tool_catalog_text, CLUSTER_TOOL_MAPPING
@@ -81,6 +81,11 @@ def _router_uses_bedrock() -> bool:
     return any(model_name.startswith(prefix) for prefix in _BEDROCK_ROUTER_PREFIXES)
 
 
+def _router_provider_path() -> str:
+    """Return a short provider label for logs and fallback reasons."""
+    return "bedrock" if _router_uses_bedrock() else "openai-compatible"
+
+
 def _coerce_content_to_text(content: Any) -> str:
     """Best-effort conversion of OpenAI-compatible content payloads to text."""
     if content is None:
@@ -125,6 +130,43 @@ def _coerce_content_to_text(content: Any) -> str:
     return text_value.strip() if isinstance(text_value, str) else ""
 
 
+def _extract_text_from_payload(payload: Any) -> str:
+    """Recursively extract text from OpenAI-compatible payload variants."""
+    if payload is None:
+        return ""
+
+    if isinstance(payload, str):
+        return payload.strip()
+
+    if isinstance(payload, list):
+        parts = [_extract_text_from_payload(item) for item in payload]
+        return "\n".join(part for part in parts if part).strip()
+
+    if isinstance(payload, dict):
+        if payload.get("type") == "text" and isinstance(payload.get("text"), str):
+            text = payload.get("text", "").strip()
+            if text:
+                return text
+
+        for key in ("text", "content", "output_text", "reasoning_content", "reasoning", "arguments"):
+            text = _extract_text_from_payload(payload.get(key))
+            if text:
+                return text
+
+        return ""
+
+    for attr in ("text", "content", "output_text", "reasoning_content", "reasoning", "arguments"):
+        if hasattr(payload, attr):
+            text = _extract_text_from_payload(getattr(payload, attr))
+            if text:
+                return text
+
+    if hasattr(payload, "__dict__") and getattr(payload, "__dict__", None):
+        return _extract_text_from_payload(vars(payload))
+
+    return ""
+
+
 def _extract_routing_response_text(response: Any) -> str:
     """
     Extract router response text from OpenAI-compatible response objects.
@@ -133,6 +175,8 @@ def _extract_routing_response_text(response: Any) -> str:
     some can return `None` in `message.content` while placing text elsewhere.
     """
     choices = getattr(response, "choices", None)
+    if choices is None and isinstance(response, dict):
+        choices = response.get("choices")
     if not choices:
         raise ValueError("Routing response has no choices")
 
@@ -144,38 +188,226 @@ def _extract_routing_response_text(response: Any) -> str:
     candidates: List[str] = []
 
     if isinstance(message, dict):
-        candidates.append(_coerce_content_to_text(message.get("content")))
-        candidates.append(_coerce_content_to_text(message.get("reasoning_content")))
-        candidates.append(_coerce_content_to_text(message.get("reasoning")))
+        candidates.append(_extract_text_from_payload(message.get("content")))
+        candidates.append(_extract_text_from_payload(message.get("reasoning_content")))
+        candidates.append(_extract_text_from_payload(message.get("reasoning")))
         tool_calls = message.get("tool_calls")
         if isinstance(tool_calls, list):
             for tool_call in tool_calls:
                 if isinstance(tool_call, dict):
                     function_payload = tool_call.get("function") or {}
                     if isinstance(function_payload, dict):
-                        candidates.append(_coerce_content_to_text(function_payload.get("arguments")))
+                        candidates.append(_extract_text_from_payload(function_payload.get("arguments")))
     else:
-        candidates.append(_coerce_content_to_text(getattr(message, "content", None)))
-        candidates.append(_coerce_content_to_text(getattr(message, "reasoning_content", None)))
-        candidates.append(_coerce_content_to_text(getattr(message, "reasoning", None)))
+        candidates.append(_extract_text_from_payload(getattr(message, "content", None)))
+        candidates.append(_extract_text_from_payload(getattr(message, "reasoning_content", None)))
+        candidates.append(_extract_text_from_payload(getattr(message, "reasoning", None)))
         tool_calls = getattr(message, "tool_calls", None)
         if isinstance(tool_calls, list):
             for tool_call in tool_calls:
                 function_payload = getattr(tool_call, "function", None)
-                candidates.append(_coerce_content_to_text(getattr(function_payload, "arguments", None)))
+                candidates.append(_extract_text_from_payload(getattr(function_payload, "arguments", None)))
 
     if isinstance(first_choice, dict):
-        candidates.append(_coerce_content_to_text(first_choice.get("text")))
+        candidates.append(_extract_text_from_payload(first_choice.get("text")))
     else:
-        candidates.append(_coerce_content_to_text(getattr(first_choice, "text", None)))
+        candidates.append(_extract_text_from_payload(getattr(first_choice, "text", None)))
 
-    candidates.append(_coerce_content_to_text(getattr(response, "output_text", None)))
+    candidates.append(_extract_text_from_payload(getattr(response, "output_text", None)))
+    if isinstance(response, dict):
+        candidates.append(_extract_text_from_payload(response.get("output_text")))
 
     for candidate in candidates:
         if candidate:
             return candidate
 
     raise ValueError("Routing response has no textual content")
+
+
+def _strip_json_fences(text: str) -> str:
+    """Remove a single outer markdown code fence when present."""
+    stripped = text.strip()
+    if not stripped.startswith("```"):
+        return stripped
+
+    lines = stripped.splitlines()
+    if len(lines) == 1:
+        return stripped
+
+    body = "\n".join(lines[1:]).strip()
+    if body.endswith("```"):
+        body = body[:-3].strip()
+    return body
+
+
+def _extract_json_candidate(text: str) -> str:
+    """Extract the most likely JSON object or array from a response."""
+    stripped = text.strip()
+    if not stripped:
+        return ""
+
+    if stripped[0] in "{[" and stripped[-1] in "}]":
+        return stripped
+
+    for opener, closer in (("{", "}"), ("[", "]")):
+        start = stripped.find(opener)
+        end = stripped.rfind(closer)
+        if start != -1 and end != -1 and start < end:
+            candidate = stripped[start : end + 1].strip()
+            if candidate.startswith(opener) and candidate.endswith(closer):
+                return candidate
+
+    return stripped
+
+
+def _bounded_json_repair_suffix(text: str) -> str:
+    """
+    Return a short suffix that safely closes an obviously truncated JSON value.
+
+    The repair is intentionally conservative: it only appends missing closing
+    braces/brackets when the text appears to be a complete prefix and is not
+    currently inside a string literal.
+    """
+    stripped = text.rstrip()
+    if not stripped or stripped[0] not in "{[":
+        return ""
+
+    stack: List[str] = []
+    in_string = False
+    escape = False
+
+    for char in stripped:
+        if in_string:
+            if escape:
+                escape = False
+                continue
+            if char == "\\":
+                escape = True
+                continue
+            if char == '"':
+                in_string = False
+            continue
+
+        if char == '"':
+            in_string = True
+            continue
+
+        if char in "{[":
+            stack.append(char)
+            continue
+
+        if char in "}]":
+            if not stack:
+                return ""
+            opener = stack.pop()
+            if (opener == "{" and char != "}") or (opener == "[" and char != "]"):
+                return ""
+
+    if in_string:
+        return ""
+
+    if not stack:
+        return ""
+
+    last_non_ws = ""
+    for char in reversed(stripped):
+        if not char.isspace():
+            last_non_ws = char
+            break
+
+    if last_non_ws in {":", ",", "{", "["}:
+        return ""
+
+    if len(stack) > 4:
+        return ""
+
+    return "".join("}" if opener == "{" else "]" for opener in reversed(stack))
+
+
+def _classify_router_parse_failure(text: str, error: Optional[Exception]) -> str:
+    """Return a short parse-failure category for logs and fallback reasons."""
+    stripped = (text or "").strip()
+    if not stripped:
+        return "empty_content"
+
+    if stripped[0] in "{[":
+        last_non_ws = ""
+        for char in reversed(stripped):
+            if not char.isspace():
+                last_non_ws = char
+                break
+        if last_non_ws in {":", ",", "{", "["}:
+            return "truncated_json"
+        if isinstance(error, json.JSONDecodeError) and "Unterminated string" in str(error):
+            return "truncated_json"
+        return "malformed_json"
+
+    if "{" in stripped or "[" in stripped:
+        return "wrapped_json_parse_error"
+
+    return "non_json_text"
+
+
+def _safe_parse_router_response(response_text: str) -> Tuple[Optional[Dict[str, Any]], str]:
+    """
+    Parse a router response without raising on malformed provider output.
+
+    Returns a tuple of (parsed_result, status). Status is "ok" or a short
+    failure category such as "truncated_json" or "empty_content".
+    """
+    normalized_text = _strip_json_fences(response_text)
+    if not normalized_text:
+        return None, "empty_content"
+
+    candidates = [normalized_text]
+    extracted_candidate = _extract_json_candidate(normalized_text)
+    if extracted_candidate and extracted_candidate != normalized_text:
+        candidates.append(extracted_candidate)
+
+    last_error: Optional[Exception] = None
+
+    for candidate in candidates:
+        try:
+            parsed = json.loads(candidate)
+            if isinstance(parsed, dict):
+                return parsed, "ok"
+            return None, "unexpected_json_shape"
+        except json.JSONDecodeError as exc:
+            last_error = exc
+
+        repair_suffix = _bounded_json_repair_suffix(candidate)
+        if repair_suffix:
+            try:
+                parsed = json.loads(candidate + repair_suffix)
+                if isinstance(parsed, dict):
+                    return parsed, "repaired"
+                return None, "unexpected_json_shape"
+            except json.JSONDecodeError as exc:
+                last_error = exc
+
+    return None, _classify_router_parse_failure(normalized_text, last_error)
+
+
+def _fallback_with_reason(user_request: str, fallback_reason: str) -> Dict[str, Any]:
+    """
+    Call the fallback router while keeping compatibility with older stubs.
+
+    Some tests monkeypatch _fallback_routing with a single-argument stub. We
+    prefer to pass the explicit reason when the real function is present, but
+    gracefully degrade to the older call shape when a stub rejects it.
+    """
+    try:
+        fallback_result = _fallback_routing(user_request, fallback_reason=fallback_reason)
+    except TypeError as exc:
+        if "fallback_reason" not in str(exc):
+            raise
+        fallback_result = _fallback_routing(user_request)
+
+    fallback_result["fallback_reason"] = fallback_reason
+    fallback_result["reasoning"] = f"Fallback routing using keyword matching ({fallback_reason})"
+    fallback_result.setdefault("fallback", True)
+    fallback_result.setdefault("routing_source", "keyword_fallback")
+    return fallback_result
 
 # Router system prompt (system role)
 ROUTER_PROMPT = """You are a tool routing classifier for a CAD modeling agent.
@@ -417,12 +649,17 @@ async def route_request(
         Exception: If routing fails (fallback: return all clusters)
     """
     try:
+        provider_path = _router_provider_path()
         logger.info(f"Routing request: {user_request[:100]}...")
 
         routing_client = _build_routing_client(api_keys)
         if routing_client is None:
-            logger.warning("No OpenAI API key available for prompt routing; using fallback routing")
-            return _fallback_routing(user_request)
+            logger.warning(
+                "Prompt router missing credentials | provider=%s model=%s",
+                provider_path,
+                ROUTER_MODEL,
+            )
+            return _fallback_with_reason(user_request, "missing_router_credentials")
 
         # Get tool catalog for router
         tool_catalog = get_tool_catalog_text()
@@ -461,16 +698,32 @@ async def route_request(
         )
 
         # Extract response text from provider-specific shapes
-        response_text = _extract_routing_response_text(response)
+        try:
+            response_text = _extract_routing_response_text(response)
+        except Exception as exc:
+            logger.warning(
+                "Prompt router response extraction failed | provider=%s model=%s category=missing_text error=%s",
+                provider_path,
+                ROUTER_MODEL,
+                type(exc).__name__,
+            )
+            return _fallback_with_reason(user_request, "missing_text")
 
-        # Parse JSON response
-        # Handle potential markdown code blocks
-        if "```json" in response_text:
-            response_text = response_text.split("```json")[1].split("```")[0].strip()
-        elif "```" in response_text:
-            response_text = response_text.split("```")[1].split("```")[0].strip()
-
-        routing_result = json.loads(response_text)
+        routing_result, parse_status = _safe_parse_router_response(response_text)
+        if routing_result is None:
+            logger.warning(
+                "Prompt router parse failure | provider=%s model=%s category=%s",
+                provider_path,
+                ROUTER_MODEL,
+                parse_status,
+            )
+            return _fallback_with_reason(user_request, f"parse_failure:{parse_status}")
+        if parse_status == "repaired":
+            logger.info(
+                "Prompt router applied bounded JSON repair | provider=%s model=%s",
+                provider_path,
+                ROUTER_MODEL,
+            )
 
         # Validate result structure
         if "required" not in routing_result:
@@ -508,17 +761,18 @@ async def route_request(
 
         return routing_result
 
-    except json.JSONDecodeError as e:
-        logger.error(f"Failed to parse router JSON response: {e}")
-        logger.error(f"Response text: {response_text}")
-        return _fallback_routing(user_request)
-
     except Exception as e:
-        logger.error(f"Routing failed: {e}", exc_info=True)
-        return _fallback_routing(user_request)
+        logger.error(
+            "Routing failed | provider=%s model=%s error=%s",
+            _router_provider_path(),
+            ROUTER_MODEL,
+            type(e).__name__,
+            exc_info=True,
+        )
+        return _fallback_with_reason(user_request, f"routing_error:{type(e).__name__}")
 
 
-def _fallback_routing(user_request: str) -> Dict[str, Any]:
+def _fallback_routing(user_request: str, fallback_reason: str = "ai_router_failed") -> Dict[str, Any]:
     """
     Fallback routing when AI router fails.
 
@@ -531,7 +785,7 @@ def _fallback_routing(user_request: str) -> Dict[str, Any]:
     Returns:
         Conservative routing result that should cover most use cases
     """
-    logger.warning("Using fallback routing based on keywords")
+    logger.warning("Using fallback routing based on keywords | reason=%s", fallback_reason)
 
     request_lower = user_request.lower()
 
@@ -671,9 +925,11 @@ def _fallback_routing(user_request: str) -> Dict[str, Any]:
     return {
         "required": required,
         "optional": optional,
-        "reasoning": "Fallback routing using keyword matching (AI router failed)",
+        "reasoning": f"Fallback routing using keyword matching ({fallback_reason})",
         "confidence": "low",
-        "fallback": True
+        "fallback": True,
+        "fallback_reason": fallback_reason,
+        "routing_source": "keyword_fallback",
     }
 
 
