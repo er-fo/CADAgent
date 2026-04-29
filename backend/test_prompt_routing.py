@@ -12,6 +12,7 @@ from backend.prompt_router import (
     _extract_conversation_context,
     _extract_operations_from_build_plan,
     _build_routing_client,
+    _extract_routing_response_text,
     get_routing_summary,
     ROUTING_PATTERNS,
 )
@@ -179,6 +180,83 @@ def test_route_request_falls_back_when_minimax_token_missing(monkeypatch):
 
     assert result["fallback"] is True
     assert called["user_request"] == "drill a hole in the plate"
+
+
+def test_extract_routing_response_text_from_list_content_parts():
+    class Message:
+        content = [
+            {"type": "text", "text": "{\"required\": [\"core\"], \"optional\": [], \"reasoning\": \"ok\"}"}
+        ]
+        reasoning_content = None
+        reasoning = None
+        tool_calls = None
+
+    class Choice:
+        message = Message()
+        text = None
+
+    class Response:
+        choices = [Choice()]
+        output_text = None
+
+    text = _extract_routing_response_text(Response())
+    assert "\"required\": [\"core\"]" in text
+
+
+def test_extract_routing_response_text_from_choice_text_when_message_content_none():
+    class Message:
+        content = None
+        reasoning_content = None
+        reasoning = None
+        tool_calls = None
+
+    class Choice:
+        message = Message()
+        text = "{\"required\": [\"core\"], \"optional\": [], \"reasoning\": \"via_choice_text\"}"
+
+    class Response:
+        choices = [Choice()]
+        output_text = None
+
+    text = _extract_routing_response_text(Response())
+    assert "via_choice_text" in text
+
+
+def test_route_request_accepts_non_string_message_content(monkeypatch):
+    class Message:
+        content = [
+            {"type": "text", "text": "{\"required\": [\"core\", \"inspection\"], \"optional\": [], \"reasoning\": \"shape_ok\"}"}
+        ]
+        reasoning_content = None
+        reasoning = None
+        tool_calls = None
+
+    class Choice:
+        message = Message()
+        text = None
+
+    class Response:
+        choices = [Choice()]
+        output_text = None
+
+    class FakeCompletions:
+        async def create(self, **kwargs):  # noqa: ARG002
+            return Response()
+
+    class FakeChat:
+        completions = FakeCompletions()
+
+    class FakeClient:
+        chat = FakeChat()
+
+    monkeypatch.setattr(prompt_router, "_build_routing_client", lambda api_keys=None: FakeClient())  # noqa: ARG005
+
+    import asyncio
+
+    result = asyncio.run(prompt_router.route_request("inspect this body"))
+    assert "core" in result["required"]
+    assert "inspection" in result["required"]
+    assert result["reasoning"] == "shape_ok"
 
 
 # ------------------------------------------------------------------ #

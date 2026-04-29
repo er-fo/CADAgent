@@ -80,6 +80,103 @@ def _router_uses_bedrock() -> bool:
     model_name = (ROUTER_MODEL or "").strip().lower()
     return any(model_name.startswith(prefix) for prefix in _BEDROCK_ROUTER_PREFIXES)
 
+
+def _coerce_content_to_text(content: Any) -> str:
+    """Best-effort conversion of OpenAI-compatible content payloads to text."""
+    if content is None:
+        return ""
+
+    if isinstance(content, str):
+        return content.strip()
+
+    if isinstance(content, dict):
+        for key in ("text", "content"):
+            value = content.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return ""
+
+    if isinstance(content, list):
+        parts: List[str] = []
+        for item in content:
+            if isinstance(item, str):
+                text = item.strip()
+            elif isinstance(item, dict):
+                text = ""
+                for key in ("text", "content"):
+                    value = item.get(key)
+                    if isinstance(value, str) and value.strip():
+                        text = value.strip()
+                        break
+            else:
+                text_value = getattr(item, "text", None)
+                if not isinstance(text_value, str):
+                    text_value = getattr(item, "content", None)
+                text = text_value.strip() if isinstance(text_value, str) else ""
+
+            if text:
+                parts.append(text)
+
+        return "\n".join(parts).strip()
+
+    text_value = getattr(content, "text", None)
+    if not isinstance(text_value, str):
+        text_value = getattr(content, "content", None)
+    return text_value.strip() if isinstance(text_value, str) else ""
+
+
+def _extract_routing_response_text(response: Any) -> str:
+    """
+    Extract router response text from OpenAI-compatible response objects.
+
+    Some providers return non-string message content (e.g. list parts), and
+    some can return `None` in `message.content` while placing text elsewhere.
+    """
+    choices = getattr(response, "choices", None)
+    if not choices:
+        raise ValueError("Routing response has no choices")
+
+    first_choice = choices[0]
+    message = getattr(first_choice, "message", None)
+    if message is None and isinstance(first_choice, dict):
+        message = first_choice.get("message")
+
+    candidates: List[str] = []
+
+    if isinstance(message, dict):
+        candidates.append(_coerce_content_to_text(message.get("content")))
+        candidates.append(_coerce_content_to_text(message.get("reasoning_content")))
+        candidates.append(_coerce_content_to_text(message.get("reasoning")))
+        tool_calls = message.get("tool_calls")
+        if isinstance(tool_calls, list):
+            for tool_call in tool_calls:
+                if isinstance(tool_call, dict):
+                    function_payload = tool_call.get("function") or {}
+                    if isinstance(function_payload, dict):
+                        candidates.append(_coerce_content_to_text(function_payload.get("arguments")))
+    else:
+        candidates.append(_coerce_content_to_text(getattr(message, "content", None)))
+        candidates.append(_coerce_content_to_text(getattr(message, "reasoning_content", None)))
+        candidates.append(_coerce_content_to_text(getattr(message, "reasoning", None)))
+        tool_calls = getattr(message, "tool_calls", None)
+        if isinstance(tool_calls, list):
+            for tool_call in tool_calls:
+                function_payload = getattr(tool_call, "function", None)
+                candidates.append(_coerce_content_to_text(getattr(function_payload, "arguments", None)))
+
+    if isinstance(first_choice, dict):
+        candidates.append(_coerce_content_to_text(first_choice.get("text")))
+    else:
+        candidates.append(_coerce_content_to_text(getattr(first_choice, "text", None)))
+
+    candidates.append(_coerce_content_to_text(getattr(response, "output_text", None)))
+
+    for candidate in candidates:
+        if candidate:
+            return candidate
+
+    raise ValueError("Routing response has no textual content")
+
 # Router system prompt (system role)
 ROUTER_PROMPT = """You are a tool routing classifier for a CAD modeling agent.
 
@@ -363,8 +460,8 @@ async def route_request(
             ],
         )
 
-        # Extract response text
-        response_text = response.choices[0].message.content.strip()
+        # Extract response text from provider-specific shapes
+        response_text = _extract_routing_response_text(response)
 
         # Parse JSON response
         # Handle potential markdown code blocks
