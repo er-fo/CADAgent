@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Dict, List, Sequence
 
 from .types import (
@@ -13,6 +14,7 @@ from .types import (
 )
 
 _DATUM_PLANES = {"XY", "XZ", "YZ"}
+_FACE_ALIAS_PATTERN = re.compile(r"^face_\d+$")
 
 
 def _is_nonempty_string(value: object) -> bool:
@@ -58,6 +60,11 @@ def validate_operation(operation: IROperation) -> List[str]:
         source = str((operation.metadata or {}).get("source") or "").strip().lower()
         if source == "studio" and str(params.plane).strip().upper() not in _DATUM_PLANES:
             errors.append("create_sketch plane for studio target must be one of XY/XZ/YZ")
+        if source == "fusion" and _FACE_ALIAS_PATTERN.match(str(params.plane).strip()):
+            errors.append(
+                "create_sketch plane for fusion target must be a datum plane (XY/XZ/YZ), "
+                "construction plane ID, or resolved face token; alias refs like face_N are not allowed"
+            )
         if not _is_nonempty_string(params.sketch):
             errors.append("create_sketch sketch must be a non-empty identifier")
         return errors

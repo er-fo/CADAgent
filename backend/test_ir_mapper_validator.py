@@ -89,7 +89,8 @@ def test_mapper_preserves_non_datum_create_sketch_planes_for_fusion():
 
     assert face_op.params.plane == "face_0"
     assert custom_plane_op.params.plane == "port_plane"
-    assert not validate_operation(face_op)
+    face_errors = validate_operation(face_op)
+    assert any("alias refs like face_N are not allowed" in err for err in face_errors)
     assert not validate_operation(custom_plane_op)
 
 

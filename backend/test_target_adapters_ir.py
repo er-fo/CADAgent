@@ -104,6 +104,17 @@ def test_fusion_translator_rejects_malformed_profile_reference():
         translate_ir_to_fusion_tool_call(operation)
 
 
+def test_fusion_translator_rejects_unresolved_face_alias_plane():
+    operation = IROperation(
+        id="op_face_alias",
+        type="create_sketch",
+        params=CreateSketchParams(plane="face_0", sketch="sketch_0"),
+    )
+
+    with pytest.raises(ValueError, match="Unresolved face alias for create_sketch plane"):
+        translate_ir_to_fusion_tool_call(operation)
+
+
 def test_build123d_translator_rejects_unsupported_plane():
     document = IRDocument(
         version="1.0",

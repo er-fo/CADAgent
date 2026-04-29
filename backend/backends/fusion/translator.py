@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any, Dict, Tuple
 
 from ...ir.types import AddCircleParams, AddRectangleParams, CreateSketchParams, ExtrudeParams, IROperation
@@ -13,6 +14,7 @@ _OPERATION_TO_FUSION = {
     "cut": "Cut",
     "intersect": "Intersect",
 }
+_FACE_ALIAS_PATTERN = re.compile(r"^face_\d+$")
 
 
 def _parse_profile_reference(profile: str) -> Tuple[str, int]:
@@ -52,10 +54,16 @@ def translate_ir_to_fusion_tool_call(operation: IROperation) -> Tuple[str, Dict[
         params = operation.params
         if not isinstance(params, CreateSketchParams):
             raise ValueError("create_sketch IR params shape mismatch")
+        plane_id = str(params.plane).strip()
+        if _FACE_ALIAS_PATTERN.match(plane_id):
+            raise ValueError(
+                "Unresolved face alias for create_sketch plane. "
+                f"Expected datum plane or face token, got '{plane_id}'."
+            )
         return "create_sketch", {
-            "plane_id": params.plane,
+            "plane_id": plane_id,
             "sketch_id": params.sketch,
-            "description": f"Create sketch {params.sketch} on {params.plane}",
+            "description": f"Create sketch {params.sketch} on {plane_id}",
         }
 
     if operation.type == "add_rectangle":

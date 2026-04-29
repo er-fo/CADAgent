@@ -159,6 +159,78 @@ def test_execute_workflow_routes_ir_tools_to_fusion_adapter(monkeypatch: pytest.
     assert [item["tool_use_id"] for item in refresh_payloads] == ["toolu_1", "toolu_2", "toolu_3"]
 
 
+def test_execute_workflow_resolves_ir_create_sketch_face_ref_for_fusion(monkeypatch: pytest.MonkeyPatch):
+    class _FaceRefStore:
+        def resolve_token(self, ref_or_token: str, expected_kind: Optional[str] = None):
+            if expected_kind == "face" and ref_or_token == "face_0":
+                return "face_token_abc", None
+            return None, f"Could not resolve reference '{ref_or_token}'"
+
+        def get_refs_by_kind(self, kind: str):
+            if kind == "face":
+                return ["face_0"]
+            return []
+
+    class _FaceRefManager(_FakeManager):
+        def __init__(self) -> None:
+            super().__init__()
+            self._store = _FaceRefStore()
+
+        def get_entity_store(self, session_id: str):
+            return self._store
+
+    manager = _FaceRefManager()
+    call_count = {"llm": 0}
+    captured_planes: List[str] = []
+
+    async def fake_call_claude_with_tools(*args, **kwargs):
+        call_count["llm"] += 1
+        if call_count["llm"] == 1:
+            return {
+                "stop_reason": "tool_use",
+                "content": [
+                    {"type": "tool_use", "id": "toolu_face", "name": "create_sketch", "input": {"plane_id": "face_0", "sketch_id": "sketch_on_face"}}
+                ],
+            }
+        return _end_turn_response()
+
+    async def fake_execute_operation(self, session_id, operation, tool_use_id, description=""):
+        captured_planes.append(str(getattr(operation.params, "plane", "")))
+        return TargetExecutionResult(
+            success=True,
+            target="fusion",
+            message="ok",
+            raw_result={"success": True, "tool_use_id": tool_use_id, "message": f"{operation.type} ok"},
+        )
+
+    async def fake_refresh_after_success(session_id, manager, tool_name, result, messages):
+        return None
+
+    async def fake_runtime_sync(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(agent_workflow, "USE_PROMPT_ROUTING", False)
+    monkeypatch.setattr(agent_workflow, "call_claude_with_tools", fake_call_claude_with_tools)
+    monkeypatch.setattr(agent_workflow.FusionTargetExecutor, "execute_operation", fake_execute_operation)
+    monkeypatch.setattr(agent_workflow, "_refresh_and_enrich_after_success", fake_refresh_after_success)
+    monkeypatch.setattr(agent_workflow, "_ensure_runtime_entity_context_synced", fake_runtime_sync)
+
+    asyncio.run(
+        agent_workflow._execute_workflow_loop(
+            session_id="s-face-ref",
+            messages=[{"role": "user", "content": [{"type": "text", "text": "Sketch on face_0"}]}],
+            max_iterations=3,
+            model_name=None,
+            manager=manager,  # type: ignore[arg-type]
+            last_user_message_sent=None,
+            request={"execution_target": "fusion", "request_id": "r-face-ref"},
+            feature_snapshot=None,
+        )
+    )
+
+    assert captured_planes == ["face_token_abc"]
+
+
 def test_execute_workflow_initial_routing_includes_active_build_plan(monkeypatch: pytest.MonkeyPatch):
     manager = _FakeManager()
     manager.active_build_plan = {

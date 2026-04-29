@@ -2750,6 +2750,7 @@ async def _execute_workflow_loop(
                 reasoning_effort=reasoning_effort,
                 iteration=iteration + 1,
                 max_iterations=max_iterations,
+                capture_phase="pre_llm",
                 system_prompt=routed_system_prompt,  # Actual prompt sent to LLM
                 tools=routed_tools,  # Actual tools sent to LLM
             )
@@ -2976,6 +2977,39 @@ async def _execute_workflow_loop(
             logger.info("Session %s executing tool '%s' (id=%s)", session_id, tool_name, tool_use_id)
 
             if tool_name in IR_MVP_TOOLS:
+                ir_tool_call: Mapping[str, Any] = tool_call
+                if (
+                    execution_target == "fusion"
+                    and tool_name == "create_sketch"
+                    and callable(getattr(manager, "get_entity_store", None))
+                ):
+                    try:
+                        resolved_ir_input = _resolve_codegen_entity_refs(
+                            session_id,
+                            manager,
+                            tool_name,
+                            dict(tool_input),
+                        )
+                    except SelectionToolCallError as exc:
+                        error_text = f"IR reference resolution failed: {exc}"
+                        await _send_error(manager, session_id, "IR validation failed", error_text)
+                        messages.append(_tool_result_message(tool_use_id, error_text, is_error=True))
+                        iteration_had_failure = True
+                        if iteration_first_failure_intent is None:
+                            iteration_first_failure_intent = tool_intent_key
+                        continue
+
+                    original_plane = str(tool_input.get("plane_id", "") or "").strip()
+                    resolved_plane = str(resolved_ir_input.get("plane_id", "") or "").strip()
+                    if original_plane and resolved_plane and original_plane != resolved_plane:
+                        logger.info(
+                            "Session %s resolved IR create_sketch plane '%s' -> token for Fusion execution",
+                            session_id,
+                            original_plane,
+                        )
+                    ir_tool_call = dict(tool_call)
+                    ir_tool_call["input"] = resolved_ir_input
+
                 ir_metadata = {
                     "source": "studio" if execution_target == "build123d" else "fusion",
                     "request_id": str((request or {}).get("request_id") or ""),
@@ -2983,7 +3017,7 @@ async def _execute_workflow_loop(
                 }
                 try:
                     ir_op = map_tool_call_to_ir(
-                        tool_call,
+                        ir_tool_call,
                         ir_doc_state,
                         metadata=ir_metadata,
                         dependency_operations=ir_attempt_history,

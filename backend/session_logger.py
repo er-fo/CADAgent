@@ -279,6 +279,7 @@ def _extract_session_context(
     reasoning_effort: Optional[str],
     iteration: int,
     max_iterations: int,
+    capture_phase: str = "pre_llm",
     system_prompt: Optional[str] = None,
     tools: Optional[List[Dict[str, Any]]] = None,
     spatial_context: Optional[Dict[str, Any]] = None,
@@ -302,6 +303,7 @@ def _extract_session_context(
         reasoning_effort: Reasoning effort level
         iteration: Current iteration number
         max_iterations: Maximum iterations allowed
+        capture_phase: Context capture phase (e.g., pre_llm, post_iteration)
         system_prompt: Actual system prompt sent to LLM (optional)
         tools: Actual tools array sent to LLM (optional)
         spatial_context: New spatial context structure (optional)
@@ -317,6 +319,7 @@ def _extract_session_context(
             "model_name": model_name,
             "reasoning_effort": reasoning_effort,
             "timestamp": datetime.now().isoformat(),
+            "capture_phase": capture_phase,
         }
     }
 
@@ -436,6 +439,23 @@ def _extract_session_context(
             "edge_count": len(entity_context.get("edges", []) or []),
             "vertex_count": len(entity_context.get("vertices", []) or []),
         }
+
+    feature_count = 0
+    if feature_snapshot and isinstance(feature_snapshot.get("features"), list):
+        feature_count = len(feature_snapshot.get("features") or [])
+    selected_body_count = len((entity_store_data or {}).get("selected_bodies", []) or [])
+    selected_face_count = len((entity_store_data or {}).get("selected_faces", []) or [])
+    selected_edge_count = len((entity_store_data or {}).get("selected_edges", []) or [])
+    context["state_counts"] = {
+        "feature_count": feature_count,
+        "selected_body_count": selected_body_count,
+        "selected_face_count": selected_face_count,
+        "selected_edge_count": selected_edge_count,
+        "entity_context_body_count": len((entity_context or {}).get("bodies", []) or []),
+        "entity_context_face_count": len((entity_context or {}).get("faces", []) or []),
+        "entity_context_edge_count": len((entity_context or {}).get("edges", []) or []),
+        "entity_context_vertex_count": len((entity_context or {}).get("vertices", []) or []),
+    }
 
     # Routing result
     if routing_result:
