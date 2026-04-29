@@ -3,11 +3,11 @@ import pytest
 try:
     from .ir.document import IRDocumentState
     from .ir.mapper import UnsupportedToolMappingError, map_tool_call_to_ir
-    from .ir.validator import validate_ir_sequence, validate_operation
+    from .ir.validator import validate_ir_candidate, validate_ir_sequence, validate_operation
 except ImportError:  # pragma: no cover
     from backend.backend.ir.document import IRDocumentState
     from backend.backend.ir.mapper import UnsupportedToolMappingError, map_tool_call_to_ir
-    from backend.backend.ir.validator import validate_ir_sequence, validate_operation
+    from backend.backend.ir.validator import validate_ir_candidate, validate_ir_sequence, validate_operation
 
 
 def test_mapper_converts_rectangle_and_extrude_to_shared_ir():
@@ -106,6 +106,46 @@ def test_mapper_preserves_studio_non_datum_create_sketch_plane_for_validation():
     errors = validate_operation(op)
     assert errors
     assert any("create_sketch plane for studio target must be one of XY/XZ/YZ" in error for error in errors)
+
+
+def test_mapper_populates_dependencies_for_sketch_flow():
+    state = IRDocumentState()
+
+    sketch_op = map_tool_call_to_ir(
+        {"name": "create_sketch", "input": {"plane_id": "XY", "sketch_id": "sketch_0"}},
+        state,
+    )
+    state.append(sketch_op)
+    circle_op = map_tool_call_to_ir(
+        {"name": "add_circle", "input": {"sketch_id": "sketch_0", "center_u": 0, "center_v": 0, "radius": 5}},
+        state,
+    )
+    state.append(circle_op)
+    extrude_op = map_tool_call_to_ir(
+        {"name": "extrude_profile", "input": {"sketch_id": "sketch_0", "profile_index": 0, "distance": 10}},
+        state,
+    )
+
+    assert circle_op.dependencies == [sketch_op.id]
+    assert extrude_op.dependencies == [circle_op.id, sketch_op.id]
+
+
+def test_candidate_validation_blocks_uncommitted_dependencies():
+    state = IRDocumentState()
+
+    sketch_op = map_tool_call_to_ir(
+        {"name": "create_sketch", "input": {"plane_id": "XY", "sketch_id": "sketch_0"}},
+        state,
+    )
+    circle_op = map_tool_call_to_ir(
+        {"name": "add_circle", "input": {"sketch_id": "sketch_0", "center_u": 0, "center_v": 0, "radius": 5}},
+        state,
+        dependency_operations=[sketch_op],
+    )
+
+    # Simulate sketch creation failed and never committed.
+    errors = validate_ir_candidate(circle_op, committed_operations=[])
+    assert any("depends on uncommitted operation" in err for err in errors)
 
 
 @pytest.mark.parametrize(

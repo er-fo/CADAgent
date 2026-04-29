@@ -157,6 +157,26 @@ def test_build123d_translator_rejects_unsupported_extrude_operation():
         translate_ir_document_to_build123d(document)
 
 
+def test_build123d_translator_emits_fail_closed_sketch_plane_guards():
+    document = IRDocument(
+        version="1.0",
+        units="mm",
+        operations=[
+            IROperation(
+                id="op_1",
+                type="add_circle",
+                params=AddCircleParams(sketch="missing_sketch", center=[0.0, 0.0], radius=2.0),
+            )
+        ],
+        metadata={"source": "test"},
+    )
+
+    program = translate_ir_document_to_build123d(document)
+    assert "not in _sketch_planes" in program.code
+    assert "Sketch plane missing for 'missing_sketch'" in program.code
+    assert "_sketch_planes.get('missing_sketch', Plane.XY)" not in program.code
+
+
 def _build_cube_document() -> IRDocument:
     return IRDocument(
         version="1.0",

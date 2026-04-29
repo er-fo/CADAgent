@@ -19,6 +19,30 @@ def _is_nonempty_string(value: object) -> bool:
     return isinstance(value, str) and bool(value.strip())
 
 
+def _sketch_ids_from_committed(operations: Sequence[IROperation]) -> set[str]:
+    sketches: set[str] = set()
+    for op in operations:
+        if op.type != "create_sketch":
+            continue
+        if isinstance(op.params, CreateSketchParams) and _is_nonempty_string(op.params.sketch):
+            sketches.add(op.params.sketch.strip())
+    return sketches
+
+
+def _has_committed_profile_for_sketch(
+    operations: Sequence[IROperation],
+    sketch_id: str,
+) -> bool:
+    for op in operations:
+        if op.type == "add_rectangle" and isinstance(op.params, AddRectangleParams):
+            if op.params.sketch.strip() == sketch_id:
+                return True
+        if op.type == "add_circle" and isinstance(op.params, AddCircleParams):
+            if op.params.sketch.strip() == sketch_id:
+                return True
+    return False
+
+
 def validate_operation(operation: IROperation) -> List[str]:
     """Validate a single IR operation."""
     errors: List[str] = []
@@ -84,6 +108,44 @@ def validate_operation(operation: IROperation) -> List[str]:
     return [f"Unsupported IR operation type: {operation.type}"]
 
 
+def validate_ir_candidate(
+    operation: IROperation,
+    committed_operations: Sequence[IROperation],
+) -> List[str]:
+    """
+    Validate one candidate operation against already committed operations.
+
+    This enforces fail-closed semantics: dependencies must point to successful
+    committed operations, never to speculative or failed operations.
+    """
+    errors = validate_operation(operation)
+    committed_ids = {op.id for op in committed_operations}
+    committed_sketches = _sketch_ids_from_committed(committed_operations)
+
+    missing_dependencies = [dep for dep in operation.dependencies if dep not in committed_ids]
+    if missing_dependencies:
+        errors.append(
+            "Operation depends on uncommitted operation(s): " + ", ".join(missing_dependencies)
+        )
+
+    if operation.type in {"add_rectangle", "add_circle"}:
+        sketch = getattr(operation.params, "sketch", "")
+        if sketch and sketch not in committed_sketches:
+            errors.append(f"Referenced sketch '{sketch}' does not exist yet")
+
+    if operation.type == "extrude" and isinstance(operation.params, ExtrudeParams):
+        sketch = (operation.params.sketch or "").strip()
+        if sketch and sketch not in committed_sketches:
+            errors.append(f"Referenced sketch '{sketch}' does not exist yet")
+        elif sketch and not _has_committed_profile_for_sketch(committed_operations, sketch):
+            errors.append(
+                f"Extrude for sketch '{sketch}' requires at least one committed profile operation "
+                "(add_rectangle/add_circle) before extrusion"
+            )
+
+    return errors
+
+
 def validate_ir_sequence(operations: Sequence[IROperation]) -> Dict[str, List[str]]:
     """
     Validate a sequence and cross-operation dependencies.
@@ -91,28 +153,13 @@ def validate_ir_sequence(operations: Sequence[IROperation]) -> Dict[str, List[st
     Returns a map keyed by operation id with validation errors.
     """
     errors_by_op: Dict[str, List[str]] = {}
-    known_sketches: set[str] = set()
+    committed_valid_ops: List[IROperation] = []
 
     for op in operations:
-        op_errors = validate_operation(op)
-
-        if op.type == "create_sketch" and not op_errors:
-            params = op.params
-            if isinstance(params, CreateSketchParams):
-                known_sketches.add(params.sketch)
-
-        if op.type in {"add_rectangle", "add_circle"}:
-            params = op.params
-            sketch = getattr(params, "sketch", "")
-            if sketch and sketch not in known_sketches:
-                op_errors.append(f"Referenced sketch '{sketch}' does not exist yet")
-
-        if op.type == "extrude":
-            params = op.params
-            if isinstance(params, ExtrudeParams) and params.sketch and params.sketch not in known_sketches:
-                op_errors.append(f"Referenced sketch '{params.sketch}' does not exist yet")
-
+        op_errors = validate_ir_candidate(op, committed_valid_ops)
         if op_errors:
             errors_by_op[op.id] = op_errors
+            continue
+        committed_valid_ops.append(op)
 
     return errors_by_op

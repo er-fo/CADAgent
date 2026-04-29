@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import math
-from typing import Any, Dict, Mapping, Optional
+from typing import Any, Dict, Mapping, Optional, Sequence
 
 from .document import IRDocumentState
 from .types import (
@@ -85,16 +85,81 @@ def _normalize_create_sketch_plane(raw_value: Any) -> str:
     return raw_plane
 
 
+def _extract_sketch_from_profile_reference(profile_ref: str) -> str:
+    """Best-effort extraction of sketch identifier from '<sketch>:profile_<n>' refs."""
+    if ":" not in profile_ref:
+        return ""
+    sketch_id = profile_ref.split(":", 1)[0].strip()
+    return sketch_id
+
+
+def _lookup_operations(
+    doc_state: IRDocumentState,
+    dependency_operations: Optional[Sequence[IROperation]],
+) -> Sequence[IROperation]:
+    """Return operation sequence used for dependency inference."""
+    if dependency_operations is not None:
+        return dependency_operations
+    return doc_state.operations
+
+
+def _operation_sketch_id(operation: IROperation) -> str:
+    """Return sketch id referenced/created by an operation, if any."""
+    params = operation.params
+    if operation.type == "create_sketch" and isinstance(params, CreateSketchParams):
+        return params.sketch
+    if operation.type == "add_rectangle" and isinstance(params, AddRectangleParams):
+        return params.sketch
+    if operation.type == "add_circle" and isinstance(params, AddCircleParams):
+        return params.sketch
+    if operation.type == "extrude" and isinstance(params, ExtrudeParams):
+        if params.sketch:
+            return params.sketch
+        return _extract_sketch_from_profile_reference(params.profile)
+    return ""
+
+
+def _find_latest_operation_id(
+    operations: Sequence[IROperation],
+    *,
+    sketch_id: str,
+    op_types: set[str],
+) -> Optional[str]:
+    """Find the latest operation id matching sketch + operation type."""
+    if not sketch_id:
+        return None
+    for op in reversed(operations):
+        if op.type not in op_types:
+            continue
+        if _operation_sketch_id(op) == sketch_id:
+            return op.id
+    return None
+
+
+def _dedupe_dependencies(*dependency_ids: Optional[str]) -> list[str]:
+    """Return ordered, unique dependency ids."""
+    deps: list[str] = []
+    for dep_id in dependency_ids:
+        if not dep_id:
+            continue
+        if dep_id in deps:
+            continue
+        deps.append(dep_id)
+    return deps
+
+
 def map_tool_call_to_ir(
     tool_call: Mapping[str, Any],
     doc_state: IRDocumentState,
     *,
     metadata: Optional[IRMetadata] = None,
+    dependency_operations: Optional[Sequence[IROperation]] = None,
 ) -> IROperation:
     """Convert a single tool call into a shared IR operation."""
     name = str(tool_call.get("name") or "").strip()
     params = _extract_tool_input(tool_call)
     operation_id = doc_state.next_operation_id(prefix="op")
+    ops_for_dependency = _lookup_operations(doc_state, dependency_operations)
 
     if name == "create_sketch":
         sketch_id = str(params.get("sketch_id") or f"sketch_{len(doc_state.operations)}").strip()
@@ -103,6 +168,7 @@ def map_tool_call_to_ir(
             id=operation_id,
             type="create_sketch",
             params=CreateSketchParams(plane=plane_raw, sketch=sketch_id),
+            dependencies=[],
             metadata=metadata,
         )
 
@@ -124,6 +190,13 @@ def map_tool_call_to_ir(
                 width=width,
                 height=height,
             ),
+            dependencies=_dedupe_dependencies(
+                _find_latest_operation_id(
+                    ops_for_dependency,
+                    sketch_id=sketch_id,
+                    op_types={"create_sketch"},
+                )
+            ),
             metadata=metadata,
         )
 
@@ -138,6 +211,13 @@ def map_tool_call_to_ir(
             id=operation_id,
             type="add_circle",
             params=AddCircleParams(sketch=sketch_id, center=center, radius=radius),
+            dependencies=_dedupe_dependencies(
+                _find_latest_operation_id(
+                    ops_for_dependency,
+                    sketch_id=sketch_id,
+                    op_types={"create_sketch"},
+                )
+            ),
             metadata=metadata,
         )
 
@@ -146,10 +226,21 @@ def map_tool_call_to_ir(
         sketch_id = str(params.get("sketch_id") or "").strip()
         profile_index = _to_int(params.get("profile_index"), field_name="profile_index", default=0)
         profile_ref = str(params.get("profile") or f"{sketch_id}:profile_{profile_index}").strip()
+        inferred_sketch_id = sketch_id or _extract_sketch_from_profile_reference(profile_ref)
         raw_distance = _to_float(params.get("distance"), field_name="distance")
         direction = "positive" if raw_distance >= 0 else "negative"
         distance = abs(raw_distance)
         operation = _normalize_operation(params.get("operation"))
+        profile_dependency = _find_latest_operation_id(
+            ops_for_dependency,
+            sketch_id=inferred_sketch_id,
+            op_types={"add_rectangle", "add_circle"},
+        )
+        sketch_dependency = _find_latest_operation_id(
+            ops_for_dependency,
+            sketch_id=inferred_sketch_id,
+            op_types={"create_sketch"},
+        )
 
         return IROperation(
             id=operation_id,
@@ -159,9 +250,10 @@ def map_tool_call_to_ir(
                 distance=distance,
                 direction=direction,
                 operation=operation,  # type: ignore[arg-type]
-                sketch=sketch_id or None,
+                sketch=inferred_sketch_id or None,
                 profile_index=profile_index,
             ),
+            dependencies=_dedupe_dependencies(profile_dependency, sketch_dependency),
             metadata=metadata,
         )
 

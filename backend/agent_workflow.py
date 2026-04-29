@@ -47,7 +47,7 @@ try:
     from .entity_store import EntityStore
     from .sketch_entity_store import SketchEntityStore
     from .session_logger import initialize_session, _extract_session_context
-    from .ir import IRDocumentState, map_tool_call_to_ir, validate_ir_sequence
+    from .ir import IRDocument, IRDocumentState, map_tool_call_to_ir, validate_ir_candidate
     from .ir.mapper import UnsupportedToolMappingError
     from .backends.build123d import Build123dTargetExecutor
     from .backends.fusion import FusionTargetExecutor
@@ -76,7 +76,7 @@ except ImportError:  # pragma: no cover - script execution fallback
     from entity_store import EntityStore  # type: ignore
     from sketch_entity_store import SketchEntityStore  # type: ignore
     from session_logger import initialize_session, _extract_session_context  # type: ignore
-    from ir import IRDocumentState, map_tool_call_to_ir, validate_ir_sequence  # type: ignore
+    from ir import IRDocument, IRDocumentState, map_tool_call_to_ir, validate_ir_candidate  # type: ignore
     from ir.mapper import UnsupportedToolMappingError  # type: ignore
     from backends.build123d import Build123dTargetExecutor  # type: ignore
     from backends.fusion import FusionTargetExecutor  # type: ignore
@@ -2604,6 +2604,9 @@ async def _execute_workflow_loop(
             "session_id": session_id,
         }
     )
+    # Track all attempted IR operations (success + failure) so dependency mapping
+    # can fail closed when an operation chain breaks mid-turn.
+    ir_attempt_history: List[Any] = []
 
     # Hard fail if unauthenticated to prevent provider calls without quota enforcement
     if not user_token and not AUTH_BYPASS:
@@ -2979,7 +2982,12 @@ async def _execute_workflow_loop(
                     "iteration": iteration + 1,
                 }
                 try:
-                    ir_op = map_tool_call_to_ir(tool_call, ir_doc_state, metadata=ir_metadata)
+                    ir_op = map_tool_call_to_ir(
+                        tool_call,
+                        ir_doc_state,
+                        metadata=ir_metadata,
+                        dependency_operations=ir_attempt_history,
+                    )
                 except UnsupportedToolMappingError as exc:
                     error_text = str(exc)
                     await _send_error(manager, session_id, "IR mapping failed", error_text)
@@ -2989,12 +2997,16 @@ async def _execute_workflow_loop(
                         iteration_first_failure_intent = tool_intent_key
                     continue
 
-                ir_doc_state.append(ir_op)
-                validation_errors = validate_ir_sequence(ir_doc_state.operations).get(ir_op.id, [])
+                ir_attempt_history.append(ir_op)
+                validation_errors = validate_ir_candidate(ir_op, ir_doc_state.operations)
                 if validation_errors:
-                    ir_doc_state.operations.pop()
-                    error_text = "IR validation failed: " + "; ".join(validation_errors)
-                    await _send_error(manager, session_id, "IR validation failed", error_text)
+                    has_dependency_block = any(
+                        "depends on uncommitted operation" in err for err in validation_errors
+                    )
+                    title = "IR dependency blocked" if has_dependency_block else "IR validation failed"
+                    prefix = "IR dependency blocked: " if has_dependency_block else "IR validation failed: "
+                    error_text = prefix + "; ".join(validation_errors)
+                    await _send_error(manager, session_id, title, error_text)
                     messages.append(_tool_result_message(tool_use_id, error_text, is_error=True))
                     iteration_had_failure = True
                     if iteration_first_failure_intent is None:
@@ -3012,9 +3024,15 @@ async def _execute_workflow_loop(
                 )
 
                 if execution_target == "build123d":
+                    candidate_document = IRDocument(
+                        version=ir_doc_state.version,
+                        units="mm",
+                        operations=[*ir_doc_state.operations, ir_op],
+                        metadata=dict(ir_doc_state.metadata) if ir_doc_state.metadata else None,
+                    )
                     target_result = await _BUILD123D_EXECUTOR.execute_document(
                         session_id,
-                        ir_doc_state.to_document(),
+                        candidate_document,
                         request_id=str((request or {}).get("request_id") or f"iter_{iteration+1}"),
                     )
                 else:
@@ -3040,6 +3058,8 @@ async def _execute_workflow_loop(
                         target_result.message,
                     )
                 else:
+                    # Commit operation only after successful target execution.
+                    ir_doc_state.append(ir_op)
                     logger.info(
                         "Session %s IR tool '%s' executed on target %s",
                         session_id,

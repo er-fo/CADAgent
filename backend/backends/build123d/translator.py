@@ -72,7 +72,9 @@ def translate_ir_document_to_build123d(document: IRDocument) -> Build123dProgram
             lines.extend(
                 [
                     f"    # {op.id}: add_rectangle",
-                    f"    _plane = _sketch_planes.get({params.sketch!r}, Plane.XY)",
+                    f"    if {params.sketch!r} not in _sketch_planes:",
+                    f"        raise ValueError(\"Sketch plane missing for '{params.sketch}'. Ensure create_sketch succeeded before add_rectangle.\")",
+                    f"    _plane = _sketch_planes[{params.sketch!r}]",
                     "    with BuildSketch(_plane):",
                     f"        with Locations(({params.center[0]}, {params.center[1]})):",
                     f"            Rectangle({params.width}, {params.height})",
@@ -88,7 +90,9 @@ def translate_ir_document_to_build123d(document: IRDocument) -> Build123dProgram
             lines.extend(
                 [
                     f"    # {op.id}: add_circle",
-                    f"    _plane = _sketch_planes.get({params.sketch!r}, Plane.XY)",
+                    f"    if {params.sketch!r} not in _sketch_planes:",
+                    f"        raise ValueError(\"Sketch plane missing for '{params.sketch}'. Ensure create_sketch succeeded before add_circle.\")",
+                    f"    _plane = _sketch_planes[{params.sketch!r}]",
                     "    with BuildSketch(_plane):",
                     f"        with Locations(({params.center[0]}, {params.center[1]})):",
                     f"            Circle({params.radius})",
