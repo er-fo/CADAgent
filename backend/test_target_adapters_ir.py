@@ -68,6 +68,29 @@ def test_fusion_translator_maps_shared_ir_to_existing_tool_schema():
     assert tool_input["operation"] == "NewBody"
 
 
+def test_fusion_translator_preserves_multi_profile_extrude():
+    extrude = IROperation(
+        id="op_multi",
+        type="extrude",
+        params=ExtrudeParams(
+            profile="sketch_0:profile_0",
+            distance=2.5,
+            direction="negative",
+            operation="cut",
+            sketch="sketch_0",
+            profile_indices=[0, 1, 2],
+        ),
+    )
+
+    tool_name, tool_input = translate_ir_to_fusion_tool_call(extrude)
+    assert tool_name == "extrude_profile"
+    assert tool_input["sketch_id"] == "sketch_0"
+    assert tool_input["profile_indices"] == [0, 1, 2]
+    assert "profile_index" not in tool_input
+    assert tool_input["distance"] == -2.5
+    assert tool_input["operation"] == "Cut"
+
+
 def test_fusion_translator_rejects_unsupported_extrude_operation():
     operation = IROperation(
         id="op_bad_op",
@@ -83,6 +106,25 @@ def test_fusion_translator_rejects_unsupported_extrude_operation():
     )
 
     with pytest.raises(ValueError, match="Unsupported Fusion extrude operation"):
+        translate_ir_to_fusion_tool_call(operation)
+
+
+def test_fusion_translator_rejects_conflicting_profile_index_fields():
+    operation = IROperation(
+        id="op_bad_profiles",
+        type="extrude",
+        params=ExtrudeParams(
+            profile="sketch_0:profile_0",
+            distance=5.0,
+            direction="positive",
+            operation="new",
+            sketch="sketch_0",
+            profile_index=0,
+            profile_indices=[0, 1],
+        ),
+    )
+
+    with pytest.raises(ValueError, match='both "profile_index" and "profile_indices"'):
         translate_ir_to_fusion_tool_call(operation)
 
 

@@ -104,23 +104,33 @@ def translate_ir_to_fusion_tool_call(operation: IROperation) -> Tuple[str, Dict[
 
         sketch_id = params.sketch
         profile_index = params.profile_index if params.profile_index is not None else 0
+        profile_indices = list(params.profile_indices) if params.profile_indices is not None else None
+
+        if profile_indices is not None and params.profile_index is not None:
+            raise ValueError('Extrude IR params cannot set both "profile_index" and "profile_indices".')
+        if profile_indices is not None and not profile_indices:
+            raise ValueError('Extrude IR params "profile_indices" cannot be empty.')
 
         if not sketch_id:
             parsed_sketch, parsed_index = _parse_profile_reference(params.profile)
             sketch_id = parsed_sketch
-            profile_index = parsed_index
+            if profile_indices is None:
+                profile_index = parsed_index
 
         signed_distance = params.distance if params.direction == "positive" else -params.distance
         fusion_operation = _OPERATION_TO_FUSION.get(params.operation)
         if fusion_operation is None:
             raise ValueError(f"Unsupported Fusion extrude operation: {params.operation}")
-
-        return "extrude_profile", {
+        tool_input: Dict[str, Any] = {
             "sketch_id": sketch_id,
-            "profile_index": profile_index,
             "distance": signed_distance,
             "operation": fusion_operation,
             "description": f"Extrude {params.profile}",
         }
+        if profile_indices is not None:
+            tool_input["profile_indices"] = profile_indices
+        else:
+            tool_input["profile_index"] = profile_index
+        return "extrude_profile", tool_input
 
     raise ValueError(f"Unsupported IR operation for Fusion translator: {operation.type}")

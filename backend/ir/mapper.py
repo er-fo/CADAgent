@@ -52,6 +52,33 @@ def _to_int(value: Any, *, field_name: str, default: Optional[int] = None) -> in
         raise UnsupportedToolMappingError(f"Invalid integer value for '{field_name}': {value!r}") from None
 
 
+def _to_optional_int_list(value: Any, *, field_name: str) -> Optional[list[int]]:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        if not value.strip():
+            return None
+        raise UnsupportedToolMappingError(f"Invalid integer list for '{field_name}': {value!r}")
+    if isinstance(value, bool):
+        raise UnsupportedToolMappingError(f"Invalid integer list for '{field_name}': {value!r}")
+    if not isinstance(value, Sequence) or isinstance(value, (bytes, bytearray)):
+        raise UnsupportedToolMappingError(f"Invalid integer list for '{field_name}': {value!r}")
+
+    parsed: list[int] = []
+    for idx, item in enumerate(value):
+        parsed_item = _to_int(item, field_name=f"{field_name}[{idx}]")
+        if parsed_item < 0:
+            raise UnsupportedToolMappingError(
+                f"Invalid integer value for '{field_name}[{idx}]': {item!r} (must be >= 0)"
+            )
+        parsed.append(parsed_item)
+
+    if not parsed:
+        raise UnsupportedToolMappingError(f"'{field_name}' cannot be empty when provided.")
+
+    return parsed
+
+
 def _normalize_operation(value: Any) -> str:
     op = str(value or "new").strip().lower()
     alias = {
@@ -224,8 +251,21 @@ def map_tool_call_to_ir(
     if name in {"extrude_profile", "extrude"}:
         # Keep profile identity explicit while preserving Fusion-compatible sketch/profile metadata.
         sketch_id = str(params.get("sketch_id") or "").strip()
-        profile_index = _to_int(params.get("profile_index"), field_name="profile_index", default=0)
-        profile_ref = str(params.get("profile") or f"{sketch_id}:profile_{profile_index}").strip()
+        profile_indices = _to_optional_int_list(params.get("profile_indices"), field_name="profile_indices")
+        has_profile_index = params.get("profile_index") is not None and not (
+            isinstance(params.get("profile_index"), str) and not str(params.get("profile_index")).strip()
+        )
+        if has_profile_index and profile_indices is not None:
+            raise UnsupportedToolMappingError('Provide either "profile_index" or "profile_indices", not both.')
+
+        if profile_indices is not None:
+            profile_index = None
+            default_profile_ref = f"{sketch_id}:profile_{profile_indices[0]}" if sketch_id else ""
+        else:
+            profile_index = _to_int(params.get("profile_index"), field_name="profile_index", default=0)
+            default_profile_ref = f"{sketch_id}:profile_{profile_index}" if sketch_id else ""
+
+        profile_ref = str(params.get("profile") or default_profile_ref).strip()
         inferred_sketch_id = sketch_id or _extract_sketch_from_profile_reference(profile_ref)
         raw_distance = _to_float(params.get("distance"), field_name="distance")
         direction = "positive" if raw_distance >= 0 else "negative"
@@ -252,6 +292,7 @@ def map_tool_call_to_ir(
                 operation=operation,  # type: ignore[arg-type]
                 sketch=inferred_sketch_id or None,
                 profile_index=profile_index,
+                profile_indices=profile_indices,
             ),
             dependencies=_dedupe_dependencies(profile_dependency, sketch_dependency),
             metadata=metadata,

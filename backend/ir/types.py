@@ -49,6 +49,7 @@ class ExtrudeParams:
     operation: IROperationMode
     sketch: Optional[str] = None
     profile_index: Optional[int] = None
+    profile_indices: Optional[List[int]] = None
 
 
 IRParams = Union[CreateSketchParams, AddRectangleParams, AddCircleParams, ExtrudeParams]

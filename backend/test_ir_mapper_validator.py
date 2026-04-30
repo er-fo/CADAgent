@@ -42,6 +42,29 @@ def test_mapper_converts_rectangle_and_extrude_to_shared_ir():
     assert extrude_op.params.operation == "new"
 
 
+def test_mapper_preserves_profile_indices_for_multi_profile_extrude():
+    state = IRDocumentState()
+    op = map_tool_call_to_ir(
+        {
+            "name": "extrude_profile",
+            "input": {
+                "sketch_id": "sketch_0",
+                "profile_indices": [0, 1, 2],
+                "distance": -25,
+                "operation": "Cut",
+            },
+        },
+        state,
+    )
+
+    assert op.type == "extrude"
+    assert op.params.profile_indices == [0, 1, 2]
+    assert op.params.profile_index is None
+    assert op.params.direction == "negative"
+    assert op.params.operation == "cut"
+    assert op.params.profile == "sketch_0:profile_0"
+
+
 def test_validator_rejects_invalid_extrude_distance():
     state = IRDocumentState()
     op = map_tool_call_to_ir(
@@ -193,3 +216,36 @@ def test_mapper_rejects_invalid_numeric_inputs(tool_call, expected_error_fragmen
 
     with pytest.raises(UnsupportedToolMappingError, match=expected_error_fragment):
         map_tool_call_to_ir(tool_call, state)
+
+
+def test_mapper_rejects_conflicting_profile_index_and_profile_indices():
+    state = IRDocumentState()
+    with pytest.raises(UnsupportedToolMappingError, match='profile_index" or "profile_indices'):
+        map_tool_call_to_ir(
+            {
+                "name": "extrude_profile",
+                "input": {
+                    "sketch_id": "sketch_0",
+                    "profile_index": 0,
+                    "profile_indices": [0, 1],
+                    "distance": 10,
+                },
+            },
+            state,
+        )
+
+
+def test_mapper_rejects_empty_profile_indices():
+    state = IRDocumentState()
+    with pytest.raises(UnsupportedToolMappingError, match="cannot be empty"):
+        map_tool_call_to_ir(
+            {
+                "name": "extrude_profile",
+                "input": {
+                    "sketch_id": "sketch_0",
+                    "profile_indices": [],
+                    "distance": 10,
+                },
+            },
+            state,
+        )
