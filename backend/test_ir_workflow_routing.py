@@ -7,9 +7,11 @@ import pytest
 try:
     from . import agent_workflow
     from .backends.base import TargetExecutionResult
+    from .entity_store import EntityStore
 except ImportError:  # pragma: no cover
     from backend.backend import agent_workflow
     from backend.backend.backends.base import TargetExecutionResult
+    from backend.backend.entity_store import EntityStore
 
 
 @dataclass
@@ -73,6 +75,26 @@ def _tool_use_response() -> Dict[str, Any]:
 
 def _end_turn_response() -> Dict[str, Any]:
     return {"stop_reason": "end_turn", "content": [{"type": "text", "text": "Done."}]}
+
+
+def _extract_tool_result_texts(messages: List[Dict[str, Any]]) -> List[str]:
+    texts: List[str] = []
+    for message in messages:
+        if message.get("role") != "user":
+            continue
+        content_blocks = message.get("content")
+        if not isinstance(content_blocks, list):
+            continue
+        for content_block in content_blocks:
+            if not isinstance(content_block, dict) or content_block.get("type") != "tool_result":
+                continue
+            tool_content = content_block.get("content")
+            if not isinstance(tool_content, list):
+                continue
+            for text_block in tool_content:
+                if isinstance(text_block, dict) and text_block.get("type") == "text":
+                    texts.append(str(text_block.get("text") or ""))
+    return texts
 
 
 def test_execute_workflow_routes_ir_tools_to_build123d_adapter(monkeypatch: pytest.MonkeyPatch):
@@ -229,6 +251,126 @@ def test_execute_workflow_resolves_ir_create_sketch_face_ref_for_fusion(monkeypa
     )
 
     assert captured_planes == ["face_token_abc"]
+
+
+def test_execute_workflow_defers_same_turn_face_sketch_geometry(monkeypatch: pytest.MonkeyPatch):
+    async def _seed_store(store: EntityStore) -> None:
+        await store.register_entities(
+            "face",
+            [
+                {
+                    "entity_token": "face_token_0",
+                    "normal": [1, 0, 0],
+                    "centroid": [45.5, 0.0, 10.0],
+                    "surface_type": "planar",
+                    "area": 800.0,
+                }
+            ],
+        )
+
+    class _FaceStoreManager(_FakeManager):
+        def __init__(self, store: EntityStore) -> None:
+            super().__init__()
+            self._store = store
+
+        def get_entity_store(self, session_id: str) -> EntityStore:
+            return self._store
+
+    async def _setup_store() -> EntityStore:
+        store = EntityStore()
+        await _seed_store(store)
+        return store
+
+    store = asyncio.run(_setup_store())
+    manager = _FaceStoreManager(store)
+
+    call_count = {"llm": 0}
+    executed_ops: List[str] = []
+
+    async def fake_call_claude_with_tools(*args, **kwargs):
+        call_count["llm"] += 1
+        if call_count["llm"] == 1:
+            return {
+                "stop_reason": "tool_use",
+                "content": [
+                    {"type": "text", "text": "Creating face sketch and ports."},
+                    {
+                        "type": "tool_use",
+                        "id": "toolu_face_create",
+                        "name": "create_sketch",
+                        "input": {"plane_id": "face_0", "sketch_id": "usb_ports"},
+                    },
+                    {
+                        "type": "tool_use",
+                        "id": "toolu_face_rect",
+                        "name": "add_rectangle",
+                        "input": {
+                            "sketch_id": "usb_ports",
+                            "corner1_u": -1.0,
+                            "corner1_v": -0.4,
+                            "corner2_u": 1.0,
+                            "corner2_v": 0.4,
+                        },
+                    },
+                    {
+                        "type": "tool_use",
+                        "id": "toolu_face_extrude",
+                        "name": "extrude_profile",
+                        "input": {
+                            "sketch_id": "usb_ports",
+                            "profile_index": 0,
+                            "distance": -1.0,
+                            "operation": "Cut",
+                        },
+                    },
+                ],
+            }
+        return _end_turn_response()
+
+    async def fake_execute_operation(self, session_id, operation, tool_use_id, description=""):
+        executed_ops.append(operation.type)
+        return TargetExecutionResult(
+            success=True,
+            target="fusion",
+            message=f"{operation.type} ok",
+            raw_result={
+                "success": True,
+                "tool_use_id": tool_use_id,
+                "sketch_id": "usb_ports" if operation.type == "create_sketch" else "usb_ports",
+                "plane_id_input": "face_token_0" if operation.type == "create_sketch" else None,
+            },
+            data={"tool_name": operation.type, "tool_input": {"sketch_id": "usb_ports", "plane_id": "face_token_0"}},
+        )
+
+    async def fake_refresh_after_success(session_id, manager, tool_name, result, messages):
+        return None
+
+    async def fake_runtime_sync(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(agent_workflow, "USE_PROMPT_ROUTING", False)
+    monkeypatch.setattr(agent_workflow, "call_claude_with_tools", fake_call_claude_with_tools)
+    monkeypatch.setattr(agent_workflow.FusionTargetExecutor, "execute_operation", fake_execute_operation)
+    monkeypatch.setattr(agent_workflow, "_refresh_and_enrich_after_success", fake_refresh_after_success)
+    monkeypatch.setattr(agent_workflow, "_ensure_runtime_entity_context_synced", fake_runtime_sync)
+
+    asyncio.run(
+        agent_workflow._execute_workflow_loop(
+            session_id="s-face-seq",
+            messages=[{"role": "user", "content": [{"type": "text", "text": "Add usb ports on wall"}]}],
+            max_iterations=4,
+            model_name=None,
+            manager=manager,  # type: ignore[arg-type]
+            last_user_message_sent=None,
+            request={"execution_target": "fusion", "request_id": "r-face-seq"},
+            feature_snapshot=None,
+        )
+    )
+
+    assert executed_ops == ["create_sketch"]
+    tool_result_texts = _extract_tool_result_texts(manager.history)
+    assert any("Deferred 'add_rectangle'" in text for text in tool_result_texts)
+    assert any("Deferred 'extrude_profile'" in text for text in tool_result_texts)
 
 
 def test_execute_workflow_initial_routing_includes_active_build_plan(monkeypatch: pytest.MonkeyPatch):

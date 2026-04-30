@@ -61,6 +61,7 @@ class SketchEntityStore:
         self._counters: Dict[str, Dict[str, int]] = {}
         self._constraint_counters: Dict[str, Dict[str, int]] = {}
         self._origin_tokens: Dict[str, str] = {}
+        self._sketch_metadata: Dict[str, Dict[str, Any]] = {}
 
     def clear(self) -> None:
         self._entities_by_sketch.clear()
@@ -70,6 +71,7 @@ class SketchEntityStore:
         self._counters.clear()
         self._constraint_counters.clear()
         self._origin_tokens.clear()
+        self._sketch_metadata.clear()
 
     def register_entity(
         self,
@@ -168,6 +170,15 @@ class SketchEntityStore:
     def register_origin(self, sketch_id: str, origin_token: str) -> None:
         """Register the sketch origin point token for a given sketch."""
         self._origin_tokens[sketch_id] = origin_token
+
+    def register_sketch_metadata(self, sketch_id: str, metadata: Dict[str, Any]) -> None:
+        """Attach sketch-level metadata (plane/orientation/bounds) to a sketch id."""
+        self._sketch_metadata[sketch_id] = dict(metadata or {})
+
+    def get_sketch_metadata(self, sketch_id: str) -> Dict[str, Any]:
+        """Return a copy of sketch-level metadata for the given sketch id."""
+        metadata = self._sketch_metadata.get(sketch_id, {})
+        return dict(metadata)
 
     def resolve_ref(self, sketch_id: str, ref_id_or_alias: str) -> Optional[str]:
         if ref_id_or_alias.lower() == "origin":

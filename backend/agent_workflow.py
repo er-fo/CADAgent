@@ -92,6 +92,17 @@ DEFAULT_MAX_ITERATIONS = int(os.environ.get("MAX_ITERATIONS", "30"))
 EXECUTION_TIMEOUT = int(os.environ.get("EXECUTION_TIMEOUT", "30"))
 PLAN_APPROVAL_TIMEOUT = int(os.environ.get("PLAN_APPROVAL_TIMEOUT", "120"))
 EDGE_OPERATION_TOOLS = {"select_edges", "clear_edge_selection"}
+FACE_SKETCH_SEQUENCING_BLOCK_TOOLS = {
+    "add_circle",
+    "add_line",
+    "add_arc",
+    "add_rectangle",
+    "list_sketch_profiles",
+    "extrude_profile",
+    "extrude",
+    "revolve_profile",
+}
+FACE_SKETCH_UV_BOUNDS_MARGIN_CM = 0.05  # 0.5mm tolerance
 
 # Feature flag for intelligent prompt routing
 USE_PROMPT_ROUTING = os.environ.get("USE_PROMPT_ROUTING", "true").lower() == "true"
@@ -638,7 +649,18 @@ def _get_entity_store(session_id: str, manager: ConnectionManager) -> EntityStor
 
 def _get_sketch_entity_store(session_id: str, manager: ConnectionManager) -> SketchEntityStore:
     """Convenience accessor for per-session sketch entity/constraint refs."""
-    return manager.get_sketch_entity_store(session_id)
+    getter = getattr(manager, "get_sketch_entity_store", None)
+    if callable(getter):
+        return getter(session_id)
+
+    # Lightweight fallback for tests/stubs that do not implement the manager API.
+    stores = getattr(manager, "_fallback_sketch_entity_stores", None)
+    if not isinstance(stores, dict):
+        stores = {}
+        setattr(manager, "_fallback_sketch_entity_stores", stores)
+    if session_id not in stores or not isinstance(stores[session_id], SketchEntityStore):
+        stores[session_id] = SketchEntityStore()
+    return stores[session_id]
 
 
 def _extract_entity_token(entity: Optional[Mapping[str, Any]]) -> Optional[str]:
@@ -2734,6 +2756,7 @@ async def _execute_workflow_loop(
         iteration_first_failure_intent: Optional[str] = None
         iteration_force_stop = False
         topology_mutation_executed = False
+        face_sketches_created_this_turn: Set[str] = set()
 
         # Clear per-iteration reasoning accumulator
         reasoning_buffer.clear()
@@ -3035,8 +3058,24 @@ async def _execute_workflow_loop(
             tool_intent_key = _build_tool_intent_key(tool_name, tool_input)
             logger.info("Session %s executing tool '%s' (id=%s)", session_id, tool_name, tool_use_id)
 
+            defer_text = _maybe_defer_face_sketch_followup(
+                tool_name,
+                tool_input,
+                face_sketches_created_this_turn,
+            )
+            if defer_text:
+                messages.append(_tool_result_message(tool_use_id, defer_text))
+                logger.warning(
+                    "Session %s deferred face-sketch follow-up '%s' in iteration %d",
+                    session_id,
+                    tool_name,
+                    iteration + 1,
+                )
+                continue
+
             if tool_name in IR_MVP_TOOLS:
                 ir_tool_call: Mapping[str, Any] = tool_call
+                resolved_ir_input: Optional[Dict[str, Any]] = None
                 if (
                     execution_target == "fusion"
                     and tool_name == "create_sketch"
@@ -3068,6 +3107,31 @@ async def _execute_workflow_loop(
                         )
                     ir_tool_call = dict(tool_call)
                     ir_tool_call["input"] = resolved_ir_input
+
+                if tool_name in {"add_rectangle", "add_circle"}:
+                    sketch_preflight_error = _preflight_face_sketch_uv_bounds(
+                        session_id,
+                        manager,
+                        tool_name=tool_name,
+                        tool_input=tool_input,
+                    )
+                    if sketch_preflight_error:
+                        await _send_error(manager, session_id, "Face sketch bounds preflight failed", sketch_preflight_error)
+                        messages.append(_tool_result_message(tool_use_id, sketch_preflight_error, is_error=True))
+                        iteration_had_failure = True
+                        if iteration_first_failure_intent is None:
+                            iteration_first_failure_intent = _build_failure_intent_key(
+                                tool_name,
+                                tool_input,
+                                sketch_preflight_error,
+                            )
+                        logger.warning(
+                            "Session %s blocked '%s' by face-sketch bounds preflight: %s",
+                            session_id,
+                            tool_name,
+                            sketch_preflight_error,
+                        )
+                        continue
 
                 ir_metadata = {
                     "source": "studio" if execution_target == "build123d" else "fusion",
@@ -3135,18 +3199,70 @@ async def _execute_workflow_loop(
                         tool_use_id=tool_use_id,
                         description=description,
                     )
+                raw_result_payload: Dict[str, Any] = {}
+                if isinstance(target_result.raw_result, Mapping):
+                    raw_result_payload = dict(target_result.raw_result)
 
-                messages.append(_tool_result_message(tool_use_id, target_result.message, is_error=not target_result.success))
+                if target_result.success and tool_name in {"create_sketch", "add_line", "add_arc", "add_circle", "add_rectangle"}:
+                    executed_input = target_result.data.get("tool_input") if isinstance(target_result.data, Mapping) else {}
+                    plane_fallback = ""
+                    if tool_name == "create_sketch":
+                        plane_fallback = str(
+                            (
+                                (executed_input or {}).get("plane_id")
+                                or (resolved_ir_input or {}).get("plane_id")
+                                or tool_input.get("plane_id")
+                                or ""
+                            )
+                        ).strip()
+                    sketch_fallback = str(
+                        (
+                            (executed_input or {}).get("sketch_id")
+                            or tool_input.get("sketch_id")
+                            or ""
+                        )
+                    ).strip()
+                    if sketch_fallback and "sketch_id" not in raw_result_payload:
+                        raw_result_payload["sketch_id"] = sketch_fallback
+                    if plane_fallback and "plane_id_input" not in raw_result_payload:
+                        raw_result_payload["plane_id_input"] = plane_fallback
+
+                    if raw_result_payload:
+                        try:
+                            _register_sketch_result_entities(
+                                session_id,
+                                manager,
+                                tool_name,
+                                raw_result_payload,
+                                fallback_plane_id=plane_fallback or None,
+                            )
+                        except Exception as exc:
+                            logger.warning("Sketch metadata registration failed for IR %s: %s", tool_name, exc)
+
+                        if tool_name == "create_sketch":
+                            sketch_id = str(raw_result_payload.get("sketch_id") or "").strip()
+                            if sketch_id:
+                                sketch_metadata = _get_sketch_entity_store(session_id, manager).get_sketch_metadata(sketch_id)
+                                if sketch_metadata.get("plane_kind") == "face":
+                                    face_sketches_created_this_turn.add(sketch_id)
+
+                result_text = target_result.message
+                if raw_result_payload:
+                    _summary_success, _summary_text = _summarise_execution_result(
+                        tool_name,
+                        raw_result_payload,
+                    )
+                    if _summary_success == target_result.success or target_result.success:
+                        result_text = _summary_text
+
+                messages.append(_tool_result_message(tool_use_id, result_text, is_error=not target_result.success))
 
                 if not target_result.success:
                     iteration_had_failure = True
                     if iteration_first_failure_intent is None:
-                        failure_detail = target_result.message
-                        if isinstance(target_result.raw_result, Mapping):
-                            raw_error = (
-                                target_result.raw_result.get("error")
-                                or target_result.raw_result.get("message")
-                            )
+                        failure_detail = result_text
+                        if raw_result_payload:
+                            raw_error = raw_result_payload.get("error") or raw_result_payload.get("message")
                             if raw_error:
                                 failure_detail = f"{failure_detail} | {raw_error}"
                         iteration_first_failure_intent = _build_failure_intent_key(
@@ -3154,13 +3270,13 @@ async def _execute_workflow_loop(
                             tool_input,
                             failure_detail,
                         )
-                    await _send_error(manager, session_id, f"{execution_target} execution failed", target_result.message)
+                    await _send_error(manager, session_id, f"{execution_target} execution failed", result_text)
                     logger.error(
                         "Session %s IR tool '%s' failed on target %s: %s",
                         session_id,
                         tool_name,
                         execution_target,
-                        target_result.message,
+                        result_text,
                     )
                 else:
                     # Commit operation only after successful target execution.
@@ -3184,12 +3300,12 @@ async def _execute_workflow_loop(
                         )
                     else:
                         refresh_result: Dict[str, Any] = {}
-                        if isinstance(target_result.raw_result, Mapping):
-                            refresh_result = dict(target_result.raw_result)
+                        if raw_result_payload:
+                            refresh_result = dict(raw_result_payload)
                         if "success" not in refresh_result:
                             refresh_result["success"] = target_result.success
-                        if "message" not in refresh_result:
-                            refresh_result["message"] = target_result.message
+                        if "message" not in refresh_result and result_text:
+                            refresh_result["message"] = result_text
                         if tool_name in {"create_sketch", "add_rectangle", "add_circle"}:
                             refresh_result.setdefault("no_op", True)
 
@@ -3705,6 +3821,31 @@ async def _execute_workflow_loop(
             # Remove narrative-only fields before translation to keep tool schema strict.
             codegen_input = dict(tool_input)
 
+            if tool_name in {"add_rectangle", "add_circle"}:
+                sketch_preflight_error = _preflight_face_sketch_uv_bounds(
+                    session_id,
+                    manager,
+                    tool_name=tool_name,
+                    tool_input=codegen_input,
+                )
+                if sketch_preflight_error:
+                    await _send_error(manager, session_id, "Face sketch bounds preflight failed", sketch_preflight_error)
+                    messages.append(_tool_result_message(tool_use_id, sketch_preflight_error, is_error=True))
+                    iteration_had_failure = True
+                    if iteration_first_failure_intent is None:
+                        iteration_first_failure_intent = _build_failure_intent_key(
+                            tool_name,
+                            codegen_input,
+                            sketch_preflight_error,
+                        )
+                    logger.warning(
+                        "Session %s blocked '%s' by face-sketch bounds preflight in direct path: %s",
+                        session_id,
+                        tool_name,
+                        sketch_preflight_error,
+                    )
+                    continue
+
             # If create_sketch targets a face_N ref but faces are not loaded, try one
             # context recovery before reference resolution to avoid stale/empty-context misses.
             if tool_name == "create_sketch":
@@ -3803,9 +3944,24 @@ async def _execute_workflow_loop(
             _pre_success = bool(result.get("success", result.get("type") != "error"))
             if _pre_success:
                 try:
-                    _register_sketch_result_entities(session_id, manager, tool_name, result)
+                    fallback_plane_id = None
+                    if tool_name == "create_sketch":
+                        fallback_plane_id = str(codegen_input.get("plane_id") or "").strip() or None
+                    _register_sketch_result_entities(
+                        session_id,
+                        manager,
+                        tool_name,
+                        result,
+                        fallback_plane_id=fallback_plane_id,
+                    )
                 except Exception as exc:
                     logger.warning("Sketch entity registration failed for %s: %s", tool_name, exc)
+                if tool_name == "create_sketch":
+                    sketch_id = str(result.get("sketch_id") or "").strip()
+                    if sketch_id:
+                        sketch_metadata = _get_sketch_entity_store(session_id, manager).get_sketch_metadata(sketch_id)
+                        if sketch_metadata.get("plane_kind") == "face":
+                            face_sketches_created_this_turn.add(sketch_id)
 
             success, result_text = _summarise_execution_result(tool_name, result)
 
@@ -6720,6 +6876,8 @@ def _register_sketch_result_entities(
     manager: ConnectionManager,
     tool_name: str,
     result: Mapping[str, Any],
+    *,
+    fallback_plane_id: Optional[str] = None,
 ) -> None:
     """Persist sketch geometry references from Fusion execution results."""
     sketch_id = result.get("sketch_id")
@@ -6733,6 +6891,13 @@ def _register_sketch_result_entities(
         origin_token = result.get("origin_point_token")
         if isinstance(origin_token, str) and origin_token.strip():
             sketch_store.register_origin(sketch_id, origin_token)
+        _register_sketch_plane_metadata(
+            session_id,
+            manager,
+            sketch_id=sketch_id,
+            result=result,
+            fallback_plane_id=fallback_plane_id,
+        )
         return
 
     # Geometry registration
@@ -7232,6 +7397,287 @@ def _preflight_hole_center_on_face(
             "This likely misses the target body. Re-evaluate face_ref and center_x/center_y/center_z."
         )
     return None
+
+
+def _length_units_to_cm(units: str) -> float:
+    normalized = str(units or "").strip().lower()
+    if normalized in {"cm", "centimeter", "centimeters"}:
+        return 1.0
+    if normalized in {"m", "meter", "meters"}:
+        return 100.0
+    if normalized in {"in", "inch", "inches"}:
+        return 2.54
+    # Default/legacy backend spatial context units are millimeters.
+    return 0.1
+
+
+def _normalise_vec3(value: Any) -> Optional[Tuple[float, float, float]]:
+    x, y, z = _safe_vec3_extract(value)
+    mag = math.sqrt((x * x) + (y * y) + (z * z))
+    if mag <= 1e-9:
+        return None
+    return (x / mag, y / mag, z / mag)
+
+
+def _dot_vec3(a: Tuple[float, float, float], b: Tuple[float, float, float]) -> float:
+    return (a[0] * b[0]) + (a[1] * b[1]) + (a[2] * b[2])
+
+
+def _resolve_face_token_for_plane_id(
+    session_id: str,
+    manager: ConnectionManager,
+    plane_id: str,
+) -> Optional[str]:
+    plane = str(plane_id or "").strip()
+    if not plane:
+        return None
+    store = _get_entity_store(session_id, manager)
+    token, error = store.resolve_token(plane, expected_kind="face")
+    if not token or error:
+        return None
+    face_entry = _find_entity_entry_by_token(store, "face", token)
+    if not face_entry:
+        return None
+    return token
+
+
+def _adjacent_faces_include_target(
+    adjacent_faces: Any,
+    *,
+    face_ref: str,
+    face_token: str,
+) -> bool:
+    if not isinstance(adjacent_faces, Sequence) or isinstance(adjacent_faces, (str, bytes, bytearray)):
+        return False
+    for item in adjacent_faces:
+        if isinstance(item, str):
+            text = item.strip()
+        elif isinstance(item, Mapping):
+            candidate = (
+                item.get("entity_ref")
+                or item.get("face_ref")
+                or item.get("face_token")
+                or item.get("ref")
+                or item.get("token")
+                or item.get("id")
+            )
+            text = str(candidate or "").strip()
+        else:
+            text = ""
+        if not text:
+            continue
+        if text == face_ref or text == face_token:
+            return True
+    return False
+
+
+def _compute_face_sketch_uv_bounds(
+    session_id: str,
+    manager: ConnectionManager,
+    *,
+    face_token: str,
+    plane_origin_world: Any,
+    u_axis_world: Any,
+    v_axis_world: Any,
+) -> Optional[Dict[str, float]]:
+    store = _get_entity_store(session_id, manager)
+    face_entry = _find_entity_entry_by_token(store, "face", face_token)
+    if not face_entry:
+        return None
+
+    u_axis = _normalise_vec3(u_axis_world)
+    v_axis = _normalise_vec3(v_axis_world)
+    if not u_axis or not v_axis:
+        return None
+
+    ox, oy, oz = _safe_vec3_extract(plane_origin_world)
+    origin_cm = (ox, oy, oz)
+
+    face_ref = face_entry.ref_id
+    latest_context = _manager_get_latest_entity_context(manager, session_id) or {}
+    units_value = latest_context.get("units")
+    if not units_value and isinstance(latest_context.get("spatial_context"), Mapping):
+        units_value = latest_context.get("spatial_context", {}).get("units")
+    scale_to_cm = _length_units_to_cm(str(units_value or "mm"))
+
+    uv_points: List[Tuple[float, float]] = []
+    for edge_ref in store.get_refs_by_kind("edge"):
+        edge_entry = store.get_entry(edge_ref)
+        if not edge_entry:
+            continue
+        adjacent_faces = edge_entry.metadata.get("adjacent_faces") or []
+        if not _adjacent_faces_include_target(
+            adjacent_faces,
+            face_ref=face_ref,
+            face_token=face_token,
+        ):
+            continue
+
+        for point_key in ("start_coords", "end_coords"):
+            raw_point = edge_entry.metadata.get(point_key)
+            if raw_point is None:
+                continue
+            px, py, pz = _safe_vec3_extract(raw_point)
+            point_cm = (px * scale_to_cm, py * scale_to_cm, pz * scale_to_cm)
+            rel = (
+                point_cm[0] - origin_cm[0],
+                point_cm[1] - origin_cm[1],
+                point_cm[2] - origin_cm[2],
+            )
+            uv_points.append((_dot_vec3(rel, u_axis), _dot_vec3(rel, v_axis)))
+
+    if len(uv_points) < 2:
+        return None
+
+    u_vals = [pt[0] for pt in uv_points]
+    v_vals = [pt[1] for pt in uv_points]
+    return {
+        "u_min": min(u_vals),
+        "u_max": max(u_vals),
+        "v_min": min(v_vals),
+        "v_max": max(v_vals),
+    }
+
+
+def _register_sketch_plane_metadata(
+    session_id: str,
+    manager: ConnectionManager,
+    *,
+    sketch_id: str,
+    result: Mapping[str, Any],
+    fallback_plane_id: Optional[str] = None,
+) -> None:
+    sketch_store = _get_sketch_entity_store(session_id, manager)
+    plane_id_input = str(result.get("plane_id_input") or fallback_plane_id or "").strip()
+    metadata: Dict[str, Any] = {
+        "plane_id_input": plane_id_input,
+    }
+
+    face_token = _resolve_face_token_for_plane_id(session_id, manager, plane_id_input)
+    if not face_token:
+        metadata["plane_kind"] = "datum_or_custom"
+        sketch_store.register_sketch_metadata(sketch_id, metadata)
+        return
+
+    metadata["plane_kind"] = "face"
+    metadata["face_token"] = face_token
+    face_entry = _find_entity_entry_by_token(_get_entity_store(session_id, manager), "face", face_token)
+    if face_entry:
+        metadata["face_ref"] = face_entry.ref_id
+
+    orientation = result.get("orientation")
+    plane_origin_world = result.get("plane_origin_world")
+    if isinstance(orientation, Mapping) and plane_origin_world is not None:
+        uv_bounds = _compute_face_sketch_uv_bounds(
+            session_id,
+            manager,
+            face_token=face_token,
+            plane_origin_world=plane_origin_world,
+            u_axis_world=orientation.get("u_axis_world"),
+            v_axis_world=orientation.get("v_axis_world"),
+        )
+        if uv_bounds:
+            metadata["uv_bounds"] = uv_bounds
+
+    sketch_store.register_sketch_metadata(sketch_id, metadata)
+
+
+def _preflight_face_sketch_uv_bounds(
+    session_id: str,
+    manager: ConnectionManager,
+    *,
+    tool_name: str,
+    tool_input: Mapping[str, Any],
+) -> Optional[str]:
+    if tool_name not in {"add_rectangle", "add_circle"}:
+        return None
+
+    sketch_id = str(tool_input.get("sketch_id") or "").strip()
+    if not sketch_id:
+        return None
+
+    sketch_store = _get_sketch_entity_store(session_id, manager)
+    sketch_metadata = sketch_store.get_sketch_metadata(sketch_id)
+    if sketch_metadata.get("plane_kind") != "face":
+        return None
+
+    bounds = sketch_metadata.get("uv_bounds")
+    if not isinstance(bounds, Mapping):
+        return (
+            f"{tool_name} blocked: sketch '{sketch_id}' is face-based but UV bounds are unavailable. "
+            "Recreate the face sketch first, review orientation feedback, then place geometry in a follow-up turn."
+        )
+
+    try:
+        u_min = float(bounds.get("u_min"))
+        u_max = float(bounds.get("u_max"))
+        v_min = float(bounds.get("v_min"))
+        v_max = float(bounds.get("v_max"))
+    except (TypeError, ValueError):
+        return (
+            f"{tool_name} blocked: sketch '{sketch_id}' has invalid face UV bounds metadata. "
+            "Recreate the sketch and retry."
+        )
+
+    requested_u_min = requested_u_max = requested_v_min = requested_v_max = 0.0
+    try:
+        if tool_name == "add_circle":
+            cu = float(tool_input.get("center_u"))
+            cv = float(tool_input.get("center_v"))
+            radius = float(tool_input.get("radius"))
+            requested_u_min = cu - radius
+            requested_u_max = cu + radius
+            requested_v_min = cv - radius
+            requested_v_max = cv + radius
+        else:
+            c1u = float(tool_input.get("corner1_u"))
+            c1v = float(tool_input.get("corner1_v"))
+            c2u = float(tool_input.get("corner2_u"))
+            c2v = float(tool_input.get("corner2_v"))
+            requested_u_min = min(c1u, c2u)
+            requested_u_max = max(c1u, c2u)
+            requested_v_min = min(c1v, c2v)
+            requested_v_max = max(c1v, c2v)
+    except (TypeError, ValueError):
+        # Let normal tool-schema validation handle malformed numeric inputs.
+        return None
+
+    margin = FACE_SKETCH_UV_BOUNDS_MARGIN_CM
+    outside = (
+        requested_u_min < (u_min - margin)
+        or requested_u_max > (u_max + margin)
+        or requested_v_min < (v_min - margin)
+        or requested_v_max > (v_max + margin)
+    )
+    if not outside:
+        return None
+
+    face_ref = str(sketch_metadata.get("face_ref") or "face_?")
+    return (
+        f"{tool_name} rejected by face-bounds preflight for sketch '{sketch_id}' on {face_ref}. "
+        f"Requested UV extents u=[{requested_u_min:.3f}, {requested_u_max:.3f}] v=[{requested_v_min:.3f}, {requested_v_max:.3f}] cm, "
+        f"but face bounds are u=[{u_min:.3f}, {u_max:.3f}] v=[{v_min:.3f}, {v_max:.3f}] cm. "
+        "Move the geometry onto the selected wall face (or choose a different face/plane) and retry."
+    )
+
+
+def _maybe_defer_face_sketch_followup(
+    tool_name: str,
+    tool_input: Mapping[str, Any],
+    face_sketches_created_this_turn: Set[str],
+) -> Optional[str]:
+    if not face_sketches_created_this_turn:
+        return None
+    if tool_name not in FACE_SKETCH_SEQUENCING_BLOCK_TOOLS:
+        return None
+    sketch_id = str(tool_input.get("sketch_id") or "").strip()
+    if not sketch_id or sketch_id not in face_sketches_created_this_turn:
+        return None
+    return (
+        f"Deferred '{tool_name}' for sketch '{sketch_id}'. "
+        "This sketch was just created on a model face in the same turn. "
+        "Wait for the next turn so orientation/bounds feedback can guide placement before adding geometry or extruding."
+    )
 
 
 def _resolve_codegen_entity_refs(

@@ -13,7 +13,9 @@ from backend.agent_workflow import (
     _execute_feature_tool_call,
     _execute_geometry_tool_call,
     _execute_workflow_loop,
+    _get_sketch_entity_store,
     handle_execute_request,
+    _preflight_face_sketch_uv_bounds,
     _preflight_hole_center_on_face,
     _resolve_entity_tokens_or_refs,
     _resolve_single_entity_ref,
@@ -255,6 +257,69 @@ def test_hole_preflight_rejects_point_far_from_face_plane():
     )
     assert error is not None
     assert "away from the selected face plane" in error
+
+
+def test_face_sketch_uv_preflight_rejects_out_of_bounds_circle():
+    async def _setup() -> _ManagerStub:
+        store = EntityStore()
+        return _ManagerStub(store)
+
+    manager = asyncio.run(_setup())
+    sketch_store = _get_sketch_entity_store("s1", manager)  # type: ignore[arg-type]
+    sketch_store.register_sketch_metadata(
+        "port_sketch",
+        {
+            "plane_kind": "face",
+            "face_ref": "face_0",
+            "uv_bounds": {"u_min": -2.0, "u_max": 2.0, "v_min": -1.0, "v_max": 1.0},
+        },
+    )
+
+    error = _preflight_face_sketch_uv_bounds(
+        "s1",
+        manager,  # type: ignore[arg-type]
+        tool_name="add_circle",
+        tool_input={
+            "sketch_id": "port_sketch",
+            "center_u": 4.0,
+            "center_v": 0.0,
+            "radius": 0.3,
+        },
+    )
+    assert error is not None
+    assert "face-bounds preflight" in error
+    assert "Requested UV extents" in error
+
+
+def test_face_sketch_uv_preflight_blocks_when_bounds_missing():
+    async def _setup() -> _ManagerStub:
+        store = EntityStore()
+        return _ManagerStub(store)
+
+    manager = asyncio.run(_setup())
+    sketch_store = _get_sketch_entity_store("s2", manager)  # type: ignore[arg-type]
+    sketch_store.register_sketch_metadata(
+        "wall_sketch",
+        {
+            "plane_kind": "face",
+            "face_ref": "face_3",
+        },
+    )
+
+    error = _preflight_face_sketch_uv_bounds(
+        "s2",
+        manager,  # type: ignore[arg-type]
+        tool_name="add_rectangle",
+        tool_input={
+            "sketch_id": "wall_sketch",
+            "corner1_u": -1.0,
+            "corner1_v": -0.4,
+            "corner2_u": 1.0,
+            "corner2_v": 0.4,
+        },
+    )
+    assert error is not None
+    assert "UV bounds are unavailable" in error
 
 
 def test_handle_execute_request_preserves_store_when_entity_context_missing(monkeypatch: pytest.MonkeyPatch):
