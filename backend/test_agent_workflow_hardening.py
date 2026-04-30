@@ -13,6 +13,7 @@ from backend.agent_workflow import (
     _execute_feature_tool_call,
     _execute_geometry_tool_call,
     _execute_workflow_loop,
+    _format_current_ref_table,
     _get_sketch_entity_store,
     handle_execute_request,
     _preflight_face_sketch_uv_bounds,
@@ -67,6 +68,7 @@ class _ResultQueueManager:
         self.sent_messages = []
         self.requeued = []
         self.history = []
+        self.latest_entity_context = None
         self._reasoning_context = type(
             "_ReasoningContext",
             (),
@@ -79,6 +81,15 @@ class _ResultQueueManager:
 
     def get_entity_store(self, session_id: str) -> EntityStore:
         return self._store
+
+    def get_latest_entity_context(self, session_id: str):
+        return self.latest_entity_context
+
+    def set_latest_entity_context(self, session_id: str, entity_context):
+        self.latest_entity_context = dict(entity_context)
+
+    def clear_latest_entity_context(self, session_id: str):
+        self.latest_entity_context = None
 
     async def send_message(self, session_id: str, payload):
         self.sent_messages.append(payload)
@@ -105,6 +116,26 @@ class _ResultQueueManager:
 
     def get_active_build_plan(self, session_id: str):
         return None
+
+
+def _extract_tool_result_texts(messages):
+    texts = []
+    for message in messages:
+        if message.get("role") != "user":
+            continue
+        content_blocks = message.get("content")
+        if not isinstance(content_blocks, list):
+            continue
+        for content_block in content_blocks:
+            if not isinstance(content_block, dict) or content_block.get("type") != "tool_result":
+                continue
+            tool_content = content_block.get("content")
+            if not isinstance(tool_content, list):
+                continue
+            for text_block in tool_content:
+                if isinstance(text_block, dict) and text_block.get("type") == "text":
+                    texts.append(str(text_block.get("text") or ""))
+    return texts
 
 
 def _build_store_with_stale_face(*, ambiguous: bool = False) -> tuple[EntityStore, _ManagerStub]:
@@ -228,6 +259,203 @@ def test_duplicate_intent_key_ignores_noise_and_param_aliases():
         },
     )
     assert key_a == key_b
+
+
+def test_unresolved_face_ref_error_lists_current_valid_refs():
+    async def _run() -> _ManagerStub:
+        store = EntityStore()
+        manager = _ManagerStub(store)
+        await store.register_entities(
+            "face",
+            [
+                {
+                    "entity_token": "front_face_token",
+                    "normal": [0, 1, 0],
+                    "centroid": [0, 18, 6],
+                    "surface_type": "planar",
+                    "area": 800.0,
+                }
+            ],
+        )
+        return manager
+
+    manager = asyncio.run(_run())
+    with pytest.raises(SelectionToolCallError) as exc_info:
+        _resolve_single_entity_ref(
+            "s1",
+            manager,
+            "face_5",
+            expected_kind="face",
+            context="face_token",
+        )
+
+    msg = str(exc_info.value)
+    assert "Unknown entity ref: face_5" in msg
+    assert "Current valid face refs (1): face_0" in msg
+    assert "list_features does not refresh entity refs" in msg
+
+
+def test_unresolved_edge_refs_error_lists_current_valid_refs():
+    async def _run() -> _ManagerStub:
+        store = EntityStore()
+        manager = _ManagerStub(store)
+        await store.register_entities(
+            "edge",
+            [
+                {"entity_token": "edge_token_0", "edge_type": "line", "length": 10.0},
+                {"entity_token": "edge_token_1", "edge_type": "line", "length": 12.0},
+            ],
+        )
+        return manager
+
+    manager = asyncio.run(_run())
+    with pytest.raises(SelectionToolCallError) as exc_info:
+        _resolve_entity_tokens_or_refs(
+            "s1",
+            manager,
+            ["e0", "e3"],
+            expected_kind="edge",
+            context="entity_tokens (edges)",
+        )
+
+    msg = str(exc_info.value)
+    assert "e3: Unknown entity ref: e3" in msg
+    assert "Current valid edge refs (2): e0, e1" in msg
+    assert "list_features does not refresh entity refs" in msg
+
+
+def test_unresolved_edge_ref_error_lists_stale_fingerprint_candidate():
+    async def _run() -> _ManagerStub:
+        store = EntityStore()
+        await store.register_entities(
+            "edge",
+            [
+                {"entity_token": "old_edge_0", "edge_type": "line", "length": 8.0, "midpoint": [0, 0, 0]},
+                {"entity_token": "old_edge_1", "edge_type": "line", "length": 10.0, "midpoint": [2, 0, 0]},
+                {"entity_token": "old_edge_2", "edge_type": "line", "length": 12.0, "midpoint": [4, 0, 0]},
+                {"entity_token": "old_edge_3", "edge_type": "line", "length": 24.0, "midpoint": [10, 0, 0]},
+            ],
+        )
+        store.soft_clear()
+        await store.register_entities(
+            "edge",
+            [
+                {"entity_token": "new_edge_target", "edge_type": "line", "length": 24.1, "midpoint": [10.05, 0, 0]},
+                {"entity_token": "new_edge_other", "edge_type": "line", "length": 6.0, "midpoint": [50, 0, 0]},
+            ],
+        )
+        return _ManagerStub(store)
+
+    manager = asyncio.run(_run())
+    with pytest.raises(SelectionToolCallError) as exc_info:
+        _resolve_entity_tokens_or_refs(
+            "s1",
+            manager,
+            ["e3"],
+            expected_kind="edge",
+            context="entity_tokens (edges)",
+        )
+
+    msg = str(exc_info.value)
+    assert "Current valid edge refs (2): e4, e5" in msg
+    assert "Candidate replacements for e3: e4" in msg
+
+
+def test_current_ref_table_is_compact_and_authoritative():
+    text = _format_current_ref_table(
+        {
+            "units": "mm",
+            "bodies": [
+                {
+                    "entity_token": "body_token_0",
+                    "entity_ref": "body_0",
+                    "name": "Case",
+                    "bounding_box": {"min": [0, 0, 0], "max": [10, 20, 5]},
+                }
+            ],
+            "faces": [
+                {
+                    "entity_token": "face_token_0",
+                    "entity_ref": "face_0",
+                    "body_name": "Case",
+                    "surface_type": "planar",
+                    "normal": [0, 1, 0],
+                    "centroid": [5, 20, 2.5],
+                }
+            ],
+            "edges": [
+                {"entity_token": "edge_token_0", "entity_ref": "e0"},
+                {"entity_token": "edge_token_1", "entity_ref": "e1"},
+            ],
+        }
+    )
+
+    assert "current_design_refs:" in text
+    assert "do not use refs absent from this table" in text
+    assert "list_features shows timeline features only" in text
+    assert "face_0: body=Case" in text
+    assert "edges_1_2: e0, e1" in text
+
+
+def test_execute_loop_injects_current_ref_table_each_llm_call(monkeypatch: pytest.MonkeyPatch):
+    async def _run():
+        store = EntityStore()
+        await store.register_entities("body", [{"entity_token": "body_token_0", "name": "Case"}])
+        await store.register_entities(
+            "face",
+            [
+                {
+                    "entity_token": "face_token_0",
+                    "normal": [0, 1, 0],
+                    "centroid": [0, 18, 6],
+                    "surface_type": "planar",
+                }
+            ],
+        )
+        await store.register_entities("edge", [{"entity_token": "edge_token_0", "edge_type": "line"}])
+        manager = _ResultQueueManager(store, results=[])
+        manager.latest_entity_context = {
+            "bodies": [{"entity_token": "body_token_0", "entity_ref": "body_0", "name": "Case"}],
+            "faces": [
+                {
+                    "entity_token": "face_token_0",
+                    "entity_ref": "face_0",
+                    "body_name": "Case",
+                    "normal": [0, 1, 0],
+                    "centroid": [0, 18, 6],
+                    "surface_type": "planar",
+                }
+            ],
+            "edges": [{"entity_token": "edge_token_0", "entity_ref": "e0", "edge_type": "line"}],
+        }
+        captured_messages = []
+
+        async def fake_call_claude_with_tools(messages, *args, **kwargs):
+            captured_messages.append(messages)
+            return {"stop_reason": "end_turn", "content": [{"type": "text", "text": "Done"}]}
+
+        monkeypatch.setattr("backend.agent_workflow.USE_PROMPT_ROUTING", False)
+        monkeypatch.setattr("backend.agent_workflow.call_claude_with_tools", fake_call_claude_with_tools)
+
+        await _execute_workflow_loop(
+            session_id="s-current-refs",
+            messages=[{"role": "user", "content": [{"type": "text", "text": "continue"}]}],
+            max_iterations=1,
+            model_name=None,
+            manager=manager,  # type: ignore[arg-type]
+            last_user_message_sent=None,
+            request={"execution_target": "fusion", "request_id": "refs-1"},
+            feature_snapshot=None,
+        )
+
+        assert captured_messages
+        last_message = captured_messages[0][-1]
+        text = last_message["content"][0]["text"]
+        assert "current_design_refs:" in text
+        assert "face_0" in text
+        assert "e0" in text
+
+    asyncio.run(_run())
 
 
 def test_hole_preflight_rejects_point_far_from_face_plane():
@@ -501,5 +729,130 @@ def test_execute_code_wait_ignores_mismatched_tool_use_id(monkeypatch: pytest.Mo
 
         assert len(manager.requeued) == 1
         assert manager.requeued[0].get("tool_use_id") == "other"
+
+    asyncio.run(_run())
+
+
+def test_topology_deferred_hole_retry_is_not_suppressed_as_duplicate(monkeypatch: pytest.MonkeyPatch):
+    async def _run():
+        store = EntityStore()
+        await store.register_entities(
+            "face",
+            [
+                {
+                    "entity_token": "face_token_0",
+                    "normal": [0, 0, 1],
+                    "centroid": [0, 0, 0],
+                    "surface_type": "planar",
+                    "area": 100.0,
+                }
+            ],
+        )
+        manager = _ResultQueueManager(store, results=[])
+
+        holes = [
+            {
+                "face_ref": "face_0",
+                "center_x": 0.0,
+                "center_y": 0.0,
+                "center_z": 0.0,
+                "diameter": 4.0,
+                "extent_type": "through_all",
+            },
+            {
+                "face_ref": "face_0",
+                "center_x": 12.0,
+                "center_y": 0.0,
+                "center_z": 0.0,
+                "diameter": 4.0,
+                "extent_type": "through_all",
+            },
+            {
+                "face_ref": "face_0",
+                "center_x": 0.0,
+                "center_y": 12.0,
+                "center_z": 0.0,
+                "diameter": 4.0,
+                "extent_type": "through_all",
+            },
+            {
+                "face_ref": "face_0",
+                "center_x": 12.0,
+                "center_y": 12.0,
+                "center_z": 0.0,
+                "diameter": 4.0,
+                "extent_type": "through_all",
+            },
+        ]
+        llm_calls = {"count": 0}
+        executed_tool_ids = []
+
+        def hole_call(tool_use_id, tool_input):
+            return {
+                "type": "tool_use",
+                "id": tool_use_id,
+                "name": "create_simple_hole",
+                "input": dict(tool_input),
+            }
+
+        async def fake_call_claude_with_tools(*args, **kwargs):
+            llm_calls["count"] += 1
+            if llm_calls["count"] == 1:
+                return {
+                    "stop_reason": "tool_use",
+                    "content": [
+                        {"type": "text", "text": "Create four mounting holes."},
+                        *[
+                            hole_call(f"toolu_hole_{idx}", hole_input)
+                            for idx, hole_input in enumerate(holes, start=1)
+                        ],
+                    ],
+                }
+            if llm_calls["count"] == 2:
+                return {
+                    "stop_reason": "tool_use",
+                    "content": [
+                        {"type": "text", "text": "Retry the first deferred hole after topology refresh."},
+                        hole_call("toolu_hole_2_retry", holes[1]),
+                    ],
+                }
+            return {"stop_reason": "end_turn", "content": [{"type": "text", "text": "Done"}]}
+
+        async def fake_execute_feature_tool_call(session_id, manager, tool_name, tool_use_id, tool_input, description=""):
+            executed_tool_ids.append(tool_use_id)
+            return True, f"{tool_name} {tool_use_id} ok", {
+                "success": True,
+                "tool_use_id": tool_use_id,
+                "message": "ok",
+            }
+
+        async def fake_refresh_after_success(*args, **kwargs):
+            return None
+
+        async def fake_runtime_sync(*args, **kwargs):
+            return None
+
+        monkeypatch.setattr("backend.agent_workflow.USE_PROMPT_ROUTING", False)
+        monkeypatch.setattr("backend.agent_workflow.call_claude_with_tools", fake_call_claude_with_tools)
+        monkeypatch.setattr("backend.agent_workflow._execute_feature_tool_call", fake_execute_feature_tool_call)
+        monkeypatch.setattr("backend.agent_workflow._refresh_and_enrich_after_success", fake_refresh_after_success)
+        monkeypatch.setattr("backend.agent_workflow._ensure_runtime_entity_context_synced", fake_runtime_sync)
+
+        await _execute_workflow_loop(
+            session_id="s-hole-deferral",
+            messages=[{"role": "user", "content": [{"type": "text", "text": "Add four holes"}]}],
+            max_iterations=4,
+            model_name=None,
+            manager=manager,  # type: ignore[arg-type]
+            last_user_message_sent=None,
+            request={"execution_target": "fusion", "request_id": "holes-1"},
+            feature_snapshot=None,
+        )
+
+        tool_result_texts = _extract_tool_result_texts(manager.history)
+
+        assert executed_tool_ids == ["toolu_hole_1", "toolu_hole_2_retry"]
+        assert sum("Deferred 'create_simple_hole'" in text for text in tool_result_texts) == 3
+        assert not any("Skipped duplicate create_simple_hole" in text for text in tool_result_texts)
 
     asyncio.run(_run())

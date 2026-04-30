@@ -2866,8 +2866,16 @@ async def _execute_workflow_loop(
                 )
 
         # Apply observation masking to reduce context size for older tool outputs
-        # This preserves reasoning and actions while compressing verbose results
+        # This preserves reasoning and actions while compressing verbose results.
         effective_messages = mask_old_observations(messages, keep_recent=6, max_result_chars=800)
+        current_ref_table = _format_current_ref_table(runtime_entity_context or {})
+        if current_ref_table:
+            # Keep the latest valid refs in the immediate LLM context even after older
+            # verbose design_entities blocks are masked out of the conversation.
+            effective_messages = [
+                *effective_messages,
+                _user_text_message(current_ref_table),
+            ]
 
         try:
             response = await call_claude_with_tools(
@@ -3341,17 +3349,6 @@ async def _execute_workflow_loop(
                         iteration_had_success = True
                 continue
 
-            if tool_name in DUPLICATE_INTENT_GUARD_TOOLS:
-                if tool_intent_key in seen_guarded_intents:
-                    duplicate_text = (
-                        f"Skipped duplicate {tool_name} call with identical parameters. "
-                        "Change placement/ref parameters before retrying."
-                    )
-                    messages.append(_tool_result_message(tool_use_id, duplicate_text))
-                    logger.warning("Session %s suppressed duplicate intent for '%s'", session_id, tool_name)
-                    continue
-                seen_guarded_intents.add(tool_intent_key)
-
             if tool_name in TOPOLOGY_MUTATING_TOOLS:
                 if topology_mutation_executed:
                     defer_text = (
@@ -3367,6 +3364,16 @@ async def _execute_workflow_loop(
                     )
                     continue
                 topology_mutation_executed = True
+
+            if tool_name in DUPLICATE_INTENT_GUARD_TOOLS:
+                if tool_intent_key in seen_guarded_intents:
+                    duplicate_text = (
+                        f"Skipped duplicate {tool_name} call with identical parameters. "
+                        "Change placement/ref parameters before retrying."
+                    )
+                    messages.append(_tool_result_message(tool_use_id, duplicate_text))
+                    logger.warning("Session %s suppressed duplicate intent for '%s'", session_id, tool_name)
+                    continue
 
             if tool_name == "respond_to_user":
                 message_text = str(tool_input.get("message", "")).strip()
@@ -3736,6 +3743,8 @@ async def _execute_workflow_loop(
                             )
                             iteration_force_stop = True
                             break
+                        if tool_name in DUPLICATE_INTENT_GUARD_TOOLS:
+                            seen_guarded_intents.add(tool_intent_key)
                         iteration_had_success = True
                     continue
 
@@ -5099,6 +5108,101 @@ def _format_unified_context(entity_context: Mapping[str, Any]) -> str:
         _format_unified_nested(spatial_context, lines, topology, parallel_pairs)
     else:
         _format_unified_flat(entity_context, lines, topology, parallel_pairs)
+
+    return "\n".join(lines)
+
+
+def _ref_sort_key(ref_id: str) -> Tuple[str, int, str]:
+    """Sort refs naturally: face_2 before face_10, e2 before e10."""
+    text = str(ref_id)
+    match = re.match(r"^([A-Za-z_]+?)(\d+)$", text)
+    if not match:
+        match = re.match(r"^(e)(\d+)$", text)
+    if match:
+        return match.group(1), int(match.group(2)), text
+    return text, -1, text
+
+
+def _short_vec(value: Any, *, digits: int = 1) -> str:
+    try:
+        x, y, z = _safe_vec3_extract(value)
+    except Exception:
+        return "?"
+    return f"[{x:.{digits}f},{y:.{digits}f},{z:.{digits}f}]"
+
+
+def _entity_ref_id(entity: Mapping[str, Any], fallback: str = "?") -> str:
+    ref = entity.get("entity_ref") or entity.get("id") or fallback
+    return str(ref).strip() or fallback
+
+
+def _format_current_ref_table(entity_context: Mapping[str, Any]) -> str:
+    """Return a compact authoritative ref table for the current LLM turn."""
+    if not entity_context:
+        return ""
+
+    entities = _collect_context_entities(entity_context)
+    bodies = entities.get("bodies", [])
+    faces = entities.get("faces", [])
+    edges = entities.get("edges", [])
+    if not bodies and not faces and not edges:
+        return ""
+
+    lines = [
+        "current_design_refs:",
+        "  authority: latest runtime entity refs; do not use refs absent from this table",
+        "  note: list_features shows timeline features only; it does not refresh entity refs",
+    ]
+
+    if bodies:
+        body_bits = []
+        for body in sorted(bodies, key=lambda item: _ref_sort_key(_entity_ref_id(item))):
+            ref_id = _entity_ref_id(body, "body_?")
+            name = str(body.get("name") or "Unnamed")
+            bbox = body.get("bbox") or body.get("bounding_box") or {}
+            bbox_text = ""
+            if isinstance(bbox, Mapping):
+                mn = bbox.get("min")
+                mx = bbox.get("max")
+                if mn is not None and mx is not None:
+                    bbox_text = f" bbox={_short_vec(mn)}..{_short_vec(mx)}"
+            body_bits.append(f"{ref_id}({name}{bbox_text})")
+        lines.append(f"  bodies: {', '.join(body_bits[:20])}")
+
+    if faces:
+        lines.append(f"  faces_count: {len(faces)}")
+        lines.append("  faces:")
+        for face in sorted(faces, key=lambda item: _ref_sort_key(_entity_ref_id(item)))[:80]:
+            ref_id = _entity_ref_id(face, "face_?")
+            body_ref = face.get("body_ref") or face.get("body") or face.get("body_name") or "?"
+            surface_type = face.get("surface_type") or face.get("geometry_type") or ""
+            normal = face.get("normal")
+            centroid = face.get("centroid")
+            bits = [f"body={body_ref}"]
+            if surface_type:
+                bits.append(f"type={surface_type}")
+            if normal is not None:
+                bits.append(f"n={_short_vec(normal, digits=2)}")
+            if centroid is not None:
+                bits.append(f"c={_short_vec(centroid)}")
+            lines.append(f"    {ref_id}: {', '.join(bits)}")
+        if len(faces) > 80:
+            lines.append(f"    ... {len(faces) - 80} more faces omitted")
+
+    if edges:
+        edge_refs = [
+            _entity_ref_id(edge, "e?")
+            for edge in sorted(edges, key=lambda item: _ref_sort_key(_entity_ref_id(item)))
+        ]
+        lines.append(f"  edges_count: {len(edge_refs)}")
+        for start in range(0, len(edge_refs), 32):
+            chunk = edge_refs[start:start + 32]
+            lines.append(f"  edges_{start + 1}_{start + len(chunk)}: {', '.join(chunk)}")
+            if start >= 128:
+                remaining = len(edge_refs) - (start + len(chunk))
+                if remaining > 0:
+                    lines.append(f"  edges_omitted: {remaining}")
+                break
 
     return "\n".join(lines)
 
@@ -7161,6 +7265,7 @@ def _resolve_entity_tokens_or_refs(
     tokens: List[str] = []
     missing: List[str] = []
     kind_errors: List[str] = []
+    candidate_hints: Dict[str, List[str]] = {}
 
     for ref_or_token in cleaned:
         token, error = store.resolve_token(ref_or_token, expected_kind=expected_kind)
@@ -7180,6 +7285,7 @@ def _resolve_entity_tokens_or_refs(
                 )
                 continue
             if candidates:
+                candidate_hints[ref_or_token] = candidates
                 kind_errors.append(
                     f"{ref_or_token}: stale face ref is ambiguous. Candidate replacements: {candidates}"
                 )
@@ -7191,12 +7297,25 @@ def _resolve_entity_tokens_or_refs(
             missing.append(ref_or_token)
 
     if kind_errors:
+        diagnostics = _format_ref_resolution_diagnostics(
+            store,
+            expected_kind=expected_kind,
+            requested_refs=cleaned,
+            candidate_hints=candidate_hints,
+        )
         raise SelectionToolCallError(
-            f"{context} contained unresolved or wrong-type refs: {kind_errors}"
+            f"{context} contained unresolved or wrong-type refs: {kind_errors}{diagnostics}"
         )
     if missing:
+        diagnostics = _format_ref_resolution_diagnostics(
+            store,
+            expected_kind=expected_kind,
+            requested_refs=cleaned,
+            candidate_hints=candidate_hints,
+        )
         raise SelectionToolCallError(
             f"{context} references not found: {missing}. Re-run list_{expected_kind or 'entities'} to refresh."
+            f"{diagnostics}"
         )
     return tokens
 
@@ -7218,14 +7337,26 @@ def _resolve_single_entity_ref(
             logger.info("Recovered stale face ref '%s' -> '%s' in %s", cleaned, recovered_ref, context)
             return recovered_token
         if candidates:
+            diagnostics = _format_ref_resolution_diagnostics(
+                store,
+                expected_kind=expected_kind,
+                requested_refs=[cleaned],
+                candidate_hints={cleaned: candidates},
+            )
             raise SelectionToolCallError(
                 f"{context} could not be resolved: {value}. {error or 'Unknown entity ref.'} "
-                f"Candidate replacements: {candidates}"
+                f"Candidate replacements: {candidates}{diagnostics}"
             )
 
     if error or not token:
+        diagnostics = _format_ref_resolution_diagnostics(
+            store,
+            expected_kind=expected_kind,
+            requested_refs=[cleaned],
+        )
         raise SelectionToolCallError(
-            f"{context} could not be resolved: {value}. {error or 'Provide a valid reference from the latest list call.'}"
+            f"{context} could not be resolved: {value}. "
+            f"{error or 'Provide a valid reference from the latest list call.'}{diagnostics}"
         )
     return token
 
@@ -7245,8 +7376,75 @@ def _resolve_token_field_inplace(
         return
     token, error = store.resolve_token(str(value).strip(), expected_kind=expected_kind)
     if error or not token:
-        raise SelectionToolCallError(error or f"Unable to resolve reference for '{key}'.")
+        diagnostics = _format_ref_resolution_diagnostics(
+            store,
+            expected_kind=expected_kind,
+            requested_refs=[str(value).strip()],
+        )
+        raise SelectionToolCallError((error or f"Unable to resolve reference for '{key}'.") + diagnostics)
     target[key] = token
+
+
+def _format_ref_resolution_diagnostics(
+    store: EntityStore,
+    *,
+    expected_kind: Optional[str],
+    requested_refs: Sequence[str],
+    candidate_hints: Optional[Mapping[str, Sequence[str]]] = None,
+    limit: int = 40,
+) -> str:
+    """Append actionable current-ref diagnostics to unresolved-ref errors."""
+    if not expected_kind:
+        return ""
+
+    refs = sorted(store.get_refs_by_kind(expected_kind), key=_ref_sort_key)
+    parts: List[str] = []
+
+    requested = [str(ref).strip() for ref in requested_refs if str(ref).strip()]
+    if requested:
+        parts.append(f" Requested refs: {requested}.")
+
+    if refs:
+        preview = refs[:limit]
+        suffix = f", ... ({len(refs) - limit} more)" if len(refs) > limit else ""
+        parts.append(
+            f" Current valid {expected_kind} refs ({len(refs)}): {', '.join(preview)}{suffix}."
+        )
+    else:
+        parts.append(f" Current valid {expected_kind} refs: none loaded.")
+
+    candidate_hints_by_ref: Dict[str, List[str]] = {
+        str(stale_ref): [str(candidate) for candidate in candidates]
+        for stale_ref, candidates in (candidate_hints or {}).items()
+    }
+    for requested_ref in requested:
+        candidate_list = candidate_hints_by_ref.get(requested_ref)
+        if candidate_list is None:
+            candidate_list = _candidate_refs_for_stale_ref(
+                store,
+                requested_ref,
+                expected_kind=expected_kind,
+                limit=5,
+            )
+        if candidate_list:
+            parts.append(f" Candidate replacements for {requested_ref}: {', '.join(candidate_list)}.")
+
+    parts.append(" Use only refs from current_design_refs/design_entities; list_features does not refresh entity refs.")
+    return " " + " ".join(parts)
+
+
+def _candidate_refs_for_stale_ref(
+    store: EntityStore,
+    stale_ref: str,
+    *,
+    expected_kind: Optional[str],
+    limit: int = 5,
+) -> List[str]:
+    if expected_kind == "face":
+        return _candidate_faces_for_stale_ref(store, stale_ref, limit=limit)
+    if expected_kind == "edge":
+        return _candidate_edges_for_stale_ref(store, stale_ref, limit=limit)
+    return []
 
 
 def _candidate_faces_for_stale_ref(
@@ -7323,6 +7521,70 @@ def _candidate_faces_for_stale_ref(
 
     candidates.sort(key=lambda row: (row[0], row[1], row[2], row[3]))
     return [ref for _, _, _, ref in candidates[: max(1, limit)]]
+
+
+def _candidate_edges_for_stale_ref(
+    store: EntityStore,
+    stale_ref: str,
+    *,
+    limit: int = 5,
+) -> List[str]:
+    """Find likely replacement edge refs for a stale eN reference."""
+    cleaned = str(stale_ref).strip()
+    if not cleaned or not re.match(r"^e\d+$", cleaned):
+        return []
+
+    target_fp = None
+    persistent_cache = getattr(store, "_persistent_cache", {})
+    if isinstance(persistent_cache, Mapping):
+        for cached_mapping in persistent_cache.values():
+            if getattr(cached_mapping, "ref_id", None) != cleaned:
+                continue
+            fingerprint = getattr(cached_mapping, "fingerprint", None)
+            if fingerprint and getattr(fingerprint, "kind", None) == "edge":
+                target_fp = fingerprint
+                break
+
+    if not target_fp:
+        return []
+
+    target_type = (getattr(target_fp, "edge_type", None) or "").lower()
+    target_length = getattr(target_fp, "length", None)
+    target_midpoint = getattr(target_fp, "midpoint", None)
+
+    candidates: List[Tuple[float, float, str]] = []
+    for edge_ref in store.get_refs_by_kind("edge"):
+        entry = store.get_entry(edge_ref)
+        if not entry:
+            continue
+
+        edge_type = (entry.metadata.get("edge_type") or "").lower()
+        if target_type and edge_type and edge_type != target_type:
+            continue
+
+        midpoint = entry.midpoint
+        if target_midpoint and midpoint:
+            mx, my, mz = midpoint
+            tx, ty, tz = target_midpoint
+            dist_mm = math.sqrt((mx - tx) ** 2 + (my - ty) ** 2 + (mz - tz) ** 2)
+        else:
+            dist_mm = float("inf")
+
+        length = entry.metadata.get("length")
+        if target_length is not None and length is not None:
+            length_delta = abs(float(length) - float(target_length))
+        else:
+            length_delta = float("inf")
+
+        if math.isinf(dist_mm) and math.isinf(length_delta) and not target_type:
+            continue
+        candidates.append((dist_mm, length_delta, edge_ref))
+
+    if not candidates:
+        return []
+
+    candidates.sort(key=lambda row: (row[0], row[1], row[2]))
+    return [ref for _, _, ref in candidates[: max(1, limit)]]
 
 
 def _resolve_stale_face_ref_if_unambiguous(
