@@ -149,6 +149,31 @@ def test_build_routing_client_uses_bedrock_token_for_minimax_router(monkeypatch)
     }
 
 
+def test_build_routing_client_prefers_session_bedrock_key_over_env(monkeypatch):
+    captured = {}
+
+    class FakeAsyncOpenAI:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.setattr(prompt_router, "AsyncOpenAI", FakeAsyncOpenAI)
+    monkeypatch.setattr(prompt_router, "ROUTER_MODEL", "minimax.minimax-m2.5")
+    monkeypatch.setattr(
+        prompt_router,
+        "ROUTER_BEDROCK_BASE_URL",
+        "https://bedrock-mantle.us-east-1.api.aws/v1",
+    )
+    monkeypatch.setenv("AWS_BEARER_TOKEN_BEDROCK", "env-bedrock-token")
+
+    client = _build_routing_client({"aws_bearer_token_bedrock": "session-bedrock-token"})
+
+    assert client is not None
+    assert captured == {
+        "api_key": "session-bedrock-token",
+        "base_url": "https://bedrock-mantle.us-east-1.api.aws/v1",
+    }
+
+
 def test_build_routing_client_returns_none_when_minimax_token_missing(monkeypatch):
     monkeypatch.setattr(prompt_router, "ROUTER_MODEL", "minimax.minimax-m2.5")
     monkeypatch.delenv("AWS_BEARER_TOKEN_BEDROCK", raising=False)
@@ -350,6 +375,80 @@ def test_route_request_repairs_obvious_truncated_json(monkeypatch):
     assert "core" in result["required"]
     assert "inspection" in result["required"]
     assert result["reasoning"] == "repairable"
+    assert "fallback" not in result
+
+
+def test_route_request_coerces_list_wrapped_router_json(monkeypatch):
+    class Message:
+        content = '[{"required": ["inspection"], "optional": ["selection"], "reasoning": "list_wrapped"}]'
+        reasoning_content = None
+        reasoning = None
+        tool_calls = None
+
+    class Choice:
+        message = Message()
+        text = None
+
+    class Response:
+        choices = [Choice()]
+        output_text = None
+
+    class FakeCompletions:
+        async def create(self, **kwargs):  # noqa: ARG002
+            return Response()
+
+    class FakeChat:
+        completions = FakeCompletions()
+
+    class FakeClient:
+        chat = FakeChat()
+
+    monkeypatch.setattr(prompt_router, "_build_routing_client", lambda api_keys=None: FakeClient())  # noqa: ARG005
+
+    import asyncio
+
+    result = asyncio.run(prompt_router.route_request("inspect this body"))
+    assert "core" in result["required"]
+    assert "inspection" in result["required"]
+    assert "selection" in result["optional"]
+    assert result["router_parse_status"] == "coerced_shape"
+    assert "fallback" not in result
+
+
+def test_route_request_coerces_required_clusters_alias(monkeypatch):
+    class Message:
+        content = '{"required_clusters": ["inspection"], "optional_clusters": ["selection"], "reasoning": "alias_keys"}'
+        reasoning_content = None
+        reasoning = None
+        tool_calls = None
+
+    class Choice:
+        message = Message()
+        text = None
+
+    class Response:
+        choices = [Choice()]
+        output_text = None
+
+    class FakeCompletions:
+        async def create(self, **kwargs):  # noqa: ARG002
+            return Response()
+
+    class FakeChat:
+        completions = FakeCompletions()
+
+    class FakeClient:
+        chat = FakeChat()
+
+    monkeypatch.setattr(prompt_router, "_build_routing_client", lambda api_keys=None: FakeClient())  # noqa: ARG005
+
+    import asyncio
+
+    result = asyncio.run(prompt_router.route_request("inspect this body"))
+    assert "core" in result["required"]
+    assert "inspection" in result["required"]
+    assert "selection" in result["optional"]
+    assert result["reasoning"] == "alias_keys"
     assert "fallback" not in result
 
 

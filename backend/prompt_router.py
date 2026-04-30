@@ -41,23 +41,62 @@ from .prompt_structure import get_tool_catalog_text, CLUSTER_TOOL_MAPPING
 
 logger = logging.getLogger(__name__)
 
+_BEDROCK_API_KEY_ALIASES = (
+    "aws_bearer_token_bedrock",
+    "AWS_BEARER_TOKEN_BEDROCK",
+    "bedrock_api_key",
+    "bedrock_bearer_token",
+)
+_OPENAI_API_KEY_ALIASES = ("openai_api_key", "OPENAI_API_KEY")
+
+
+def _resolve_bedrock_router_api_key(api_keys: Optional[Dict[str, str]] = None) -> Tuple[Optional[str], str]:
+    """Resolve Bedrock router key, preferring session BYOK over environment."""
+    for key_name in _BEDROCK_API_KEY_ALIASES:
+        candidate = (api_keys or {}).get(key_name)
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate.strip(), "session_byok"
+
+    env_token = os.environ.get("AWS_BEARER_TOKEN_BEDROCK")
+    if env_token and env_token.strip():
+        return env_token.strip(), "environment"
+    return None, "missing"
+
+
+def _resolve_openai_router_api_key(api_keys: Optional[Dict[str, str]] = None) -> Tuple[Optional[str], str]:
+    """Resolve OpenAI-compatible router key, preferring session BYOK over environment."""
+    for key_name in _OPENAI_API_KEY_ALIASES:
+        candidate = (api_keys or {}).get(key_name)
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate.strip(), "session_byok"
+
+    env_token = os.environ.get("OPENAI_API_KEY")
+    if env_token and env_token.strip():
+        return env_token.strip(), "environment"
+    return None, "missing"
+
+
+def _resolve_router_api_key_source(api_keys: Optional[Dict[str, str]] = None) -> str:
+    """Return which source is currently backing the routing API key."""
+    if _router_uses_bedrock():
+        _, source = _resolve_bedrock_router_api_key(api_keys)
+        return source
+    _, source = _resolve_openai_router_api_key(api_keys)
+    return source
+
 def _build_routing_client(api_keys: Optional[Dict[str, str]] = None) -> Optional[AsyncOpenAI]:
     """Create routing client from per-session BYOK key with env fallback."""
     if _router_uses_bedrock():
-        api_key = os.environ.get("AWS_BEARER_TOKEN_BEDROCK")
-        if not api_key or not api_key.strip():
+        api_key, _ = _resolve_bedrock_router_api_key(api_keys)
+        if not api_key:
             return None
-        return AsyncOpenAI(api_key=api_key.strip(), base_url=ROUTER_BEDROCK_BASE_URL)
+        return AsyncOpenAI(api_key=api_key, base_url=ROUTER_BEDROCK_BASE_URL)
 
-    api_key = None
-    if api_keys:
-        api_key = api_keys.get("openai_api_key") or api_keys.get("OPENAI_API_KEY")
+    api_key, _ = _resolve_openai_router_api_key(api_keys)
     if not api_key:
-        api_key = os.environ.get("OPENAI_API_KEY")
-    if not api_key or not api_key.strip():
         return None
 
-    client_kwargs: Dict[str, Any] = {"api_key": api_key.strip()}
+    client_kwargs: Dict[str, Any] = {"api_key": api_key}
     openai_base_url = os.environ.get("OPENAI_BASE_URL")
     if openai_base_url and openai_base_url.strip():
         client_kwargs["base_url"] = openai_base_url.strip()
@@ -348,6 +387,79 @@ def _classify_router_parse_failure(text: str, error: Optional[Exception]) -> str
     return "non_json_text"
 
 
+def _normalize_cluster_list(value: Any) -> List[str]:
+    """Normalize cluster collections into a clean string list."""
+    if value is None:
+        return []
+
+    if isinstance(value, str):
+        text = value.strip()
+        return [text] if text else []
+
+    if isinstance(value, list):
+        output: List[str] = []
+        for item in value:
+            if not isinstance(item, str):
+                continue
+            text = item.strip()
+            if text:
+                output.append(text)
+        return output
+
+    return []
+
+
+def _coerce_router_payload_shape(payload: Any) -> Tuple[Optional[Dict[str, Any]], bool]:
+    """
+    Coerce provider payload variants into canonical routing dict shape.
+
+    Returns (routing_dict_or_none, was_coerced).
+    """
+    if isinstance(payload, list):
+        # Common variant: a single-object list around the JSON payload.
+        for item in payload:
+            if isinstance(item, dict):
+                coerced, was_coerced = _coerce_router_payload_shape(item)
+                if coerced is not None:
+                    return coerced, True
+        return None, False
+
+    if not isinstance(payload, dict):
+        return None, False
+
+    alias_required = payload.get("required_clusters")
+    alias_optional = payload.get("optional_clusters")
+    required = payload.get("required")
+    optional = payload.get("optional")
+    reasoning = payload.get("reasoning")
+
+    if required is None and alias_required is not None:
+        required = alias_required
+    if optional is None and alias_optional is not None:
+        optional = alias_optional
+
+    if required is not None or optional is not None:
+        normalized_required = _normalize_cluster_list(required)
+        normalized_optional = _normalize_cluster_list(optional)
+        normalized_reasoning = reasoning if isinstance(reasoning, str) else "No reasoning provided"
+        coerced = dict(payload)
+        coerced["required"] = normalized_required
+        coerced["optional"] = normalized_optional
+        coerced["reasoning"] = normalized_reasoning
+        was_coerced = alias_required is not None or alias_optional is not None
+        return coerced, was_coerced
+
+    for nested_key in ("routing", "result", "output", "data", "response", "decision"):
+        nested = payload.get(nested_key)
+        nested_coerced, nested_was_coerced = _coerce_router_payload_shape(nested)
+        if nested_coerced is not None:
+            if isinstance(reasoning, str) and not nested_coerced.get("reasoning"):
+                nested_coerced["reasoning"] = reasoning
+            return nested_coerced, True or nested_was_coerced
+
+    return None, False
+
+
 def _safe_parse_router_response(response_text: str) -> Tuple[Optional[Dict[str, Any]], str]:
     """
     Parse a router response without raising on malformed provider output.
@@ -369,8 +481,9 @@ def _safe_parse_router_response(response_text: str) -> Tuple[Optional[Dict[str, 
     for candidate in candidates:
         try:
             parsed = json.loads(candidate)
-            if isinstance(parsed, dict):
-                return parsed, "ok"
+            coerced, was_coerced = _coerce_router_payload_shape(parsed)
+            if coerced is not None:
+                return coerced, "coerced_shape" if was_coerced else "ok"
             return None, "unexpected_json_shape"
         except json.JSONDecodeError as exc:
             last_error = exc
@@ -379,8 +492,9 @@ def _safe_parse_router_response(response_text: str) -> Tuple[Optional[Dict[str, 
         if repair_suffix:
             try:
                 parsed = json.loads(candidate + repair_suffix)
-                if isinstance(parsed, dict):
-                    return parsed, "repaired"
+                coerced, was_coerced = _coerce_router_payload_shape(parsed)
+                if coerced is not None:
+                    return coerced, "repaired_coerced_shape" if was_coerced else "repaired"
                 return None, "unexpected_json_shape"
             except json.JSONDecodeError as exc:
                 last_error = exc
@@ -388,7 +502,15 @@ def _safe_parse_router_response(response_text: str) -> Tuple[Optional[Dict[str, 
     return None, _classify_router_parse_failure(normalized_text, last_error)
 
 
-def _fallback_with_reason(user_request: str, fallback_reason: str) -> Dict[str, Any]:
+def _fallback_with_reason(
+    user_request: str,
+    fallback_reason: str,
+    *,
+    provider_path: Optional[str] = None,
+    model_name: Optional[str] = None,
+    api_key_source: Optional[str] = None,
+    parse_status: Optional[str] = None,
+) -> Dict[str, Any]:
     """
     Call the fallback router while keeping compatibility with older stubs.
 
@@ -407,6 +529,14 @@ def _fallback_with_reason(user_request: str, fallback_reason: str) -> Dict[str, 
     fallback_result["reasoning"] = f"Fallback routing using keyword matching ({fallback_reason})"
     fallback_result.setdefault("fallback", True)
     fallback_result.setdefault("routing_source", "keyword_fallback")
+    if provider_path:
+        fallback_result["router_provider"] = provider_path
+    if model_name:
+        fallback_result["router_model"] = model_name
+    if api_key_source:
+        fallback_result["router_api_key_source"] = api_key_source
+    if parse_status:
+        fallback_result["router_parse_status"] = parse_status
     return fallback_result
 
 # Router system prompt (system role)
@@ -650,16 +780,30 @@ async def route_request(
     """
     try:
         provider_path = _router_provider_path()
+        router_key_source = _resolve_router_api_key_source(api_keys)
         logger.info(f"Routing request: {user_request[:100]}...")
 
         routing_client = _build_routing_client(api_keys)
         if routing_client is None:
             logger.warning(
-                "Prompt router missing credentials | provider=%s model=%s",
+                "Prompt router missing credentials | provider=%s model=%s api_key_source=%s",
                 provider_path,
                 ROUTER_MODEL,
+                router_key_source,
             )
-            return _fallback_with_reason(user_request, "missing_router_credentials")
+            return _fallback_with_reason(
+                user_request,
+                "missing_router_credentials",
+                provider_path=provider_path,
+                model_name=ROUTER_MODEL,
+                api_key_source=router_key_source,
+            )
+        logger.info(
+            "Prompt router initialized | provider=%s model=%s api_key_source=%s",
+            provider_path,
+            ROUTER_MODEL,
+            router_key_source,
+        )
 
         # Get tool catalog for router
         tool_catalog = get_tool_catalog_text()
@@ -707,7 +851,14 @@ async def route_request(
                 ROUTER_MODEL,
                 type(exc).__name__,
             )
-            return _fallback_with_reason(user_request, "missing_text")
+            return _fallback_with_reason(
+                user_request,
+                "missing_text",
+                provider_path=provider_path,
+                model_name=ROUTER_MODEL,
+                api_key_source=router_key_source,
+                parse_status="missing_text",
+            )
 
         routing_result, parse_status = _safe_parse_router_response(response_text)
         if routing_result is None:
@@ -717,12 +868,26 @@ async def route_request(
                 ROUTER_MODEL,
                 parse_status,
             )
-            return _fallback_with_reason(user_request, f"parse_failure:{parse_status}")
+            return _fallback_with_reason(
+                user_request,
+                f"parse_failure:{parse_status}",
+                provider_path=provider_path,
+                model_name=ROUTER_MODEL,
+                api_key_source=router_key_source,
+                parse_status=parse_status,
+            )
         if parse_status == "repaired":
             logger.info(
                 "Prompt router applied bounded JSON repair | provider=%s model=%s",
                 provider_path,
                 ROUTER_MODEL,
+            )
+        if parse_status in {"coerced_shape", "repaired_coerced_shape"}:
+            logger.info(
+                "Prompt router coerced response shape | provider=%s model=%s status=%s",
+                provider_path,
+                ROUTER_MODEL,
+                parse_status,
             )
 
         # Validate result structure
@@ -750,6 +915,12 @@ async def route_request(
         else:
             routing_result["confidence"] = "low"
 
+        routing_result.setdefault("routing_source", "llm_router")
+        routing_result["router_provider"] = provider_path
+        routing_result["router_model"] = ROUTER_MODEL
+        routing_result["router_api_key_source"] = router_key_source
+        routing_result["router_parse_status"] = parse_status
+
         logger.info(
             f"Routing complete: {len(routing_result['required'])} required, "
             f"{len(routing_result['optional'])} optional clusters "
@@ -769,7 +940,14 @@ async def route_request(
             type(e).__name__,
             exc_info=True,
         )
-        return _fallback_with_reason(user_request, f"routing_error:{type(e).__name__}")
+        return _fallback_with_reason(
+            user_request,
+            f"routing_error:{type(e).__name__}",
+            provider_path=_router_provider_path(),
+            model_name=ROUTER_MODEL,
+            api_key_source=_resolve_router_api_key_source(api_keys),
+            parse_status=f"routing_error:{type(e).__name__}",
+        )
 
 
 def _fallback_routing(user_request: str, fallback_reason: str = "ai_router_failed") -> Dict[str, Any]:

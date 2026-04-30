@@ -464,6 +464,12 @@ def _extract_session_context(
             "optional_clusters": routing_result.get("optional", []),
             "reasoning": routing_result.get("reasoning"),
             "confidence": routing_result.get("confidence"),
+            "routing_source": routing_result.get("routing_source"),
+            "fallback_reason": routing_result.get("fallback_reason"),
+            "router_provider": routing_result.get("router_provider"),
+            "router_model": routing_result.get("router_model"),
+            "router_api_key_source": routing_result.get("router_api_key_source"),
+            "router_parse_status": routing_result.get("router_parse_status"),
         }
 
     # Loaded tools (names only, not full schemas)
