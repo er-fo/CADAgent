@@ -353,6 +353,65 @@ def _build_tool_intent_key(tool_name: str, tool_input: Mapping[str, Any]) -> str
     return f"{tool_name}:{payload_json}"
 
 
+_NO_INTERSECTION_FAILURE_MARKERS = (
+    "no target body found to cut or intersect",
+    "no_intersection_after_direction_retry",
+)
+
+
+def _normalize_extrude_operation_name(operation_value: Any) -> str:
+    """Normalize extrude operation variants for intent comparison."""
+    if operation_value is None:
+        return "newbody"
+    operation = str(operation_value).strip().lower()
+    if operation.endswith("featureoperation"):
+        operation = operation[: -len("featureoperation")]
+    return operation
+
+
+def _is_no_intersection_failure_text(failure_detail: Any) -> bool:
+    if not isinstance(failure_detail, str):
+        return False
+    detail = failure_detail.lower()
+    return any(marker in detail for marker in _NO_INTERSECTION_FAILURE_MARKERS)
+
+
+def _build_failure_intent_key(tool_name: str, tool_input: Mapping[str, Any], failure_detail: Any) -> str:
+    """
+    Build a failure-intent key for retry guards.
+
+    For Cut/Intersect extrude no-intersection failures, treat direction sign flips
+    as the same logical intent so repeated failed retries are detected reliably.
+    """
+    base_key = _build_tool_intent_key(tool_name, tool_input)
+    if tool_name != "extrude_profile":
+        return base_key
+    if not _is_no_intersection_failure_text(failure_detail):
+        return base_key
+
+    normalized_input = dict(tool_input)
+    operation = _normalize_extrude_operation_name(normalized_input.get("operation"))
+    if operation not in {"cut", "intersect"}:
+        return base_key
+
+    canonical_payload = _canonicalize_intent_value(normalized_input)
+    if not isinstance(canonical_payload, Mapping):
+        return base_key
+
+    retry_payload = dict(canonical_payload)
+    retry_payload["operation"] = operation
+
+    distance_value = retry_payload.get("distance")
+    try:
+        retry_payload["distance"] = abs(float(distance_value))
+    except (TypeError, ValueError):
+        pass
+
+    retry_payload["failure_mode"] = "no_intersection_after_direction_retry"
+    payload_json = json.dumps(retry_payload, sort_keys=True, separators=(",", ":"), default=str)
+    return f"{tool_name}:retry:{payload_json}"
+
+
 WORLD_AXIS_ORDER = ["x", "y", "z"]
 
 IR_MVP_TOOLS = {"create_sketch", "add_rectangle", "add_circle", "extrude_profile", "extrude"}
@@ -3082,7 +3141,19 @@ async def _execute_workflow_loop(
                 if not target_result.success:
                     iteration_had_failure = True
                     if iteration_first_failure_intent is None:
-                        iteration_first_failure_intent = tool_intent_key
+                        failure_detail = target_result.message
+                        if isinstance(target_result.raw_result, Mapping):
+                            raw_error = (
+                                target_result.raw_result.get("error")
+                                or target_result.raw_result.get("message")
+                            )
+                            if raw_error:
+                                failure_detail = f"{failure_detail} | {raw_error}"
+                        iteration_first_failure_intent = _build_failure_intent_key(
+                            tool_name,
+                            tool_input,
+                            failure_detail,
+                        )
                     await _send_error(manager, session_id, f"{execution_target} execution failed", target_result.message)
                     logger.error(
                         "Session %s IR tool '%s' failed on target %s: %s",
@@ -3745,7 +3816,17 @@ async def _execute_workflow_loop(
             if not success:
                 iteration_had_failure = True
                 if iteration_first_failure_intent is None:
-                    iteration_first_failure_intent = tool_intent_key
+                    failure_detail = (
+                        result.get("error")
+                        or result.get("message")
+                        or result.get("details")
+                        or result_text
+                    )
+                    iteration_first_failure_intent = _build_failure_intent_key(
+                        tool_name,
+                        tool_input,
+                        failure_detail,
+                    )
                 await _send_error(manager, session_id, "Fusion execution failed", result_text)
                 logger.error("Session %s reported execution failure for '%s': %s", session_id, tool_name, result_text)
             else:
@@ -6040,7 +6121,7 @@ def _summarise_execution_result(
     if not success:
         error_detail = result.get("error") or result.get("message") or result.get("details") or "Unknown error."
         hint = ""
-        if isinstance(error_detail, str) and "No target body found to cut or intersect" in error_detail:
+        if _is_no_intersection_failure_text(error_detail):
             hint = (
                 " Hint: This usually means your sketch/profile does not intersect any solid in the chosen "
                 "extrusion direction. For Cut/Intersect, try flipping the distance sign, or ensure the sketch "

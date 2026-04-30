@@ -28,6 +28,8 @@ Usage:
 
 from typing import Dict, List, Any
 
+from .thread_specs import format_catalog_inline, thread_size_markdown_table
+
 # Single source of truth for prompt versioning (appears in all system prompts)
 PROMPT_VERSION = "v0.6.10 (2026-03-04) - MANDATORY: no multi-mutation batching; use generate_question_tree for 2+ design questions; use profile_indices for overlapping shapes; NEVER ask follow-up questions after question tree; ALWAYS use hole tools for holes (never sketch+extrude)"
 
@@ -35,15 +37,11 @@ PROMPT_VERSION = "v0.6.10 (2026-03-04) - MANDATORY: no multi-mutation batching; 
 # REFERENCE TABLES (Included in system prompt, referenced by tools)
 # =============================================================================
 
-REFERENCE_TABLES = """
+REFERENCE_TABLES = f"""
 ## Thread Size Reference
-| Type   | Available Sizes                                                    |
-|--------|--------------------------------------------------------------------|
-| Metric | M3, M4, M5, M6, M8, M10, M12, M16, M20                             |
-| UNC    | #6-32, #8-32, #10-24, 1/4-20, 5/16-18, 3/8-16, 1/2-13              |
-| UNF    | #6-40, #8-36, #10-32, 1/4-28, 5/16-24, 3/8-24, 1/2-20              |
+{thread_size_markdown_table()}
 
-**NOT available**: M7, M9, M11, M14, M18. Choose nearest available size if requested.
+Use only exact catalog values above. Do not invent/interpolate sizes (examples of invalid metric requests: M2.5, M7, M9, M11, M14, M18).
 
 ## Entity Reference Convention
 All entity parameters accept short refs from **Design Entities** context:
@@ -916,10 +914,11 @@ ALWAYS use the appropriate hole tool:
     "threading": {
         "tools": ["create_tapped_hole", "create_external_thread"],
         "description": "Thread operations (internal and external)",
-        "documentation": """
+        "documentation": f"""
 - create_tapped_hole: Internal threads (screws thread into part), requires face_ref and world coordinates
 - create_external_thread: External threads on cylindrical faces (bolts, screws), requires face_ref
-- Available sizes: M3, M4, M5, M6, M8, M10, M12, M16, M20 (NOT M7, M9, M11, M14, M18)
+- Supported catalog sizes only: {format_catalog_inline()}
+- If user asks for unsupported size, do not emit a thread tool call with that size; ask user to pick a supported size.
 - MATERIAL CLEARANCE: Ensure threaded holes are positioned with at least 1.5× nominal diameter from edges. For mounting holes, compute positions based on outer body dimensions, not internal feature corners."""
     },
     "patterns": {

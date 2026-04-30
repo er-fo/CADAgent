@@ -32,6 +32,11 @@ except Exception:  # pragma: no cover - handled gracefully when SDK missing
 
 from .prompt_builder import build_full_prompt, PROMPT_VERSION
 from .session_logger import _extract_usage_stats
+from .thread_specs import (
+    ALL_THREAD_SIZES,
+    format_catalog_inline,
+    validate_thread_spec,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -318,6 +323,10 @@ _FORBIDDEN_TOP_LEVEL_KEYS = {"oneOf", "anyOf", "allOf", "enum", "not"}
 
 # Strict mode: raise errors instead of silently stripping forbidden constructs
 _STRICT_SCHEMA_MODE = os.environ.get("CADAGENT_STRICT_SCHEMA", "").lower() in ("1", "true", "yes")
+
+THREAD_TYPE_ENUM = ["metric", "unc", "unf"]
+THREAD_SIZE_ENUM = list(ALL_THREAD_SIZES)
+THREAD_CATALOG_INLINE = format_catalog_inline()
 
 
 def _sanitize_tool_schema(schema: Dict[str, Any], tool_name: str) -> Dict[str, Any]:
@@ -1232,7 +1241,7 @@ TOOLS = [
     },
     {
         "name": "create_tapped_hole",
-        "description": "Create threaded hole for screw insertion. See THREAD SIZE REFERENCE for available sizes. Position hole center ≥1.5× diameter from any edge.",
+        "description": "Create threaded hole for screw insertion. Use only supported catalog thread sizes from THREAD SIZE REFERENCE. Position hole center ≥1.5× diameter from any edge.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -1254,12 +1263,13 @@ TOOLS = [
                 },
                 "thread_type": {
                     "type": "string",
-                    "enum": ["metric", "unc", "unf"],
-                    "description": "Thread standard."
+                    "enum": THREAD_TYPE_ENUM,
+                    "description": "Thread standard. Aliases like ISO must be normalized to 'metric'."
                 },
                 "thread_size": {
                     "type": "string",
-                    "description": "Size from THREAD SIZE REFERENCE (e.g., 'M6', '1/4-20')."
+                    "enum": THREAD_SIZE_ENUM,
+                    "description": f"Exact size from catalog. Must match thread_type. Supported: {THREAD_CATALOG_INLINE}."
                 },
                 "thread_depth": {
                     "type": "number",
@@ -1293,7 +1303,7 @@ TOOLS = [
     },
     {
         "name": "create_external_thread",
-        "description": "Add external threads to cylindrical face. See THREAD SIZE REFERENCE. If unavailable size requested, choose nearest.",
+        "description": "Add external threads to cylindrical face. Use only supported catalog thread sizes from THREAD SIZE REFERENCE.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -1303,12 +1313,13 @@ TOOLS = [
                 },
                 "thread_type": {
                     "type": "string",
-                    "enum": ["metric", "unc", "unf"],
-                    "description": "Thread standard."
+                    "enum": THREAD_TYPE_ENUM,
+                    "description": "Thread standard. Aliases like ISO must be normalized to 'metric'."
                 },
                 "thread_size": {
                     "type": "string",
-                    "description": "Size from THREAD SIZE REFERENCE."
+                    "enum": THREAD_SIZE_ENUM,
+                    "description": f"Exact size from catalog. Must match thread_type. Supported: {THREAD_CATALOG_INLINE}."
                 },
                 "thread_length": {
                     "type": "number",
@@ -3047,6 +3058,90 @@ def _convert_gemini_response_to_anthropic_format(response: Any) -> dict:
     }
 
 
+_THREAD_TOOL_NAMES = {"create_tapped_hole", "create_external_thread"}
+
+
+def _thread_guardrail_message(tool_name: str, reason: str) -> str:
+    return (
+        f"Cannot execute `{tool_name}`: {reason} "
+        f"Use a supported catalog size only. Available sizes: {THREAD_CATALOG_INLINE}."
+    )
+
+
+def _normalize_thread_tool_use(
+    *,
+    tool_id: str,
+    tool_name: str,
+    tool_input: Any,
+) -> Dict[str, Any]:
+    """
+    Normalize/validate thread tool payloads before execution.
+
+    Invalid thread specs are rewritten into a respond_to_user tool call so they
+    do not reach downstream execution handlers.
+    """
+    if tool_name not in _THREAD_TOOL_NAMES:
+        return {"name": tool_name, "input": tool_input if isinstance(tool_input, dict) else {}}
+
+    payload = dict(tool_input) if isinstance(tool_input, dict) else {}
+    try:
+        thread_type, thread_size = validate_thread_spec(
+            payload.get("thread_type"),
+            payload.get("thread_size"),
+        )
+    except ValueError as exc:
+        message = _thread_guardrail_message(tool_name, str(exc))
+        logger.warning("Thread spec guardrail rewrote invalid tool call id=%s: %s", tool_id, message)
+        return {"name": "respond_to_user", "input": {"message": message}}
+
+    payload["thread_type"] = thread_type
+    payload["thread_size"] = thread_size
+    return {"name": tool_name, "input": payload}
+
+
+def _sanitize_thread_tool_uses_in_content(content: Any) -> List[Any]:
+    """Return content blocks with thread tool calls normalized/validated."""
+    if not isinstance(content, list):
+        return []
+
+    sanitized: List[Any] = []
+    for block in content:
+        if not isinstance(block, dict):
+            sanitized.append(block)
+            continue
+        if block.get("type") != "tool_use":
+            sanitized.append(block)
+            continue
+
+        tool_name = str(block.get("name", "")).strip()
+        tool_id = str(block.get("id", "")).strip()
+        normalized = _normalize_thread_tool_use(
+            tool_id=tool_id,
+            tool_name=tool_name,
+            tool_input=block.get("input"),
+        )
+        rewritten_block = dict(block)
+        rewritten_block["name"] = normalized["name"]
+        rewritten_block["input"] = normalized["input"]
+        sanitized.append(rewritten_block)
+    return sanitized
+
+
+def _sanitize_thread_tool_uses_in_result(result: Dict[str, Any]) -> Dict[str, Any]:
+    """Normalize/validate thread tool call blocks in a model response payload."""
+    if not isinstance(result, dict):
+        return result
+    content = result.get("content")
+    if not isinstance(content, list):
+        return result
+    sanitized_content = _sanitize_thread_tool_uses_in_content(content)
+    if sanitized_content == content:
+        return result
+    updated = dict(result)
+    updated["content"] = sanitized_content
+    return updated
+
+
 async def call_claude_with_tools(
     messages: List[dict],
     tools: List[dict] = None,
@@ -3177,7 +3272,7 @@ async def call_claude_with_tools(
                 except Exception as e:
                     logger.warning(f"Failed to log API call: {e}")
 
-            return result
+            return _sanitize_thread_tool_uses_in_result(result)
 
         except ValueError as e:
             # Quota exceeded or authentication errors
@@ -3448,7 +3543,7 @@ async def call_claude_with_tools(
                     except Exception as e:
                         logger.warning(f"Failed to log API call: {e}")
 
-                return result
+                return _sanitize_thread_tool_uses_in_result(result)
 
             elif model.startswith("gemini"):
                 gemini_async_client = _get_gemini_async_client(api_keys)
@@ -3615,7 +3710,7 @@ async def call_claude_with_tools(
                     except Exception as e:
                         logger.warning(f"Failed to log Gemini API call: {e}")
 
-                return result
+                return _sanitize_thread_tool_uses_in_result(result)
 
             else:
                 # Anthropic/Claude API call
@@ -3802,7 +3897,7 @@ async def call_claude_with_tools(
                     except Exception as e:
                         logger.warning(f"Failed to log API call: {e}")
 
-                return result
+                return _sanitize_thread_tool_uses_in_result(result)
 
         except Exception as e:
             logger.error(f"LLM API error (attempt {attempt + 1}/{max_retries}): {str(e)}")
@@ -3838,14 +3933,17 @@ def extract_tool_calls(response: dict) -> List[dict]:
             ...
         ]
     """
-    tool_calls = []
+    tool_calls: List[Dict[str, Any]] = []
+    sanitized_content = _sanitize_thread_tool_uses_in_content(response.get("content"))
 
-    for block in response["content"]:
+    for block in sanitized_content:
+        if not isinstance(block, dict):
+            continue
         if block.get("type") == "tool_use":
             tool_calls.append({
-                "id": block["id"],
-                "name": block["name"],
-                "input": block["input"]
+                "id": block.get("id", ""),
+                "name": block.get("name", ""),
+                "input": block.get("input", {}),
             })
 
     logger.debug(f"Extracted {len(tool_calls)} tool call(s): {[tc['name'] for tc in tool_calls]}")

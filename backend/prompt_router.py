@@ -112,6 +112,7 @@ ROUTER_BEDROCK_BASE_URL = os.environ.get(
 ROUTER_MAX_TOKENS = 500
 ROUTER_TEMPERATURE = 0.0  # Deterministic routing
 _BEDROCK_ROUTER_PREFIXES = ("minimax.",)
+ROUTER_PARSE_RETRY_LIMIT = 1
 
 
 def _router_uses_bedrock() -> bool:
@@ -192,6 +193,16 @@ def _extract_text_from_payload(payload: Any) -> str:
             if text:
                 return text
 
+        for key in ("parts", "items", "segments", "fragments", "value"):
+            text = _extract_text_from_payload(payload.get(key))
+            if text:
+                return text
+
+        for value in payload.values():
+            text = _extract_text_from_payload(value)
+            if text:
+                return text
+
         return ""
 
     for attr in ("text", "content", "output_text", "reasoning_content", "reasoning", "arguments"):
@@ -219,38 +230,43 @@ def _extract_routing_response_text(response: Any) -> str:
     if not choices:
         raise ValueError("Routing response has no choices")
 
-    first_choice = choices[0]
-    message = getattr(first_choice, "message", None)
-    if message is None and isinstance(first_choice, dict):
-        message = first_choice.get("message")
-
     candidates: List[str] = []
 
-    if isinstance(message, dict):
-        candidates.append(_extract_text_from_payload(message.get("content")))
-        candidates.append(_extract_text_from_payload(message.get("reasoning_content")))
-        candidates.append(_extract_text_from_payload(message.get("reasoning")))
-        tool_calls = message.get("tool_calls")
-        if isinstance(tool_calls, list):
-            for tool_call in tool_calls:
-                if isinstance(tool_call, dict):
-                    function_payload = tool_call.get("function") or {}
-                    if isinstance(function_payload, dict):
-                        candidates.append(_extract_text_from_payload(function_payload.get("arguments")))
-    else:
-        candidates.append(_extract_text_from_payload(getattr(message, "content", None)))
-        candidates.append(_extract_text_from_payload(getattr(message, "reasoning_content", None)))
-        candidates.append(_extract_text_from_payload(getattr(message, "reasoning", None)))
-        tool_calls = getattr(message, "tool_calls", None)
-        if isinstance(tool_calls, list):
-            for tool_call in tool_calls:
-                function_payload = getattr(tool_call, "function", None)
-                candidates.append(_extract_text_from_payload(getattr(function_payload, "arguments", None)))
+    for choice in choices:
+        message = getattr(choice, "message", None)
+        if message is None and isinstance(choice, dict):
+            message = choice.get("message")
 
-    if isinstance(first_choice, dict):
-        candidates.append(_extract_text_from_payload(first_choice.get("text")))
-    else:
-        candidates.append(_extract_text_from_payload(getattr(first_choice, "text", None)))
+        if isinstance(message, dict):
+            candidates.append(_extract_text_from_payload(message.get("content")))
+            candidates.append(_extract_text_from_payload(message.get("reasoning_content")))
+            candidates.append(_extract_text_from_payload(message.get("reasoning")))
+            tool_calls = message.get("tool_calls")
+            if isinstance(tool_calls, list):
+                for tool_call in tool_calls:
+                    if isinstance(tool_call, dict):
+                        function_payload = tool_call.get("function") or {}
+                        if isinstance(function_payload, dict):
+                            candidates.append(_extract_text_from_payload(function_payload.get("arguments")))
+        else:
+            candidates.append(_extract_text_from_payload(getattr(message, "content", None)))
+            candidates.append(_extract_text_from_payload(getattr(message, "reasoning_content", None)))
+            candidates.append(_extract_text_from_payload(getattr(message, "reasoning", None)))
+            tool_calls = getattr(message, "tool_calls", None)
+            if isinstance(tool_calls, list):
+                for tool_call in tool_calls:
+                    if isinstance(tool_call, dict):
+                        function_payload = tool_call.get("function") or {}
+                        if isinstance(function_payload, dict):
+                            candidates.append(_extract_text_from_payload(function_payload.get("arguments")))
+                    else:
+                        function_payload = getattr(tool_call, "function", None)
+                        candidates.append(_extract_text_from_payload(getattr(function_payload, "arguments", None)))
+
+        if isinstance(choice, dict):
+            candidates.append(_extract_text_from_payload(choice.get("text")))
+        else:
+            candidates.append(_extract_text_from_payload(getattr(choice, "text", None)))
 
     candidates.append(_extract_text_from_payload(getattr(response, "output_text", None)))
     if isinstance(response, dict):
@@ -510,6 +526,10 @@ def _fallback_with_reason(
     model_name: Optional[str] = None,
     api_key_source: Optional[str] = None,
     parse_status: Optional[str] = None,
+    retry_attempted: Optional[bool] = None,
+    retry_count: Optional[int] = None,
+    retry_parse_status: Optional[str] = None,
+    initial_parse_status: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Call the fallback router while keeping compatibility with older stubs.
@@ -537,7 +557,35 @@ def _fallback_with_reason(
         fallback_result["router_api_key_source"] = api_key_source
     if parse_status:
         fallback_result["router_parse_status"] = parse_status
+    if retry_attempted is not None:
+        fallback_result["router_retry_attempted"] = retry_attempted
+    if retry_count is not None:
+        fallback_result["router_retry_count"] = retry_count
+    if retry_parse_status is not None:
+        fallback_result["router_retry_parse_status"] = retry_parse_status
+    if initial_parse_status is not None:
+        fallback_result["router_initial_parse_status"] = initial_parse_status
     return fallback_result
+
+
+def _build_router_json_repair_user_message(
+    user_request: str,
+    raw_router_text: str,
+    parse_status: str,
+) -> str:
+    """Build strict JSON-only repair instruction for a single retry."""
+    return (
+        "Repair this router output into strict JSON only.\n\n"
+        "Constraints:\n"
+        '- Output must be ONLY one JSON object with keys: "required", "optional", "reasoning".\n'
+        '- "required" and "optional" must be arrays of strings.\n'
+        '- Include "core" in "required".\n'
+        "- No markdown, no prose, no comments, no code fences.\n"
+        f"- Previous parse status: {parse_status}\n\n"
+        f"User request:\n{user_request}\n\n"
+        "Router output to repair:\n"
+        f"{raw_router_text}"
+    )
 
 # Router system prompt (system role)
 ROUTER_PROMPT = """You are a tool routing classifier for a CAD modeling agent.
@@ -781,6 +829,10 @@ async def route_request(
     try:
         provider_path = _router_provider_path()
         router_key_source = _resolve_router_api_key_source(api_keys)
+        retry_attempted = False
+        retry_count = 0
+        retry_parse_status = "not_attempted"
+        initial_parse_status = "not_attempted"
         logger.info(f"Routing request: {user_request[:100]}...")
 
         routing_client = _build_routing_client(api_keys)
@@ -797,6 +849,11 @@ async def route_request(
                 provider_path=provider_path,
                 model_name=ROUTER_MODEL,
                 api_key_source=router_key_source,
+                parse_status="missing_router_credentials",
+                retry_attempted=retry_attempted,
+                retry_count=retry_count,
+                retry_parse_status=retry_parse_status,
+                initial_parse_status=initial_parse_status,
             )
         logger.info(
             "Prompt router initialized | provider=%s model=%s api_key_source=%s",
@@ -805,35 +862,21 @@ async def route_request(
             router_key_source,
         )
 
-        # Get tool catalog for router
         tool_catalog = get_tool_catalog_text()
-
-        # Build router prompt (system role) and send user request separately
         system_prompt = ROUTER_PROMPT.format(tool_catalog=tool_catalog)
-
-        # Extract recent conversation context (last 2-3 turns) to help router understand follow-ups
         context_summary = _extract_conversation_context(conversation_history)
-
-        # Extract build plan operations if available
         build_plan_context = _extract_operations_from_build_plan(build_plan)
 
-        # Build user message with optional context
         message_parts = []
-
         if context_summary:
             message_parts.append(f"**Recent conversation context:**\n{context_summary}")
-
         if build_plan_context:
             message_parts.append(build_plan_context)
-
         message_parts.append(f"**Current request:**\n{user_request}")
-
         user_message = "\n\n".join(message_parts)
 
-        # Call the configured OpenAI-compatible routing LLM
         response = await routing_client.chat.completions.create(
             model=ROUTER_MODEL,
-            # GPT-5.1 requires max_completion_tokens instead of max_tokens
             max_completion_tokens=ROUTER_MAX_TOKENS,
             messages=[
                 {"role": "system", "content": system_prompt},
@@ -841,7 +884,6 @@ async def route_request(
             ],
         )
 
-        # Extract response text from provider-specific shapes
         try:
             response_text = _extract_routing_response_text(response)
         except Exception as exc:
@@ -858,9 +900,14 @@ async def route_request(
                 model_name=ROUTER_MODEL,
                 api_key_source=router_key_source,
                 parse_status="missing_text",
+                retry_attempted=retry_attempted,
+                retry_count=retry_count,
+                retry_parse_status=retry_parse_status,
+                initial_parse_status=initial_parse_status,
             )
 
         routing_result, parse_status = _safe_parse_router_response(response_text)
+        initial_parse_status = parse_status
         if routing_result is None:
             logger.warning(
                 "Prompt router parse failure | provider=%s model=%s category=%s",
@@ -868,29 +915,78 @@ async def route_request(
                 ROUTER_MODEL,
                 parse_status,
             )
-            return _fallback_with_reason(
-                user_request,
-                f"parse_failure:{parse_status}",
-                provider_path=provider_path,
-                model_name=ROUTER_MODEL,
-                api_key_source=router_key_source,
-                parse_status=parse_status,
-            )
+
+            if ROUTER_PARSE_RETRY_LIMIT > 0:
+                retry_attempted = True
+                retry_count = 1
+                try:
+                    repair_response = await routing_client.chat.completions.create(
+                        model=ROUTER_MODEL,
+                        max_completion_tokens=ROUTER_MAX_TOKENS,
+                        messages=[
+                            {
+                                "role": "system",
+                                "content": (
+                                    "You are a strict JSON repair assistant for CAD router output. "
+                                    "Return JSON only."
+                                ),
+                            },
+                            {
+                                "role": "user",
+                                "content": _build_router_json_repair_user_message(
+                                    user_request=user_request,
+                                    raw_router_text=response_text,
+                                    parse_status=parse_status,
+                                ),
+                            },
+                        ],
+                    )
+                    repair_text = _extract_routing_response_text(repair_response)
+                    repaired_result, repair_status = _safe_parse_router_response(repair_text)
+                    retry_parse_status = repair_status
+                    if repaired_result is not None:
+                        routing_result = repaired_result
+                        parse_status = f"retry_{repair_status}"
+                    else:
+                        parse_status = f"retry_failed:{repair_status}"
+                except Exception as retry_exc:
+                    logger.warning(
+                        "Prompt router repair retry failed | provider=%s model=%s error=%s",
+                        provider_path,
+                        ROUTER_MODEL,
+                        type(retry_exc).__name__,
+                    )
+                    retry_parse_status = f"retry_error:{type(retry_exc).__name__}"
+                    parse_status = retry_parse_status
+
+            if routing_result is None:
+                return _fallback_with_reason(
+                    user_request,
+                    f"parse_failure:{initial_parse_status}",
+                    provider_path=provider_path,
+                    model_name=ROUTER_MODEL,
+                    api_key_source=router_key_source,
+                    parse_status=parse_status,
+                    retry_attempted=retry_attempted,
+                    retry_count=retry_count,
+                    retry_parse_status=retry_parse_status,
+                    initial_parse_status=initial_parse_status,
+                )
+
         if parse_status == "repaired":
             logger.info(
                 "Prompt router applied bounded JSON repair | provider=%s model=%s",
                 provider_path,
                 ROUTER_MODEL,
             )
-        if parse_status in {"coerced_shape", "repaired_coerced_shape"}:
+        if parse_status in {"coerced_shape", "repaired_coerced_shape"} or parse_status.startswith("retry_"):
             logger.info(
-                "Prompt router coerced response shape | provider=%s model=%s status=%s",
+                "Prompt router coerced/retried response shape | provider=%s model=%s status=%s",
                 provider_path,
                 ROUTER_MODEL,
                 parse_status,
             )
 
-        # Validate result structure
         if "required" not in routing_result:
             routing_result["required"] = []
         if "optional" not in routing_result:
@@ -898,15 +994,12 @@ async def route_request(
         if "reasoning" not in routing_result:
             routing_result["reasoning"] = "No reasoning provided"
 
-        # Always ensure 'core' is included
         if "core" not in routing_result["required"]:
             routing_result["required"].insert(0, "core")
 
-        # Remove duplicates
         routing_result["required"] = list(dict.fromkeys(routing_result["required"]))
         routing_result["optional"] = list(dict.fromkeys(routing_result["optional"]))
 
-        # Add confidence estimate based on cluster count
         total_clusters = len(routing_result["required"]) + len(routing_result["optional"])
         if total_clusters <= 4:
             routing_result["confidence"] = "high"
@@ -920,6 +1013,10 @@ async def route_request(
         routing_result["router_model"] = ROUTER_MODEL
         routing_result["router_api_key_source"] = router_key_source
         routing_result["router_parse_status"] = parse_status
+        routing_result["router_retry_attempted"] = retry_attempted
+        routing_result["router_retry_count"] = retry_count
+        routing_result["router_retry_parse_status"] = retry_parse_status
+        routing_result["router_initial_parse_status"] = initial_parse_status
 
         logger.info(
             f"Routing complete: {len(routing_result['required'])} required, "
@@ -929,7 +1026,6 @@ async def route_request(
         logger.debug(f"Required: {routing_result['required']}")
         logger.debug(f"Optional: {routing_result['optional']}")
         logger.debug(f"Reasoning: {routing_result['reasoning']}")
-
         return routing_result
 
     except Exception as e:
@@ -947,6 +1043,10 @@ async def route_request(
             model_name=ROUTER_MODEL,
             api_key_source=_resolve_router_api_key_source(api_keys),
             parse_status=f"routing_error:{type(e).__name__}",
+            retry_attempted=False,
+            retry_count=0,
+            retry_parse_status="not_attempted",
+            initial_parse_status="not_attempted",
         )
 
 

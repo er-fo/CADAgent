@@ -372,10 +372,21 @@ def _load_templates() -> Dict[str, str]:
                         _auto_flipped_distance = True
                         extrude_feat = _do_extrude(_actual_distance)
                     except Exception as _exc2:
+                        _exc2_text = str(_exc2)
+                        if "No target body found to cut or intersect" in _exc2_text:
+                            raise RuntimeError(
+                                "extrude_profile failure_mode=no_intersection_after_direction_retry; "
+                                "operation={operation}; sketch_id={sketch_id}; profile_indices=%s; "
+                                "requested_distance=%s; retried_distance=%s; "
+                                "cause=Profile does not intersect any target body in either direction. "
+                                "action=Reposition sketch/profile to intersect solid or pick a different target body."
+                                % (_profile_indices, _requested_distance, _actual_distance)
+                            )
                         raise RuntimeError(
-                            "extrude_profile failed: %s. "
-                            "Also failed after flipping distance sign (requested=%s, retried=%s): %s"
-                            % (_exc_text, _requested_distance, _actual_distance, _exc2)
+                            "extrude_profile cut/intersect retry failed after direction flip; "
+                            "operation={operation}; sketch_id={sketch_id}; profile_indices=%s; "
+                            "requested_distance=%s; retried_distance=%s; first_error=%s; second_error=%s"
+                            % (_profile_indices, _requested_distance, _actual_distance, _exc_text, _exc2_text)
                         )
                 else:
                     raise
