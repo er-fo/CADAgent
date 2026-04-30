@@ -1,0 +1,247 @@
+name: Release CADAgent Add-in
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version, for example 1.0.6 or v1.0.6"
+        required: true
+        type: string
+      release_notes:
+        description: "Release notes shown on the GitHub Release"
+        required: false
+        type: string
+      prerelease:
+        description: "Mark the GitHub Release as a prerelease"
+        required: true
+        default: false
+        type: boolean
+      draft:
+        description: "Create the GitHub Release as a draft"
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-cadagent-addin-${{ inputs.version }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Package and publish
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_NOTES: ${{ inputs.release_notes }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Normalize and validate version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          RAW_VERSION="${{ inputs.version }}"
+          VERSION="${RAW_VERSION#v}"
+
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Version must use semantic format like 1.0.6 or v1.0.6." >&2
+            exit 1
+          fi
+
+          TAG="v${VERSION}"
+
+          if git ls-remote --exit-code --tags origin "refs/tags/${TAG}" >/dev/null 2>&1; then
+            echo "Tag ${TAG} already exists." >&2
+            exit 1
+          fi
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release ${TAG} already exists." >&2
+            exit 1
+          fi
+
+          {
+            echo "version=${VERSION}"
+            echo "tag=${TAG}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Check required add-in files
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          for platform in mac win; do
+            for path in \
+              "$platform/CADAgent/CADAgent.py" \
+              "$platform/CADAgent/CADAgent.manifest" \
+              "$platform/CADAgent/PackageContents.xml" \
+              "$platform/CADAgent/.env.cadagent"; do
+              test -f "$path" || {
+                echo "Missing required file: $path" >&2
+                exit 1
+              }
+            done
+          done
+
+      - name: Stage release bundles
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          rm -rf release-staging dist
+          mkdir -p release-staging/mac release-staging/win dist
+
+          cp -R mac/CADAgent release-staging/mac/CADAgent
+          cp -R win/CADAgent release-staging/win/CADAgent
+
+          find release-staging -name ".DS_Store" -delete
+          find release-staging -name "__pycache__" -type d -prune -exec rm -rf {} +
+          find release-staging \( -name "*.pyc" -o -name "*.pyo" \) -delete
+
+      - name: Stamp package metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          VERSION="${{ steps.version.outputs.version }}"
+
+          for platform in mac win; do
+            manifest="release-staging/${platform}/CADAgent/CADAgent.manifest"
+            tmp_manifest="${manifest}.tmp"
+            jq --arg version "$VERSION" '.version = $version' "$manifest" > "$tmp_manifest"
+            mv "$tmp_manifest" "$manifest"
+
+            package_xml="release-staging/${platform}/CADAgent/PackageContents.xml"
+            perl -0pi -e 's/AppVersion="[^"]+"/AppVersion="'"$VERSION"'"/g; s/Version="[^"]+"/Version="'"$VERSION"'"/g' "$package_xml"
+          done
+
+      - name: Block obvious private secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if grep -RInE \
+            '(SUPABASE_SERVICE_ROLE|SERVICE_ROLE_KEY|OPENAI_API_KEY|ANTHROPIC_API_KEY|AWS_SECRET_ACCESS_KEY|BEGIN (RSA |OPENSSH |EC |DSA )?PRIVATE KEY|ghp_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+|sk-[A-Za-z0-9]{20,})' \
+            release-staging; then
+            echo "Release staging contains a likely private secret. Aborting." >&2
+            exit 1
+          fi
+
+      - name: Build release zips
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          (
+            cd release-staging/mac
+            zip -qr ../../dist/CADAgent-macOS.zip CADAgent
+          )
+
+          (
+            cd release-staging/win
+            zip -qr ../../dist/CADAgent-Windows.zip CADAgent
+          )
+
+      - name: Verify zip contents
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          for archive in dist/CADAgent-macOS.zip dist/CADAgent-Windows.zip; do
+            contents_file="$(mktemp)"
+            unzip -Z1 "$archive" > "$contents_file"
+
+            grep -qx "CADAgent/CADAgent.py" "$contents_file"
+            grep -qx "CADAgent/CADAgent.manifest" "$contents_file"
+            grep -qx "CADAgent/PackageContents.xml" "$contents_file"
+            grep -qx "CADAgent/.env.cadagent" "$contents_file"
+
+            if grep -Eq '(^|/)__MACOSX/|\.DS_Store$|^mac/|^win/' "$contents_file"; then
+              echo "Archive has an invalid top-level or metadata entry: $archive" >&2
+              exit 1
+            fi
+
+            rm -f "$contents_file"
+          done
+
+      - name: Write release notes
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ -n "${RELEASE_NOTES//[[:space:]]/}" ]]; then
+            printf '%s\n' "$RELEASE_NOTES" > release-notes.md
+          else
+            cat > release-notes.md <<EOF
+          CADAgent ${{ steps.version.outputs.version }}
+
+          Converged macOS and Windows add-in assets into one release.
+
+          Assets:
+          - CADAgent-macOS.zip
+          - CADAgent-Windows.zip
+          EOF
+          fi
+
+      - name: Create GitHub Release
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          TAG="${{ steps.version.outputs.tag }}"
+          ARGS=(
+            release create "$TAG"
+            dist/CADAgent-macOS.zip
+            dist/CADAgent-Windows.zip
+            --target "$GITHUB_SHA"
+            --title "CADAgent ${{ steps.version.outputs.version }}"
+            --notes-file release-notes.md
+          )
+
+          if [[ "${{ inputs.prerelease }}" == "true" ]]; then
+            ARGS+=(--prerelease)
+          fi
+
+          if [[ "${{ inputs.draft }}" == "true" ]]; then
+            ARGS+=(--draft)
+          fi
+
+          gh "${ARGS[@]}"
+
+      - name: Verify release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          TAG="${{ steps.version.outputs.tag }}"
+
+          gh release view "$TAG" --json assets \
+            --jq '.assets[].name' | sort > uploaded-assets.txt
+
+          printf '%s\n' CADAgent-Windows.zip CADAgent-macOS.zip | sort > expected-assets.txt
+          diff -u expected-assets.txt uploaded-assets.txt
+
+          for asset in CADAgent-macOS.zip CADAgent-Windows.zip; do
+            curl -fsSLI "https://github.com/er-fo/CADAgent/releases/download/${TAG}/${asset}" >/dev/null
+            curl -fsSLI "https://github.com/er-fo/CADAgent/releases/latest/download/${asset}" >/dev/null
+          done
+
+      - name: Verify website uses stable latest links
+        if: ${{ inputs.draft == false }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          for page in "https://cadagent.co/" "https://cadagent.co/install/"; do
+            html="$(curl -fsSL "$page")"
+            grep -Fq "https://github.com/er-fo/CADAgent/releases/latest/download/CADAgent-Windows.zip" <<< "$html"
+            grep -Fq "https://github.com/er-fo/CADAgent/releases/latest/download/CADAgent-macOS.zip" <<< "$html"
+          done
