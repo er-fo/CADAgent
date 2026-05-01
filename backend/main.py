@@ -350,7 +350,9 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
     # In bypass mode, trust the session immediately with a dummy user/token.
     if AUTH_BYPASS:
         manager.set_user_id(session_id, "dev-bypass")
-        manager.set_user_token(session_id, "dev-bypass-token")
+        # Keep the usage-gateway token empty in local bypass mode. A non-empty
+        # token routes LLM calls through Supabase, which defeats auth bypass.
+        manager.set_user_token(session_id, None)
         manager.mark_authenticated(session_id, True)
 
     try:
@@ -474,7 +476,7 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
             elif message_type == "authenticate":
                 if AUTH_BYPASS:
                     manager.set_user_id(session_id, "dev-bypass")
-                    manager.set_user_token(session_id, "dev-bypass-token")
+                    manager.set_user_token(session_id, None)
                     manager.mark_authenticated(session_id, True)
                     await manager.send_message(session_id, {
                         "type": "authentication_ack",
