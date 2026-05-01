@@ -221,6 +221,9 @@ async def _launch_session_task(session_id: str, coro):
                 elif "no anthropic api key" in error_str or "no openai api key" in error_str or "no google api key" in error_str:
                     error_type = "api_key_missing"
                     message = "No API key is configured for the selected model. Open Settings -> API Keys and add one, then retry."
+                elif "managed bedrock provider is not configured" in error_str:
+                    error_type = "managed_provider_unavailable"
+                    message = "The free model service is temporarily unavailable. Please try again shortly."
                 elif "parsed_output" in error_str and "extra inputs are not permitted" in error_str:
                     error_type = "backend_payload_error"
                     message = "A backend message-format issue occurred. Please retry. If this persists, contact support."

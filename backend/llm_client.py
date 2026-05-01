@@ -15,7 +15,7 @@ import re
 import random
 from datetime import datetime, timezone
 from html import unescape
-from typing import Any, AsyncGenerator, Awaitable, Callable, Dict, List, Optional
+from typing import Any, AsyncGenerator, Awaitable, Callable, Dict, List, Optional, Tuple
 from anthropic import AsyncAnthropic
 from openai import AsyncOpenAI
 import markdown
@@ -74,6 +74,7 @@ if not _reasoning_logger.handlers:
 # Lightweight client caches keyed by API key to support per-session BYOK.
 _anthropic_clients: Dict[str, AsyncAnthropic] = {}
 _openai_clients: Dict[str, AsyncOpenAI] = {}
+_openai_compatible_clients: Dict[Tuple[str, str], AsyncOpenAI] = {}
 _gemini_clients: Dict[str, Any] = {}
 
 
@@ -113,6 +114,25 @@ def _get_openai_client(api_keys: Optional[Dict[str, str]] = None) -> AsyncOpenAI
     return client
 
 
+def _get_managed_bedrock_client() -> AsyncOpenAI:
+    api_key = os.environ.get("AWS_BEARER_TOKEN_BEDROCK")
+    if not api_key or not api_key.strip():
+        raise ValueError("Managed Bedrock provider is not configured: missing AWS_BEARER_TOKEN_BEDROCK")
+
+    base_url = (
+        os.environ.get("BEDROCK_OPENAI_BASE_URL")
+        or os.environ.get("ROUTER_BEDROCK_BASE_URL")
+        or "https://bedrock-mantle.us-east-1.api.aws/v1"
+    ).strip()
+
+    cache_key = (api_key.strip(), base_url)
+    client = _openai_compatible_clients.get(cache_key)
+    if client is None:
+        client = AsyncOpenAI(api_key=api_key.strip(), base_url=base_url)
+        _openai_compatible_clients[cache_key] = client
+    return client
+
+
 def _get_gemini_async_client(api_keys: Optional[Dict[str, str]] = None):
     if genai is None:
         return None
@@ -135,6 +155,9 @@ MODEL_GPT_54 = "gpt-5.4"
 MODEL_GPT_5_MINI = "gpt-5-mini"
 MODEL_DEFAULT = MODEL_CLAUDE_SONNET_45
 MODEL_GEMINI_3_PRO_PREVIEW = "gemini-3-pro-preview"
+MODEL_MINIMAX_M25 = "minimax.minimax-m2.5"
+MODEL_KIMI_K25 = "moonshotai.kimi-k2.5"
+MANAGED_BEDROCK_MODELS = {MODEL_MINIMAX_M25, MODEL_KIMI_K25}
 
 # Map friendly names to API model identifiers
 MODEL_MAP = {
@@ -160,6 +183,12 @@ MODEL_MAP = {
     "gemini-3": MODEL_GEMINI_3_PRO_PREVIEW,
     "gemini3": MODEL_GEMINI_3_PRO_PREVIEW,
     "gemini": MODEL_GEMINI_3_PRO_PREVIEW,
+    "minimax.minimax-m2.5": MODEL_MINIMAX_M25,
+    "minimax-m2.5": MODEL_MINIMAX_M25,
+    "minimax m2.5": MODEL_MINIMAX_M25,
+    "moonshotai.kimi-k2.5": MODEL_KIMI_K25,
+    "kimi-k2.5": MODEL_KIMI_K25,
+    "kimi k2.5": MODEL_KIMI_K25,
 }
 
 # OpenAI Responses API max_output_tokens based on reasoning effort
@@ -317,6 +346,36 @@ def normalize_model_name(model_name: Optional[str]) -> str:
 
     normalized = model_name.lower().strip()
     return MODEL_MAP.get(normalized, MODEL_DEFAULT)
+
+
+def _is_managed_bedrock_model(model: str) -> bool:
+    return model in MANAGED_BEDROCK_MODELS
+
+
+def _is_minimax_model(model: str) -> bool:
+    return model == MODEL_MINIMAX_M25
+
+
+def _gateway_provider_for_model(model: str) -> str:
+    if _is_managed_bedrock_model(model):
+        return "bedrock"
+    if model.startswith("gpt-") or model == MODEL_GPT_5:
+        return "openai"
+    if model.startswith("gemini"):
+        return "google"
+    return "anthropic"
+
+
+def _should_bypass_supabase_gateway() -> bool:
+    def _env_flag(name: str) -> bool:
+        return os.environ.get(name, "").lower() in ("1", "true", "yes", "on")
+
+    return (
+        _env_flag("BYPASS_SUPABASE_GATEWAY")
+        or _env_flag("CADAGENT_AUTH_BYPASS")
+        or _env_flag("AUTH_BYPASS")
+        or _env_flag("CADAGENT_DEV_MODE")
+    )
 
 # Tool schema guardrails to avoid provider 400s
 _FORBIDDEN_TOP_LEVEL_KEYS = {"oneOf", "anyOf", "allOf", "enum", "not"}
@@ -2416,6 +2475,7 @@ async def generate_plan(
     model_name: Optional[str] = None,
     reasoning_effort: str = "high",
     api_keys: Optional[Dict[str, str]] = None,
+    user_token: Optional[str] = None,
 ) -> AsyncGenerator[Dict[str, Any], None]:
     """
     Generate a CAD model plan using LLM API with streaming.
@@ -2453,7 +2513,74 @@ async def generate_plan(
     ]
 
     try:
-        if model == MODEL_GPT_5 or model.startswith("gpt-"):
+        if _is_managed_bedrock_model(model) and user_token is not None and not _should_bypass_supabase_gateway():
+            from .supabase_client import SupabaseAPIGateway
+
+            _emit_llm_request_payload(
+                provider="managed_bedrock_gateway",
+                model=model,
+                system_prompt=PLANNING_PROMPT,
+                messages=messages,
+                max_tokens=max_tokens,
+                reasoning_effort=None,
+            )
+
+            gateway = SupabaseAPIGateway(user_token=user_token, timeout=120.0)
+            response_data = await gateway.call_llm(
+                provider="bedrock",
+                model=model,
+                messages=messages,
+                max_tokens=max_tokens,
+                system=PLANNING_PROMPT,
+            )
+            result = response_data.get("result") or {}
+            streamed_any_content = False
+            for block in result.get("content", []) or []:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    text = block.get("text", "")
+                    if text and text.strip():
+                        streamed_any_content = True
+                        yield {"type": "text", "content": text, "raw_text": text}
+
+            if not streamed_any_content:
+                logger.warning("Managed Bedrock gateway plan generation returned no text content.")
+
+            logger.info("Plan generation complete (managed Bedrock gateway)")
+
+        elif _is_managed_bedrock_model(model):
+            bedrock_client = _get_managed_bedrock_client()
+            bedrock_messages = _convert_messages_to_openai_chat_format(PLANNING_PROMPT, messages)
+
+            _emit_llm_request_payload(
+                provider="managed_bedrock",
+                model=model,
+                system_prompt=PLANNING_PROMPT,
+                messages=bedrock_messages,
+                max_tokens=max_tokens,
+                reasoning_effort=None,
+            )
+
+            response = await bedrock_client.chat.completions.create(
+                model=model,
+                messages=bedrock_messages,
+                max_tokens=max_tokens,
+            )
+            _log_stream_payload("managed_bedrock", response, model)
+            result = _convert_openai_chat_response_to_anthropic_format(response)
+            streamed_any_content = False
+            for block in result.get("content", []) or []:
+                if block.get("type") == "text":
+                    text = block.get("text", "")
+                    if text and text.strip():
+                        streamed_any_content = True
+                        yield {"type": "text", "content": text, "raw_text": text}
+
+            if not streamed_any_content:
+                logger.warning("Managed Bedrock plan generation returned no text content.")
+
+            logger.info("Plan generation complete (managed Bedrock)")
+
+        elif model == MODEL_GPT_5 or model.startswith("gpt-"):
             # OpenAI Responses API streaming - enables reasoning summary streaming
             input_prompt = f"{PLANNING_PROMPT}\n\nPlease create a detailed step-by-step plan for this CAD model:\n\n{user_request}"
 
@@ -2807,6 +2934,158 @@ def _convert_tools_to_openai_format(tools: List[dict]) -> List[dict]:
             "parameters": tool["input_schema"]
         })
     return openai_tools
+
+
+def _convert_tools_to_openai_chat_format(tools: List[dict]) -> List[dict]:
+    """Convert Anthropic tool schema to OpenAI-compatible Chat Completions tools."""
+    chat_tools = []
+    for tool in tools:
+        chat_tools.append({
+            "type": "function",
+            "function": {
+                "name": tool["name"],
+                "description": tool["description"],
+                "parameters": tool["input_schema"],
+            },
+        })
+    return chat_tools
+
+
+def _convert_messages_to_openai_chat_format(system_prompt: str, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Convert the Anthropic-style conversation history to OpenAI-compatible chat messages."""
+    chat_messages: List[Dict[str, Any]] = []
+    if system_prompt:
+        chat_messages.append({"role": "system", "content": system_prompt})
+
+    for msg in messages:
+        role = msg.get("role", "user")
+        content = msg.get("content", "")
+
+        if isinstance(content, str):
+            chat_messages.append({"role": role, "content": content})
+            continue
+
+        if not isinstance(content, list):
+            chat_messages.append({"role": role, "content": str(content)})
+            continue
+
+        text_parts: List[str] = []
+        tool_calls_payload: List[Dict[str, Any]] = []
+        for block in content:
+            if not isinstance(block, dict):
+                text_parts.append(str(block))
+                continue
+
+            block_type = block.get("type")
+            if block_type == "text":
+                text_parts.append(str(block.get("text", "")))
+            elif block_type == "image":
+                raise ValueError("Image attachments are not supported by CADAgent free managed models yet")
+            elif block_type == "tool_use":
+                tool_input = block.get("input") or {}
+                tool_calls_payload.append({
+                    "id": block.get("id") or f"call_{len(chat_messages)}_{len(tool_calls_payload)}",
+                    "type": "function",
+                    "function": {
+                        "name": block.get("name", ""),
+                        "arguments": json.dumps(tool_input),
+                    },
+                })
+            elif block_type == "tool_result":
+                result_content = block.get("content", "")
+                if isinstance(result_content, list):
+                    result_text = "\n".join(
+                        str(item.get("text", item)) if isinstance(item, dict) else str(item)
+                        for item in result_content
+                        if not (isinstance(item, dict) and item.get("type") == "image")
+                    )
+                else:
+                    result_text = str(result_content)
+                chat_messages.append({
+                    "role": "tool",
+                    "tool_call_id": block.get("tool_use_id", ""),
+                    "content": result_text,
+                })
+
+        assistant_text = "\n".join(part for part in text_parts if part).strip()
+        if tool_calls_payload:
+            chat_messages.append({
+                "role": "assistant",
+                "content": assistant_text or None,
+                "tool_calls": tool_calls_payload,
+            })
+        elif text_parts:
+            chat_messages.append({"role": role, "content": assistant_text})
+
+    return chat_messages
+
+
+def _extract_openai_chat_reasoning(message: Any) -> str:
+    """Return provider-specific reasoning text from an OpenAI-compatible message."""
+    reasoning_parts: List[str] = []
+    for attr in ("reasoning", "reasoning_content", "thinking"):
+        value = getattr(message, attr, None)
+        if isinstance(value, str) and value.strip():
+            reasoning_parts.append(value.strip())
+
+    reasoning_details = getattr(message, "reasoning_details", None)
+    if isinstance(reasoning_details, list):
+        for item in reasoning_details:
+            text = None
+            if isinstance(item, dict):
+                text = item.get("text") or item.get("content")
+            else:
+                text = getattr(item, "text", None) or getattr(item, "content", None)
+            if isinstance(text, str) and text.strip():
+                reasoning_parts.append(text.strip())
+
+    return "\n\n".join(reasoning_parts)
+
+
+def _convert_openai_chat_response_to_anthropic_format(response: Any) -> dict:
+    """Convert OpenAI-compatible Chat Completions output to Anthropic-compatible content blocks."""
+    content: List[Dict[str, Any]] = []
+    stop_reason = "end_turn"
+
+    choice = response.choices[0] if getattr(response, "choices", None) else None
+    message = getattr(choice, "message", None) if choice else None
+    if message is None:
+        return {"stop_reason": stop_reason, "content": content, "usage": {"input_tokens": 0, "output_tokens": 0}}
+
+    text = getattr(message, "content", None)
+    if text:
+        content.append({"type": "text", "text": text})
+
+    tool_calls = getattr(message, "tool_calls", None) or []
+    if tool_calls:
+        stop_reason = "tool_use"
+        for tool_call in tool_calls:
+            function = getattr(tool_call, "function", None)
+            arguments_raw = getattr(function, "arguments", "") if function else ""
+            try:
+                arguments = json.loads(arguments_raw) if isinstance(arguments_raw, str) and arguments_raw else {}
+            except (json.JSONDecodeError, ValueError):
+                logger.error("Failed to parse OpenAI-compatible tool arguments: %r", arguments_raw)
+                arguments = {}
+            if not isinstance(arguments, dict):
+                arguments = {}
+
+            content.append({
+                "type": "tool_use",
+                "id": getattr(tool_call, "id", ""),
+                "name": getattr(function, "name", "") if function else "",
+                "input": arguments,
+            })
+
+    usage = getattr(response, "usage", None)
+    return {
+        "stop_reason": stop_reason,
+        "content": content,
+        "usage": {
+            "input_tokens": getattr(usage, "prompt_tokens", 0) if usage else 0,
+            "output_tokens": getattr(usage, "completion_tokens", 0) if usage else 0,
+        },
+    }
 
 
 def _convert_openai_response_to_anthropic_format(response: Any) -> dict:
@@ -3240,19 +3519,15 @@ async def call_claude_with_tools(
     # Route through Supabase API Gateway for usage tracking if user_token is provided.
     # In local development, CADAGENT_AUTH_BYPASS intentionally disables both auth
     # enforcement and gateway quota routing so BYOK/direct provider calls still work.
-    def _env_flag(name: str) -> bool:
-        return os.environ.get(name, "").lower() in ("1", "true", "yes", "on")
-
-    bypass_gateway = (
-        _env_flag("BYPASS_SUPABASE_GATEWAY")
-        or _env_flag("CADAGENT_AUTH_BYPASS")
-        or _env_flag("AUTH_BYPASS")
-        or _env_flag("CADAGENT_DEV_MODE")
-    )
+    bypass_gateway = _should_bypass_supabase_gateway()
     if user_token is not None and bypass_gateway:
         logger.info("BYPASS_SUPABASE_GATEWAY enabled – sending Anthropics calls directly (no quota tracking)")
 
-    if user_token is not None and not bypass_gateway:
+    use_supabase_gateway = user_token is not None and not bypass_gateway and _is_managed_bedrock_model(model)
+    if user_token is not None and not bypass_gateway and not _is_managed_bedrock_model(model):
+        logger.info("Using direct provider path for non-managed model %s; Supabase gateway is reserved for managed free-tier models", model)
+
+    if use_supabase_gateway:
         logger.info(f"Routing LLM call through Supabase API Gateway with usage tracking (model={model})")
         try:
             from .supabase_client import SupabaseAPIGateway
@@ -3263,11 +3538,7 @@ async def call_claude_with_tools(
                 seconds_left = int((exp_dt - now_dt).total_seconds())
                 logger.info(f"[auth-debug] user_token exp={exp_dt.isoformat()} (in {seconds_left}s)")
 
-            # Determine provider based on model
-            if model.startswith("gpt-") or model == MODEL_GPT_5:
-                provider = "openai"
-            else:
-                provider = "anthropic"
+            provider = _gateway_provider_for_model(model)
 
             # Create gateway client
             gateway = SupabaseAPIGateway(user_token=user_token, timeout=120.0)
@@ -3283,6 +3554,7 @@ async def call_claude_with_tools(
                 # dedicated system field for Anthropic.
                 system=system_prompt,
                 tools=safe_tools,
+                reasoning_effort=reasoning_effort,
             )
 
             # Extract result from gateway response
@@ -3291,6 +3563,12 @@ async def call_claude_with_tools(
 
             if result is None:
                 raise ValueError("No result returned from Supabase API Gateway")
+
+            reasoning_text = response_data.get("reasoning")
+            if not reasoning_text and isinstance(result, dict):
+                reasoning_text = result.get("reasoning")
+            if reasoning_callback and _is_minimax_model(model) and reasoning_effort and isinstance(reasoning_text, str) and reasoning_text.strip():
+                await reasoning_callback(reasoning_text.strip())
 
             logger.info(f"Supabase API Gateway call successful: cost_cents={usage_data.get('cost_cents')}, "
                        f"remaining_cents={usage_data.get('remaining_cents')}")
@@ -3342,6 +3620,58 @@ async def call_claude_with_tools(
     for attempt in range(max_retries):
         try:
             logger.info(f"Calling LLM API with {model} (attempt {attempt + 1}/{max_retries}, reasoning_effort={reasoning_effort})")
+
+            if _is_managed_bedrock_model(model):
+                bedrock_client = _get_managed_bedrock_client()
+                bedrock_tools = _convert_tools_to_openai_chat_format(safe_tools)
+                bedrock_messages = _convert_messages_to_openai_chat_format(system_prompt, messages)
+
+                _emit_llm_request_payload(
+                    provider="managed_bedrock",
+                    model=model,
+                    system_prompt=system_prompt,
+                    messages=bedrock_messages,
+                    max_tokens=max_tokens,
+                    reasoning_effort=None,
+                    tools=bedrock_tools,
+                )
+
+                create_kwargs: Dict[str, Any] = {
+                    "model": model,
+                    "messages": bedrock_messages,
+                    "max_tokens": max_tokens,
+                }
+                if bedrock_tools:
+                    create_kwargs["tools"] = bedrock_tools
+                    create_kwargs["tool_choice"] = "auto"
+                if _is_minimax_model(model):
+                    create_kwargs["extra_body"] = {"reasoning_split": True}
+
+                response = await bedrock_client.chat.completions.create(**create_kwargs)
+                _log_stream_payload("managed_bedrock", response, model)
+                if reasoning_callback and _is_minimax_model(model) and reasoning_effort:
+                    choice = response.choices[0] if getattr(response, "choices", None) else None
+                    message = getattr(choice, "message", None) if choice else None
+                    reasoning_text = _extract_openai_chat_reasoning(message)
+                    if reasoning_text:
+                        await reasoning_callback(reasoning_text)
+                result = _convert_openai_chat_response_to_anthropic_format(response)
+
+                if session_path and api_call_counter and session_context:
+                    try:
+                        from .session_logger import log_api_call
+                        log_api_call(
+                            session_path=session_path,
+                            iteration=iteration or 0,
+                            api_call_num=api_call_counter['count'],
+                            llm_response=response,
+                            context=session_context
+                        )
+                        api_call_counter['count'] += 1
+                    except Exception as e:
+                        logger.warning(f"Failed to log managed Bedrock API call: {e}")
+
+                return _sanitize_thread_tool_uses_in_result(result)
 
             if model == MODEL_GPT_5 or model.startswith("gpt-"):
                 openai_client = _get_openai_client(api_keys)
