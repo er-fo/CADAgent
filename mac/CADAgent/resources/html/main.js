@@ -94,7 +94,7 @@ let state = {
     loginStage: 'cta',
     testingMode: false,
     testingEmail: '',
-    attachedImage: null  // {data: base64string, format: 'png'|'jpg'}
+    attachments: []  // [{id, name, kind, mime_type, size, data, format}]
 };
 
 let otpFocused = false;
@@ -291,12 +291,11 @@ const elements = {
     apiKeysFooter: document.getElementById('apiKeysFooter'),
     closeApiKeysBtn: document.getElementById('closeApiKeysBtn'),
     saveApiKeysBtn: document.getElementById('saveApiKeysBtn'),
-    // Image attachment elements
+    // Attachment elements
     attachImageBtn: document.getElementById('attachImageBtn'),
     imageInput: document.getElementById('imageInput'),
-    imagePreview: document.getElementById('imagePreview'),
-    previewImage: document.getElementById('previewImage'),
-    removeImageBtn: document.getElementById('removeImageBtn'),
+    attachmentPreview: document.getElementById('attachmentPreview'),
+    attachmentList: document.getElementById('attachmentList'),
     // Build Plan Bar elements
     buildPlanBar: document.getElementById('buildPlanBar'),
     buildPlanBarToggle: document.getElementById('buildPlanBarToggle'),
@@ -415,8 +414,19 @@ function setupEventListeners() {
     if (elements.imageInput) {
         elements.imageInput.addEventListener('change', handleImageSelected);
     }
-    if (elements.removeImageBtn) {
-        elements.removeImageBtn.addEventListener('click', handleRemoveImage);
+    if (elements.attachmentList) {
+        elements.attachmentList.addEventListener('click', (event) => {
+            const target = event.target;
+            if (!target || typeof target.closest !== 'function') {
+                return;
+            }
+            const removeBtn = target.closest('.remove-attachment-btn');
+            if (!removeBtn) {
+                return;
+            }
+            event.preventDefault();
+            handleRemoveAttachment(removeBtn.getAttribute('data-attachment-id'));
+        });
     }
 
     // Build plan bar toggle
@@ -517,8 +527,8 @@ function setupEventListeners() {
 
     elements.cadRequest.addEventListener('input', () => {
         if (!state.processing) {
-            // Allow sending if there's text OR an attached image
-            const hasContent = elements.cadRequest.value.trim() || state.attachedImage;
+            // Allow sending if there's text OR attachments
+            const hasContent = elements.cadRequest.value.trim() || hasAttachments();
             elements.executeBtn.disabled = !hasContent || !state.connected;
         }
     });
@@ -750,6 +760,32 @@ function setupChatInputAutoResize(textarea) {
 /**
  * Handle execute button click
  */
+function hasAttachments() {
+    return Array.isArray(state.attachments) && state.attachments.length > 0;
+}
+
+function getImageAttachments() {
+    if (!Array.isArray(state.attachments)) {
+        return [];
+    }
+    return state.attachments.filter((attachment) => attachment && attachment.kind === 'image');
+}
+
+function summarizeAttachmentsForMessage() {
+    if (!hasAttachments()) {
+        return '';
+    }
+    const count = state.attachments.length;
+    const imageCount = getImageAttachments().length;
+    if (count === imageCount) {
+        return count === 1 ? '[image attached]' : `[${count} images attached]`;
+    }
+    if (imageCount === 0) {
+        return count === 1 ? '[file attached]' : `[${count} files attached]`;
+    }
+    return `[${count} attachments]`;
+}
+
 function handleExecute() {
     const request = elements.cadRequest.value.trim();
     const planningMode = isPlanningModeActive();
@@ -760,8 +796,8 @@ function handleExecute() {
     // Reset cancel latch for the new request
     state.cancelRequested = false;
 
-    // Allow image-only requests
-    if ((!request && !state.attachedImage) || !isDocConnected()) {
+    // Allow attachment-only requests
+    if ((!request && !hasAttachments()) || !isDocConnected()) {
         return;
     }
 
@@ -771,7 +807,7 @@ function handleExecute() {
         return;
     }
 
-    if (state.attachedImage && !state.apiKeyStatus.openai) {
+    if (getImageAttachments().length > 0 && !state.apiKeyStatus.openai) {
         addLog('error', buildMissingApiKeyMessage('openai'), { scope: 'global' });
         return;
     }
@@ -789,9 +825,10 @@ function handleExecute() {
 
     // Keep user message as chat bubble (right side) - must come BEFORE run log
     // Store requestId for checkpoint matching
-    const displayMessage = state.attachedImage && !request 
-        ? '[Sketch attached]' 
-        : (state.attachedImage ? `${request} [+ sketch]` : request);
+    const attachmentSummary = summarizeAttachmentsForMessage();
+    const displayMessage = attachmentSummary && !request
+        ? attachmentSummary
+        : (attachmentSummary ? `${request} ${attachmentSummary}` : request);
     appendMessage('user', displayMessage, { sender: 'You', requestId: requestId });
 
     if (!planningMode) {
@@ -816,14 +853,17 @@ function handleExecute() {
         request_id: requestId
     };
     
-    // Add image data if attached
-    if (state.attachedImage) {
-        payload.image_data = state.attachedImage.data;
-        payload.image_format = state.attachedImage.format;
-        console.log('[CADAgent] Including image in request:', state.attachedImage.format);
-        
-        // Clear attached image after sending
-        handleRemoveImage();
+    // Add attachments. Keep legacy image_data/image_format for the first image.
+    if (hasAttachments()) {
+        payload.attachments = state.attachments.map((attachment) => ({ ...attachment }));
+        const firstImage = getImageAttachments()[0];
+        if (firstImage) {
+            payload.image_data = firstImage.data;
+            payload.image_format = firstImage.format || 'png';
+            console.log('[CADAgent] Including image in request:', payload.image_format);
+        }
+
+        clearAttachments();
     }
     
     // Send to Python add-in
@@ -846,105 +886,182 @@ function handleExecute() {
  * Handle attach image button click
  */
 function handleAttachImage() {
-    if (!state.apiKeyStatus.openai) {
-        addLog('warning', buildMissingApiKeyMessage('openai'), { scope: 'global' });
-        return;
-    }
-
     if (elements.imageInput) {
         elements.imageInput.click();
     }
 }
 
 /**
- * Handle image file selection
+ * Handle file selection.
  */
 function handleImageSelected(event) {
-    if (!state.apiKeyStatus.openai) {
-        addLog('warning', buildMissingApiKeyMessage('openai'), { scope: 'global' });
-        if (elements.imageInput) {
-            elements.imageInput.value = '';
-        }
-        return;
-    }
+    const files = Array.from(event.target.files || []);
+    if (!files.length) return;
 
-    const file = event.target.files[0];
-    if (!file) return;
-    
-    // Validate file type
-    if (!file.type.match(/^image\/(png|jpeg|jpg)$/)) {
-        addLog('error', 'Please select a PNG or JPG image', { scope: 'global' });
-        return;
-    }
-    
-    // Validate file size (max 10MB)
-    const maxSize = 10 * 1024 * 1024; // 10MB
-    if (file.size > maxSize) {
-        addLog('error', 'Image too large. Maximum size is 10MB', { scope: 'global' });
-        return;
-    }
-    
-    // Read and encode image
-    const reader = new FileReader();
-    reader.onload = (e) => {
-        const base64data = e.target.result;
-        
-        // Extract base64 string (remove "data:image/png;base64," prefix)
-        const base64 = base64data.split(',')[1];
-        const format = file.type.split('/')[1]; // 'png' or 'jpeg'
-        
-        // Store in state
-        state.attachedImage = {
-            data: base64,
-            format: format
+    let pendingAttachmentCount = 0;
+    files.forEach((file) => {
+        const validation = validateAttachmentFile(file, pendingAttachmentCount);
+        if (!validation.valid) {
+            addLog('error', validation.error, { scope: 'global' });
+            return;
+        }
+        pendingAttachmentCount += 1;
+
+        const reader = new FileReader();
+        reader.onload = (e) => {
+            const dataUrl = String(e.target.result || '');
+            const base64 = dataUrl.includes(',') ? dataUrl.split(',')[1] : '';
+            if (!base64) {
+                addLog('error', `Failed to read ${file.name}`, { scope: 'global' });
+                return;
+            }
+
+            const attachment = {
+                id: generateId('att'),
+                name: file.name,
+                kind: validation.kind,
+                mime_type: file.type || validation.mimeType,
+                size: file.size,
+                data: base64
+            };
+            if (validation.kind === 'image') {
+                attachment.format = validation.format;
+            }
+
+            state.attachments.push(attachment);
+            renderAttachmentPreview();
+            updateExecuteButtonState();
+            addLog('success', `Attached: ${file.name}`, { scope: 'global' });
         };
-        
-        // Show preview
-        if (elements.previewImage && elements.imagePreview) {
-            elements.previewImage.src = base64data;
-            elements.imagePreview.classList.remove('hidden');
-        }
-        
-        // Enable execute button if connected
-        if (isDocConnected() && elements.executeBtn) {
-            elements.executeBtn.disabled = false;
-        }
-        
-        addLog('success', `Sketch attached: ${file.name}`, { scope: 'global' });
-        console.log('[CADAgent] Image attached:', {
-            name: file.name,
-            size: file.size,
-            format: format
-        });
-    };
-    
-    reader.onerror = () => {
-        addLog('error', 'Failed to read image file', { scope: 'global' });
-    };
-    
-    reader.readAsDataURL(file);
+
+        reader.onerror = () => {
+            addLog('error', `Failed to read ${file.name}`, { scope: 'global' });
+        };
+
+        reader.readAsDataURL(file);
+    });
+
+    if (elements.imageInput) {
+        elements.imageInput.value = '';
+    }
 }
 
-/**
- * Handle remove image button click
- */
-function handleRemoveImage() {
-    state.attachedImage = null;
-    
-    if (elements.imagePreview) {
-        elements.imagePreview.classList.add('hidden');
+function validateAttachmentFile(file, pendingAttachmentCount = 0) {
+    const name = file.name || 'attachment';
+    const lowerName = name.toLowerCase();
+    const mimeType = (file.type || '').toLowerCase();
+    const extension = lowerName.includes('.') ? lowerName.slice(lowerName.lastIndexOf('.')) : '';
+    const maxAttachments = 8;
+
+    if (state.attachments.length + pendingAttachmentCount >= maxAttachments) {
+        return { valid: false, error: `Attachment limit reached (${maxAttachments}).` };
     }
-    if (elements.previewImage) {
-        elements.previewImage.src = '';
+
+    if (mimeType.match(/^image\/(png|jpeg|jpg)$/)) {
+        if (!state.apiKeyStatus.openai) {
+            return { valid: false, error: buildMissingApiKeyMessage('openai') };
+        }
+        if (file.size > 10 * 1024 * 1024) {
+            return { valid: false, error: 'Image too large. Maximum size is 10MB.' };
+        }
+        const format = mimeType.split('/')[1] === 'jpg' ? 'jpeg' : mimeType.split('/')[1];
+        return { valid: true, kind: 'image', mimeType, format };
     }
+
+    const textExtensions = new Set(['.txt', '.md', '.markdown', '.csv', '.json']);
+    const textMimeTypes = new Set(['text/plain', 'text/markdown', 'text/csv', 'application/json']);
+    if (textMimeTypes.has(mimeType) || textExtensions.has(extension)) {
+        if (file.size > 2 * 1024 * 1024) {
+            return { valid: false, error: 'Text attachment too large. Maximum size is 2MB.' };
+        }
+        return { valid: true, kind: 'text', mimeType: mimeType || 'text/plain' };
+    }
+
+    if (mimeType === 'application/pdf' || extension === '.pdf') {
+        if (file.size > 10 * 1024 * 1024) {
+            return { valid: false, error: 'PDF too large. Maximum size is 10MB.' };
+        }
+        return { valid: true, kind: 'pdf', mimeType: 'application/pdf' };
+    }
+
+    const docxMimeType = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+    if (mimeType === docxMimeType || extension === '.docx') {
+        if (file.size > 10 * 1024 * 1024) {
+            return { valid: false, error: 'DOCX too large. Maximum size is 10MB.' };
+        }
+        return { valid: true, kind: 'docx', mimeType: docxMimeType };
+    }
+
+    return {
+        valid: false,
+        error: 'Unsupported file type. Attach PNG/JPG images, PDF, DOCX, TXT, Markdown, CSV, or JSON.'
+    };
+}
+
+function renderAttachmentPreview() {
+    if (!elements.attachmentPreview || !elements.attachmentList) {
+        return;
+    }
+
+    elements.attachmentList.innerHTML = '';
+    if (!hasAttachments()) {
+        elements.attachmentPreview.classList.add('hidden');
+        return;
+    }
+
+    state.attachments.forEach((attachment) => {
+        const item = document.createElement('div');
+        item.classList.add('attachment-item');
+
+        if (attachment.kind === 'image') {
+            const image = document.createElement('img');
+            image.classList.add('attachment-thumb');
+            image.alt = attachment.name;
+            image.src = `data:${attachment.mime_type || 'image/png'};base64,${attachment.data}`;
+            item.appendChild(image);
+        } else {
+            const icon = document.createElement('span');
+            icon.classList.add('attachment-file-icon');
+            icon.textContent = attachment.kind === 'pdf' ? 'PDF' : (attachment.kind === 'docx' ? 'DOC' : 'TXT');
+            item.appendChild(icon);
+        }
+
+        const label = document.createElement('span');
+        label.classList.add('attachment-name');
+        label.textContent = attachment.name;
+        label.setAttribute('title', attachment.name);
+        item.appendChild(label);
+
+        const remove = document.createElement('button');
+        remove.type = 'button';
+        remove.classList.add('remove-attachment-btn');
+        remove.setAttribute('data-attachment-id', attachment.id);
+        remove.setAttribute('aria-label', `Remove ${attachment.name}`);
+        remove.textContent = 'x';
+        item.appendChild(remove);
+
+        elements.attachmentList.appendChild(item);
+    });
+
+    elements.attachmentPreview.classList.remove('hidden');
+}
+
+function handleRemoveAttachment(attachmentId) {
+    if (!attachmentId) {
+        return;
+    }
+    state.attachments = state.attachments.filter((attachment) => attachment.id !== attachmentId);
+    renderAttachmentPreview();
+    updateExecuteButtonState();
+}
+
+function clearAttachments() {
+    state.attachments = [];
+    renderAttachmentPreview();
     if (elements.imageInput) {
-        elements.imageInput.value = ''; // Clear file input
+        elements.imageInput.value = '';
     }
-    
-    // Update execute button state
-    if (elements.executeBtn && elements.cadRequest) {
-        elements.executeBtn.disabled = !isDocConnected() || !elements.cadRequest.value.trim();
-    }
+    updateExecuteButtonState();
 }
 
 /**
@@ -990,7 +1107,8 @@ function updateExecuteButtonState() {
         elements.executeBtn.classList.remove('cancel-mode');
         elements.executeBtn.setAttribute('aria-label', 'Send');
         const connected = isDocConnected();
-        elements.executeBtn.disabled = !connected || !elements.cadRequest.value.trim();
+        const hasContent = elements.cadRequest.value.trim() || hasAttachments();
+        elements.executeBtn.disabled = !connected || !hasContent;
         sendIconUse.setAttribute('href', '#icon-send');
     }
 
@@ -1019,6 +1137,19 @@ function updateRevertButtonStates() {
             btn.disabled = false;
             btn.classList.remove('disabled');
             btn.setAttribute('title', 'Revert timeline to this state');
+        }
+    });
+
+    const resumeButtons = elements.chatMessages.querySelectorAll('.resume-operation-btn');
+    resumeButtons.forEach(btn => {
+        if (state.processing) {
+            btn.disabled = true;
+            btn.classList.add('disabled');
+            btn.setAttribute('title', 'Cannot resume during execution');
+        } else {
+            btn.disabled = false;
+            btn.classList.remove('disabled');
+            btn.setAttribute('title', 'Resume from here');
         }
     });
 }
@@ -1668,6 +1799,37 @@ function renderMessageFromData(item) {
     appendMessage(item.role, item.text, opts);
 }
 
+function getOperationCheckpointId(entry) {
+    if (!entry || !entry.operation_checkpoint) {
+        return null;
+    }
+    return entry.operation_checkpoint.checkpoint_id || entry.operation_checkpoint.operation_checkpoint_id || null;
+}
+
+function appendResumeButton(bodyEl, entry, itemEl) {
+    const checkpointId = getOperationCheckpointId(entry);
+    if (!checkpointId) {
+        return;
+    }
+
+    itemEl.setAttribute('data-operation-checkpoint-id', checkpointId);
+    itemEl.__operationCheckpoint = entry.operation_checkpoint;
+
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.classList.add('resume-operation-btn');
+    button.setAttribute('data-operation-checkpoint-id', checkpointId);
+    button.setAttribute('title', 'Resume from here');
+    button.setAttribute('aria-label', 'Resume from this operation');
+    button.textContent = 'Resume';
+    button.addEventListener('click', (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        handleResumeFromOperation(checkpointId);
+    });
+    bodyEl.appendChild(button);
+}
+
 function createRunEntryElement(entry) {
     const itemEl = document.createElement('li');
     itemEl.classList.add('run-entry');
@@ -1701,6 +1863,7 @@ function createRunEntryElement(entry) {
     }
     textEl.setAttribute('title', entry.text);
     bodyEl.appendChild(textEl);
+    appendResumeButton(bodyEl, entry, itemEl);
     itemEl.appendChild(bodyEl);
     return itemEl;
 }
@@ -1905,8 +2068,13 @@ function rebuildDocStateFromDom(docId) {
         } else if (node.classList.contains('run-feed')) {
             const summaryTextEl = node.querySelector('.run-summary-text');
             const entries = [];
-            node.querySelectorAll('.run-entry-text').forEach((el) => {
-                entries.push({ level: 'info', text: el.textContent || '', format: 'text' });
+            node.querySelectorAll('.run-entry').forEach((entryEl) => {
+                const textEl = entryEl.querySelector('.run-entry-text');
+                const entry = { level: 'info', text: textEl ? textEl.textContent || '' : '', format: 'text' };
+                if (entryEl.__operationCheckpoint) {
+                    entry.operation_checkpoint = entryEl.__operationCheckpoint;
+                }
+                entries.push(entry);
             });
             let status = 'in-progress';
             if (node.classList.contains('run-complete-success')) status = 'success';
@@ -2066,7 +2234,7 @@ function determineRunEntryTone(level, text) {
     return 'neutral';
 }
 
-function appendRunLogEntry(level, text, format = 'text') {
+function appendRunLogEntry(level, text, format = 'text', metadata = {}) {
     log(`[RUNLOG] appendRunLogEntry entered level='${level}' format='${format}' cap=${state.captureRunLogs} currentDoc=${currentDocId}`);
 
     if (shouldSkipRunEntry(level, text)) {
@@ -2082,6 +2250,9 @@ function appendRunLogEntry(level, text, format = 'text') {
     }
 
     const entry = { level, text, format };
+    if (metadata && metadata.operation_checkpoint) {
+        entry.operation_checkpoint = metadata.operation_checkpoint;
+    }
     // Keep a single source of truth for entries. When the run state is
     // rehydrated, `runState.entries` and `runState.runData.entries` often
     // point to the same array. Pushing to both would duplicate entries that
@@ -2147,6 +2318,7 @@ function appendRunLogEntry(level, text, format = 'text') {
     }
     
     bodyEl.appendChild(textEl);
+    appendResumeButton(bodyEl, entry, itemEl);
 
     itemEl.appendChild(bodyEl);
 
@@ -3730,7 +3902,7 @@ function sendToAddin(data, options = {}) {
 
     console.log('='.repeat(60));
     console.log('→ SENDING TO ADD-IN');
-    console.log('→ Payload:', data);
+    console.log('→ Payload:', redactPayloadForLog(data));
 
     try {
         const payload = JSON.stringify(data);
@@ -3753,6 +3925,25 @@ function sendToAddin(data, options = {}) {
         addLog('error', `Communication error: ${error.message}`, { scope: 'global' });
         return false;
     }
+}
+
+function redactPayloadForLog(value) {
+    if (Array.isArray(value)) {
+        return value.map((item) => redactPayloadForLog(item));
+    }
+    if (!value || typeof value !== 'object') {
+        return value;
+    }
+
+    const redacted = {};
+    Object.keys(value).forEach((key) => {
+        if (key === 'image_data' || key === 'data') {
+            redacted[key] = '<base64 omitted>';
+            return;
+        }
+        redacted[key] = redactPayloadForLog(value[key]);
+    });
+    return redacted;
 }
 
 function sendIterationFeedback(iteration, verdict) {
@@ -4404,6 +4595,96 @@ function handleCheckpointCreated(messageId, requestId = null) {
     if (!state.pendingCheckpointQueue.includes(messageId)) {
         state.pendingCheckpointQueue.push(messageId);
     }
+}
+
+function handleOperationCheckpointCreated(checkpoint = {}) {
+    const checkpointId = checkpoint.checkpoint_id || checkpoint.operation_checkpoint_id;
+    if (!checkpointId) {
+        console.warn('operation_checkpoint_created missing checkpoint_id');
+        return;
+    }
+
+    const label = checkpoint.display_label || formatReasoningOperationName(checkpoint.tool_name) || 'Operation completed';
+    const runState = startRunLogSession() || state.activeRun;
+    const entryText = `${label}`;
+
+    if (runState && runState.actionsListEl) {
+        const lastEntryEl = runState.actionsListEl.querySelector('.run-entry:last-child');
+        const alreadyTagged = lastEntryEl && lastEntryEl.getAttribute('data-operation-checkpoint-id');
+        if (lastEntryEl && !alreadyTagged) {
+            const entriesArray = (runState.runData && Array.isArray(runState.runData.entries))
+                ? runState.runData.entries
+                : runState.entries;
+            const lastEntry = Array.isArray(entriesArray) ? entriesArray[entriesArray.length - 1] : null;
+            if (lastEntry) {
+                lastEntry.operation_checkpoint = checkpoint;
+                lastEntryEl.__operationCheckpoint = checkpoint;
+                lastEntryEl.setAttribute('data-operation-checkpoint-id', checkpointId);
+                const bodyEl = lastEntryEl.querySelector('.run-entry-body');
+                if (bodyEl && !bodyEl.querySelector('.resume-operation-btn')) {
+                    appendResumeButton(bodyEl, lastEntry, lastEntryEl);
+                }
+                persistCurrentThreadState();
+                return;
+            }
+        }
+    }
+
+    appendRunLogEntry('success', entryText, 'text', { operation_checkpoint: checkpoint });
+}
+
+function handleResumeFromOperation(checkpointId) {
+    if (!checkpointId) {
+        return;
+    }
+    if (state.processing) {
+        addLog('warning', 'Cannot resume while execution is in progress. Please wait for the current operation to complete.', { scope: 'global' });
+        return;
+    }
+    if (!isDocConnected()) {
+        addLog('error', 'Cannot resume: not connected to backend', { scope: 'global' });
+        return;
+    }
+
+    sendToAddin({
+        action: 'resume_operation_request',
+        checkpoint_id: checkpointId
+    });
+    addLog('info', 'Resuming from operation...', { scope: 'global' });
+}
+
+function handleOperationResumeApplied(message = {}) {
+    const checkpointId = message.checkpoint_id || message.operation_checkpoint_id;
+    if (!checkpointId || !elements.chatMessages) {
+        return;
+    }
+
+    const anchorEntry = elements.chatMessages.querySelector(`.run-entry[data-operation-checkpoint-id="${checkpointId}"]`);
+    if (!anchorEntry) {
+        console.warn('Operation resume applied but run entry was not found:', checkpointId);
+        return;
+    }
+
+    let entryNode = anchorEntry.nextElementSibling;
+    while (entryNode) {
+        const next = entryNode.nextElementSibling;
+        entryNode.remove();
+        entryNode = next;
+    }
+
+    const runFeed = anchorEntry.closest('.run-feed');
+    if (runFeed) {
+        let node = runFeed.nextElementSibling;
+        while (node) {
+            const next = node.nextElementSibling;
+            node.remove();
+            node = next;
+        }
+    }
+
+    resetRunLogState();
+    rebuildDocStateFromDom(currentDocId);
+    persistCurrentThreadState();
 }
 
 /**
@@ -5345,6 +5626,10 @@ function processAddinMessage(message) {
             console.log('← Handling checkpoint_created');
             handleCheckpointCreated(message.message_id, message.request_id);
             break;
+        case 'operation_checkpoint_created':
+            console.log('← Handling operation_checkpoint_created');
+            handleOperationCheckpointCreated(message.checkpoint || {});
+            break;
         case 'connection_status':
             console.log('← Handling connection_status');
             updateConnectionStatus(message.connected, message.session_id, message.doc_id);
@@ -5379,6 +5664,10 @@ function processAddinMessage(message) {
         case 'revert_applied':
             console.log('← Handling revert_applied');
             handleRevertApplied(message);
+            break;
+        case 'operation_resume_applied':
+            console.log('← Handling operation_resume_applied');
+            handleOperationResumeApplied(message);
             break;
         case 'reasoning_chunk':
             console.log('← Handling reasoning_chunk');
@@ -5778,16 +6067,19 @@ function updateImageUploadAvailability() {
     if (!elements.attachImageBtn) return;
 
     const hasOpenAIKey = isProviderConfigured('openai');
-    elements.attachImageBtn.disabled = !hasOpenAIKey;
+    elements.attachImageBtn.disabled = false;
     elements.attachImageBtn.setAttribute(
         'title',
         hasOpenAIKey
-            ? 'Attach sketch image'
-            : 'Add an OpenAI API key to use image uploads (GPT-5.4)'
+            ? 'Attach file'
+            : 'Attach text/PDF files; add an OpenAI API key for image uploads'
     );
 
-    if (!hasOpenAIKey && state.attachedImage) {
-        handleRemoveImage();
+    const imageAttachments = getImageAttachments();
+    if (!hasOpenAIKey && imageAttachments.length) {
+        state.attachments = state.attachments.filter((attachment) => attachment.kind !== 'image');
+        renderAttachmentPreview();
+        updateExecuteButtonState();
         addLog('warning', buildMissingApiKeyMessage('openai'), { scope: 'global' });
     }
 }

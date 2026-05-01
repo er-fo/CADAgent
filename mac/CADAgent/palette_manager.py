@@ -806,17 +806,23 @@ class HTMLEventHandler(adsk.core.HTMLEventHandler):
                 # Extract image data if present
                 image_data = payload.get('image_data')
                 image_format = payload.get('image_format', 'png')
+                attachments = payload.get('attachments') or []
+                if not isinstance(attachments, list):
+                    attachments = []
 
                 active_doc_id = self._controller.get_active_doc_id()
 
                 # Log with image indicator
                 has_image = " + image" if image_data else ""
-                logger.info(f"← Execute request: '{request}'{has_image} (planning={planning_mode}, visual_context={include_visual_context}, model={model_name}, reasoning={reasoning_effort}, request_id={request_id})")
+                has_attachments = f" + {len(attachments)} attachment(s)" if attachments else ""
+                logger.info(f"← Execute request: '{request}'{has_image}{has_attachments} (planning={planning_mode}, visual_context={include_visual_context}, model={model_name}, reasoning={reasoning_effort}, request_id={request_id})")
 
-                if request or image_data:  # Allow image-only requests
+                if request or image_data or attachments:  # Allow attachment-only requests
                     log_msg = f'Executing request (Planning: {planning_mode}, Model: {model_name})'
                     if image_data:
                         log_msg += ' [with sketch]'
+                    elif attachments:
+                        log_msg += f' [with {len(attachments)} attachment(s)]'
                     self._palette_manager.send_log('info', log_msg, doc_id=active_doc_id)
 
                     # Pass image data to controller
@@ -828,6 +834,7 @@ class HTMLEventHandler(adsk.core.HTMLEventHandler):
                         request_id,
                         image_data=image_data,
                         image_format=image_format,
+                        attachments=attachments,
                         reasoning_effort=reasoning_effort
                     )
                 else:
@@ -876,6 +883,24 @@ class HTMLEventHandler(adsk.core.HTMLEventHandler):
                         logger.info(f"✓ Revert request forwarded to backend (message_id={message_id})")
                     else:
                         logger.warning("Cannot forward revert request: backend not connected")
+                        self._palette_manager.send_error('Backend not connected', doc_id=self._controller.get_active_doc_id())
+
+            elif action_name == 'resume_operation_request':
+                checkpoint_id = payload.get('checkpoint_id') or payload.get('operation_checkpoint_id')
+                logger.info(f"← Operation resume request received (checkpoint_id={checkpoint_id})")
+                if not checkpoint_id:
+                    logger.warning("Operation resume request missing checkpoint_id")
+                    self._palette_manager.send_error('Resume request missing checkpoint_id', doc_id=self._controller.get_active_doc_id())
+                else:
+                    client = self._controller._get_active_ws_client()
+                    if client and client.is_connected():
+                        client.send_json({
+                            "type": "resume_operation_request",
+                            "checkpoint_id": checkpoint_id,
+                        })
+                        logger.info(f"✓ Operation resume request forwarded to backend (checkpoint_id={checkpoint_id})")
+                    else:
+                        logger.warning("Cannot forward operation resume request: backend not connected")
                         self._palette_manager.send_error('Backend not connected', doc_id=self._controller.get_active_doc_id())
 
             elif action_name == 'iteration_feedback':

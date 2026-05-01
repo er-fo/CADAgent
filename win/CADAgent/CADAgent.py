@@ -393,6 +393,7 @@ class AgentController:
         request_id: Optional[str] = None,
         image_data: Optional[str] = None,
         image_format: str = "png",
+        attachments: Optional[List[Dict[str, Any]]] = None,
         reasoning_effort: Optional[str] = None
     ) -> None:
         """
@@ -406,6 +407,7 @@ class AgentController:
             request_id: Optional request ID for checkpoint correlation
             image_data: Optional base64-encoded image data for sketch translation
             image_format: Image format (png, jpg, jpeg)
+            attachments: Optional attachment list from the palette
             reasoning_effort: User-selected reasoning effort level (off/low/medium/high/xhigh/on)
         """
         # For production Supabase-backed deployments, block command execution until
@@ -505,8 +507,24 @@ class AgentController:
             payload["image_data"] = image_data
             payload["image_format"] = image_format
             logger.info(f"Including sketch image for vision translation (format={image_format})")
+        if attachments:
+            payload["attachments"] = attachments
+            logger.info("Including %d attachment(s) in request", len(attachments))
         logger.info(f"Submitting {'planning' if planning_mode else 'execution'} request with model {model_name}")
         debug_payload = dict(payload)
+        if debug_payload.get("image_data"):
+            debug_payload["image_data"] = "<base64 omitted>"
+        if "attachments" in debug_payload:
+            redacted_attachments = []
+            for attachment in debug_payload.get("attachments") or []:
+                if isinstance(attachment, dict):
+                    redacted = dict(attachment)
+                    if "data" in redacted:
+                        redacted["data"] = "<base64 omitted>"
+                    redacted_attachments.append(redacted)
+                else:
+                    redacted_attachments.append("<non-object attachment>")
+            debug_payload["attachments"] = redacted_attachments
         if visual_context_payload:
             redacted = {key: ("<base64 omitted>" if key == "data" else value)
                         for key, value in visual_context_payload.items()}
@@ -714,6 +732,14 @@ class AgentController:
             details = message.get("details", "")
             full_error = f"{error_msg}\n{details}" if details else error_msg
             self._palette_manager.send_error(full_error, doc_id=doc_id)
+        elif message_type == "log":
+            self._palette_manager.send_log(
+                message.get("level", "info"),
+                message.get("message", ""),
+                doc_id=doc_id,
+                scope=message.get("scope", "auto"),
+                message_format=message.get("format"),
+            )
         elif message_type == "cancelled":
             cancel_msg = message.get("message", "Request cancelled")
             self._palette_manager.send_message('cancelled', doc_id=doc_id, message=cancel_msg)
@@ -737,6 +763,14 @@ class AgentController:
                 if request_id:
                     kwargs["request_id"] = request_id
                 self._palette_manager.send_message('checkpoint_created', doc_id=doc_id, **kwargs)
+        elif message_type == "operation_checkpoint_created":
+            checkpoint = message.get("checkpoint") or {}
+            if checkpoint:
+                self._palette_manager.send_message(
+                    'operation_checkpoint_created',
+                    doc_id=doc_id,
+                    checkpoint=checkpoint,
+                )
         elif message_type == "revert_applied":
             # Forward revert confirmation to palette for UI cleanup
             self._palette_manager.send_message(
@@ -746,6 +780,16 @@ class AgentController:
                 conversation_index=message.get("conversation_index"),
                 conversation_length=message.get("conversation_length"),
                 include_message=message.get("include_message", True),
+            )
+        elif message_type == "operation_resume_applied":
+            self._palette_manager.send_message(
+                'operation_resume_applied',
+                doc_id=doc_id,
+                checkpoint_id=message.get("checkpoint_id") or message.get("operation_checkpoint_id"),
+                conversation_index=message.get("conversation_index"),
+                conversation_length=message.get("conversation_length"),
+                tool_name=message.get("tool_name"),
+                display_label=message.get("display_label"),
             )
         elif message_type == "feature_snapshot_request":
             self._handle_feature_snapshot_request(doc_id, message)
@@ -1558,7 +1602,39 @@ class AgentController:
             if not operation:
                 raise feature_tools.FeatureOperationError("Feature operation type was not specified.")
 
-            if operation == "apply_fillet":
+            if operation == "adjust_feature_parameters":
+                feature_token = message.get("feature_token") or params.get("feature_token")
+                edit_params = message.get("parameters") or params
+                expected_name = message.get("expected_name") or params.get("expected_name") or ""
+                expected_timeline_index = message.get("expected_timeline_index")
+                if expected_timeline_index is None:
+                    expected_timeline_index = params.get("expected_timeline_index")
+
+                if not feature_token:
+                    raise feature_tools.FeatureOperationError("adjust_feature_parameters requires feature_token.")
+                if not isinstance(edit_params, dict) or not edit_params:
+                    raise feature_tools.FeatureOperationError("adjust_feature_parameters requires parameters.")
+
+                result = feature_tools.adjust_feature_parameters(
+                    self._app,
+                    str(feature_token),
+                    dict(edit_params),
+                    str(expected_name),
+                    int(expected_timeline_index) if expected_timeline_index is not None else None,
+                )
+                success = True
+                message_text = result.get("message", "Feature parameters adjusted successfully.")
+                payload.update({
+                    "success": success,
+                    "message": message_text,
+                    "feature_type": result.get("feature_type"),
+                    "feature_name": result.get("feature_name"),
+                    "timeline_index": result.get("timeline_index"),
+                    "changed_parameters": result.get("changed_parameters", {}),
+                })
+                self._palette_manager.send_log('success', message_text, doc_id=doc_id)
+
+            elif operation == "apply_fillet":
                 # Prefer top-level message keys over nested params to match backend payload structure
                 entity_tokens = message.get("entity_tokens") or params.get("entity_tokens") or []
                 radius = message.get("radius") if message.get("radius") is not None else params.get("radius")
@@ -1973,6 +2049,7 @@ class AgentController:
             "type": "feature_snapshot",
             "session_id": session_id,
             "doc_id": doc_id,
+            "message_id": message.get("message_id"),
             "requested_timeline_count": message.get("timeline_count"),
             "requested_marker_position": message.get("marker_position"),
             "max_features": max_features,

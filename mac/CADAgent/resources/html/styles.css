@@ -569,11 +569,19 @@ textarea#cadRequest::placeholder { color: var(--fg-muted); }
 .run-entry:hover .run-entry-dot { opacity: 1; transform: scale(1.2); }
 
 .run-entry-body {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
   flex: 1;
   min-width: 0;
   word-wrap: break-word;
   overflow-wrap: break-word;
   word-break: break-word;
+}
+
+.run-entry-text {
+  flex: 1;
+  min-width: 0;
 }
 
 /* Run Status Indicators */
@@ -682,6 +690,38 @@ textarea#cadRequest::placeholder { color: var(--fg-muted); }
 .revert-btn:disabled:hover,
 .revert-btn.disabled:hover {
   color: var(--fg-muted); /* No color change on hover */
+  border-color: var(--border-subtle);
+}
+
+.resume-operation-btn {
+  margin-left: auto;
+  flex-shrink: 0;
+  background: transparent;
+  border: 1px solid var(--border-subtle);
+  color: var(--fg-muted);
+  padding: 1px 5px;
+  border-radius: var(--radius-sm);
+  font-size: 8px;
+  text-transform: uppercase;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.2s, color 0.15s ease, border-color 0.15s ease;
+}
+
+.run-entry:hover .resume-operation-btn {
+  opacity: 1;
+}
+
+.resume-operation-btn:hover {
+  color: var(--fg-primary);
+  border-color: var(--fg-muted);
+}
+
+.resume-operation-btn:disabled,
+.resume-operation-btn.disabled {
+  cursor: not-allowed;
+  opacity: 0.4;
+  color: var(--fg-muted);
   border-color: var(--border-subtle);
 }
 
@@ -1119,7 +1159,7 @@ textarea#cadRequest::placeholder { color: var(--fg-muted); }
 }
 
 /* ============================================
-   Image Attachment Styles
+   Attachment Styles
    ============================================ */
 
 .attach-image-btn {
@@ -1152,7 +1192,7 @@ textarea#cadRequest::placeholder { color: var(--fg-muted); }
   height: 16px;
 }
 
-.image-preview {
+.attachment-preview {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -1163,36 +1203,77 @@ textarea#cadRequest::placeholder { color: var(--fg-muted); }
   border-radius: 8px;
 }
 
-.image-preview.hidden {
+.attachment-preview.hidden {
   display: none;
 }
 
-.image-preview img {
+.attachment-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+}
+
+.attachment-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 220px;
+  padding: 4px 6px;
+  background: var(--bg-body);
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+}
+
+.attachment-thumb {
   max-width: 120px;
-  max-height: 80px;
+  max-height: 56px;
   border-radius: 4px;
   object-fit: contain;
   background: var(--bg-body);
 }
 
-.remove-image-btn {
+.attachment-file-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 20px;
+  border-radius: 3px;
+  background: var(--surface-hover);
+  color: var(--fg-secondary);
+  font-size: 9px;
+  font-weight: 700;
+}
+
+.attachment-name {
+  min-width: 0;
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  color: var(--fg-secondary);
+}
+
+.remove-attachment-btn {
   background: var(--bg-body);
   border: 1px solid var(--border-subtle);
   color: var(--fg-secondary);
   width: 20px;
   height: 20px;
-  border-radius: 50%;
+  border-radius: 4px;
   cursor: pointer;
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 14px;
+  font-size: 12px;
   line-height: 1;
   transition: color 0.15s ease, border-color 0.15s ease;
   flex-shrink: 0;
 }
 
-.remove-image-btn:hover {
+.remove-attachment-btn:hover {
   color: #f87171;
   border-color: #f87171;
 }

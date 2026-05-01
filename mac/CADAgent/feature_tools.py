@@ -513,7 +513,298 @@ def _serialize_feature_from_timeline_item(
         if hole_details:
             feature_info["hole"] = hole_details
 
+    editable = _serialize_editable_feature_parameters(feature, feature_type)
+    if editable:
+        feature_info["editable_parameters"] = editable
+
     return feature_info
+
+
+def _serialize_editable_feature_parameters(feature: adsk.fusion.Feature, feature_type: str) -> Optional[Dict[str, Any]]:
+    """Expose narrow safe edit metadata for supported timeline features."""
+    supported: List[str] = ["name"]
+    parameters: Dict[str, Any] = {}
+
+    if feature_type == "ExtrudeFeature":
+        try:
+            extrude = adsk.fusion.ExtrudeFeature.cast(feature)
+        except Exception:
+            extrude = None
+        distance_param = _get_extrude_distance_parameter(extrude) if extrude else None
+        if distance_param is not None:
+            supported.append("distance")
+            parameters["distance"] = _parameter_snapshot(distance_param)
+
+    elif feature_type == "HoleFeature":
+        try:
+            hole = adsk.fusion.HoleFeature.cast(feature)
+        except Exception:
+            hole = None
+        if hole:
+            diameter_param = _get_hole_diameter_parameter(hole)
+            depth_param = _get_hole_depth_parameter(hole)
+            if diameter_param is not None:
+                supported.append("diameter")
+                parameters["diameter"] = _parameter_snapshot(diameter_param)
+            if depth_param is not None:
+                supported.append("depth")
+                parameters["depth"] = _parameter_snapshot(depth_param)
+
+    else:
+        return None
+
+    return {
+        "supported": True,
+        "tool": "adjust_feature_parameters",
+        "supported_feature_type": feature_type,
+        "supported_parameters": supported,
+        "parameters": parameters,
+        "safety": {
+            "feature_token_required": True,
+            "expected_name_recommended": True,
+            "expected_timeline_index_recommended": True,
+        },
+    }
+
+
+def _parameter_snapshot(parameter: Any) -> Dict[str, Any]:
+    snapshot: Dict[str, Any] = {}
+    try:
+        expression = getattr(parameter, "expression", None)
+        if expression:
+            snapshot["expression"] = str(expression)
+    except Exception:
+        pass
+    try:
+        value_cm = float(getattr(parameter, "value", None))
+        snapshot["value_cm"] = _safe_round(value_cm, 6)
+        snapshot["value_mm"] = _safe_round(value_cm * 10.0, 6)
+    except Exception:
+        pass
+    return snapshot
+
+
+def _get_extrude_distance_parameter(extrude: Any) -> Any:
+    if not extrude:
+        return None
+    for extent_attr in ("extentOne", "extentTwo"):
+        try:
+            extent = getattr(extrude, extent_attr, None)
+        except Exception:
+            extent = None
+        parameter = _get_distance_parameter_from_extent(extent)
+        if parameter is not None:
+            return parameter
+    return None
+
+
+def _get_distance_parameter_from_extent(extent: Any) -> Any:
+    if extent is None:
+        return None
+    for attr in ("distance", "distanceOne", "distanceTwo"):
+        try:
+            parameter = getattr(extent, attr, None)
+        except Exception:
+            parameter = None
+        if parameter is not None and (
+            hasattr(parameter, "expression") or hasattr(parameter, "value")
+        ):
+            return parameter
+    return None
+
+
+def _get_hole_diameter_parameter(hole: Any) -> Any:
+    for attr in ("holeDiameter", "diameter"):
+        try:
+            parameter = getattr(hole, attr, None)
+        except Exception:
+            parameter = None
+        if parameter is not None and (
+            hasattr(parameter, "expression") or hasattr(parameter, "value")
+        ):
+            return parameter
+    return None
+
+
+def _get_hole_depth_parameter(hole: Any) -> Any:
+    for attr in ("holeDepth", "depth"):
+        try:
+            parameter = getattr(hole, attr, None)
+        except Exception:
+            parameter = None
+        if parameter is not None and (
+            hasattr(parameter, "expression") or hasattr(parameter, "value")
+        ):
+            return parameter
+
+    for extent_attr in ("extentDefinition", "extentOne"):
+        try:
+            extent = getattr(hole, extent_attr, None)
+        except Exception:
+            extent = None
+        parameter = _get_distance_parameter_from_extent(extent)
+        if parameter is not None:
+            return parameter
+    return None
+
+
+def _unit_to_cm(value: float, unit: str) -> float:
+    unit_norm = (unit or "mm").strip().lower()
+    if unit_norm not in _MM_PER_UNIT:
+        raise FeatureOperationError(f"Unsupported unit '{unit}'.")
+    return float(value) * _MM_PER_UNIT[unit_norm] * _MM_TO_CM
+
+
+def _set_length_parameter(parameter: Any, value: float, unit: str, label: str) -> str:
+    expression = f"{float(value):g} {unit or 'mm'}"
+    try:
+        if hasattr(parameter, "expression"):
+            parameter.expression = expression
+            return expression
+    except Exception as exc:
+        logger.debug("Failed to set %s expression: %s", label, exc)
+
+    try:
+        if hasattr(parameter, "value"):
+            parameter.value = _unit_to_cm(float(value), unit or "mm")
+            return expression
+    except Exception as exc:
+        raise FeatureOperationError(f"Unable to set {label}: {exc}") from exc
+
+    raise FeatureOperationError(f"Feature does not expose an editable {label} parameter.")
+
+
+def _resolve_single_feature_by_token(design: adsk.fusion.Design, feature_token: str) -> adsk.fusion.Feature:
+    entities = design.findEntityByToken(feature_token)
+    if not entities:
+        raise FeatureOperationError(
+            "Feature token not found in design. Call list_features for the latest feature snapshot/tokens."
+        )
+    if len(entities) > 1:
+        raise FeatureOperationError(
+            f"Feature token resolved to {len(entities)} entities; refusing to edit an ambiguous target."
+        )
+    feature = adsk.fusion.Feature.cast(entities[0])
+    if not feature:
+        obj_type = getattr(entities[0], "objectType", type(entities[0]).__name__)
+        raise FeatureOperationError(f"Resolved entity is not a timeline feature: {obj_type}.")
+    return feature
+
+
+def adjust_feature_parameters(
+    app: adsk.core.Application,
+    feature_token: str,
+    parameters: Dict[str, Any],
+    expected_name: str = "",
+    expected_timeline_index: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Safely adjust a narrow set of editable feature parameters."""
+    design = adsk.fusion.Design.cast(app.activeProduct)
+    if not design:
+        raise FeatureOperationError("No active Fusion design found.")
+    if design.designType != adsk.fusion.DesignTypes.ParametricDesignType:
+        raise FeatureOperationError("Feature parameter edits require Parametric design mode.")
+
+    feature = _resolve_single_feature_by_token(design, str(feature_token or "").strip())
+    feature_type = _normalize_object_type(getattr(feature, "objectType", None))
+    timeline_object = getattr(feature, "timelineObject", None)
+    timeline_index = getattr(timeline_object, "index", None) if timeline_object else None
+    timeline_name = getattr(timeline_object, "name", "") if timeline_object else ""
+    feature_name = getattr(feature, "name", "") or ""
+
+    expected_name = str(expected_name or "").strip()
+    if expected_name and expected_name not in {timeline_name, feature_name}:
+        raise FeatureOperationError(
+            f"Safety check failed: expected feature name '{expected_name}' but found "
+            f"timeline_name='{timeline_name}', entity_name='{feature_name}'."
+        )
+
+    if expected_timeline_index is not None:
+        try:
+            expected_index_int = int(expected_timeline_index)
+        except (TypeError, ValueError):
+            raise FeatureOperationError("expected_timeline_index must be an integer.")
+        if timeline_index != expected_index_int:
+            raise FeatureOperationError(
+                f"Safety check failed: expected timeline index {expected_index_int} but found {timeline_index}."
+            )
+
+    if not isinstance(parameters, dict) or not parameters:
+        raise FeatureOperationError("No feature parameters were provided to edit.")
+
+    changed: Dict[str, Any] = {}
+
+    if "name" in parameters:
+        new_name = str(parameters.get("name") or "").strip()
+        if not new_name:
+            raise FeatureOperationError("Feature name must be non-empty.")
+        try:
+            feature.name = new_name
+        except Exception:
+            pass
+        if timeline_object:
+            try:
+                timeline_object.name = new_name
+            except Exception:
+                pass
+        changed["name"] = new_name
+        feature_name = new_name
+
+    if "distance" in parameters:
+        if feature_type != "ExtrudeFeature":
+            raise FeatureOperationError("distance edits are supported only for ExtrudeFeature.")
+        try:
+            extrude = adsk.fusion.ExtrudeFeature.cast(feature)
+        except Exception:
+            extrude = None
+        parameter = _get_extrude_distance_parameter(extrude)
+        if parameter is None:
+            raise FeatureOperationError("This ExtrudeFeature does not expose an editable distance parameter.")
+        unit = str(parameters.get("distance_unit") or "mm").strip().lower()
+        changed["distance"] = _set_length_parameter(parameter, float(parameters["distance"]), unit, "extrude distance")
+
+    if "diameter" in parameters or "depth" in parameters:
+        if feature_type != "HoleFeature":
+            raise FeatureOperationError("diameter/depth edits are supported only for HoleFeature.")
+        try:
+            hole = adsk.fusion.HoleFeature.cast(feature)
+        except Exception:
+            hole = None
+        if hole is None:
+            raise FeatureOperationError("Unable to access HoleFeature APIs for this feature.")
+
+        if "diameter" in parameters:
+            parameter = _get_hole_diameter_parameter(hole)
+            if parameter is None:
+                raise FeatureOperationError("This HoleFeature does not expose an editable diameter parameter.")
+            unit = str(parameters.get("diameter_unit") or "mm").strip().lower()
+            changed["diameter"] = _set_length_parameter(parameter, float(parameters["diameter"]), unit, "hole diameter")
+
+        if "depth" in parameters:
+            parameter = _get_hole_depth_parameter(hole)
+            if parameter is None:
+                raise FeatureOperationError(
+                    "This HoleFeature does not expose an editable depth parameter; through-all holes cannot be depth-edited."
+                )
+            unit = str(parameters.get("depth_unit") or "mm").strip().lower()
+            changed["depth"] = _set_length_parameter(parameter, float(parameters["depth"]), unit, "hole depth")
+
+    if not changed:
+        raise FeatureOperationError("No supported feature parameters were changed.")
+
+    try:
+        design.computeAll()
+    except Exception as exc:
+        raise FeatureOperationError(f"Feature parameters changed but recompute failed: {exc}") from exc
+
+    return {
+        "success": True,
+        "message": f"Adjusted {feature_type}: {feature_name or timeline_name or 'feature'}",
+        "feature_type": feature_type,
+        "feature_name": feature_name or timeline_name,
+        "timeline_index": timeline_index,
+        "changed_parameters": changed,
+    }
 
 
 def _serialize_hole_feature_details(feature: adsk.fusion.Feature) -> Optional[Dict[str, Any]]:
