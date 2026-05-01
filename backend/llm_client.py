@@ -650,7 +650,7 @@ TOOLS = [
                 },
                 "operation": {
                     "type": "string",
-                    "enum": ["NewBody", "Join", "Cut"],
+                    "enum": ["NewBody", "Join", "Cut", "Intersect"],
                     "description": "How to combine with existing geometry",
                     "default": "NewBody"
                 },

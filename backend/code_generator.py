@@ -89,7 +89,7 @@ VALID_PLANES: Dict[str, str] = {
     "YZ": "yZConstructionPlane",
 }
 
-VALID_EXTRUDE_OPERATIONS = {"NewBody", "Join", "Cut"}
+VALID_EXTRUDE_OPERATIONS = {"NewBody", "Join", "Cut", "Intersect"}
 VALID_REVOLVE_OPERATIONS = {"NewBody", "Join", "Cut", "Intersect"}
 
 

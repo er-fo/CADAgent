@@ -33,5 +33,6 @@ class IRDocumentState:
             version=self.version,
             units="mm",
             operations=list(self.operations),
+            entities={},
             metadata=dict(self.metadata) if self.metadata else None,
         )
