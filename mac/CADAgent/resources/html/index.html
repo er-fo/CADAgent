@@ -150,10 +150,12 @@
 
                 <div class="model-selector-container">
                   <select id="modelSelect" class="model-select" title="Select AI model" aria-label="Select model">
+                    <option value="minimax.minimax-m2.5" selected>MiniMax M2.5 (Free)</option>
+                    <option value="moonshotai.kimi-k2.5">Kimi K2.5 (Free)</option>
                     <option value="claude-sonnet-4.6">Claude Sonnet 4.6</option>
                     <option value="claude-opus-4.7">Claude Opus 4.7</option>
                     <option value="gpt-5">GPT-5</option>
-                    <option value="gpt-5.4" selected>GPT-5.4</option>
+                    <option value="gpt-5.4">GPT-5.4</option>
                     <option value="gpt-5-mini">GPT 5 Mini</option>
                   </select>
                 </div>
@@ -196,7 +198,7 @@
       <div class="login-copy">
         <p class="eyebrow">Passwordless access</p>
         <h2>Get started</h2>
-        <p class="lede">We'll email you a one-time code. No passwords to remember. New users are created automatically. CADAgent is completely free to use and 100% BYOK.</p>
+        <p class="lede">We'll email you a one-time code. No passwords to remember. New users are created automatically. CADAgent is free to use with optional BYOK.</p>
       </div>
 
       <div id="loginCta" class="login-cta">
@@ -281,12 +283,12 @@
 
       <div class="login-copy">
         <h2>API Keys</h2>
-        <p class="lede">CADAgent is completely free to use and 100% BYOK. Connect your own AI provider account (Anthropic or OpenAI) to generate your 3D models.</p>
-        <p class="lede">You only pay your AI provider directly based on your usage. Typical provider costs are around $0.10-$0.50 per model.</p>
+        <p class="lede">CADAgent includes free managed models by default. API keys are optional if you prefer using your own Anthropic or OpenAI account.</p>
+        <p class="lede">When you use your own key, you pay that provider directly based on your usage. Typical provider costs are around $0.10-$0.50 per model.</p>
 
         <details class="provider-guide">
           <summary class="provider-guide-toggle">Which provider should I use?</summary>
-          <p class="provider-guide-content">Both work well. Anthropic tends to produce the most reliable results. You'll be billed directly by your provider based on usage — typically a few cents per model.</p>
+          <p class="provider-guide-content">Start with the free models. Add Anthropic or OpenAI keys only if you want to use those providers directly.</p>
         </details>
       </div>
 
@@ -322,7 +324,7 @@
         <div id="apiKeysStatus" class="login-status hidden" role="status" aria-live="polite"></div>
 
         <div id="apiKeysFooter" class="api-keys-footer hidden">
-          Enter at least one API key to start using CADAgent (100% BYOK).
+          API keys are optional. Free models work without provider keys.
         </div>
 
         <div class="api-keys-actions">
