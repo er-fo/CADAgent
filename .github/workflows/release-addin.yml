@@ -1,6 +1,9 @@
 name: Release CADAgent Add-in
 
 on:
+  push:
+    branches:
+      - main
   workflow_dispatch:
     inputs:
       version:
@@ -26,7 +29,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: release-cadagent-addin-${{ inputs.version }}
+  group: release-cadagent-addin-${{ github.event_name == 'workflow_dispatch' && inputs.version || github.sha }}
   cancel-in-progress: false
 
 jobs:
@@ -35,7 +38,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       GH_TOKEN: ${{ github.token }}
-      RELEASE_NOTES: ${{ inputs.release_notes }}
+      RELEASE_NOTES: ${{ github.event_name == 'workflow_dispatch' && inputs.release_notes || '' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -48,8 +51,23 @@ jobs:
         run: |
           set -euo pipefail
 
-          RAW_VERSION="${{ inputs.version }}"
-          VERSION="${RAW_VERSION#v}"
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            RAW_VERSION="${{ inputs.version }}"
+            VERSION="${RAW_VERSION#v}"
+          else
+            LATEST_TAG="$(
+              git tag --list 'v[0-9]*.[0-9]*.[0-9]*' \
+                | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' \
+                | sort -V \
+                | tail -n 1
+            )"
+            if [[ -z "$LATEST_TAG" ]]; then
+              VERSION="1.0.0"
+            else
+              IFS='.' read -r MAJOR MINOR PATCH <<< "${LATEST_TAG#v}"
+              VERSION="${MAJOR}.${MINOR}.$((PATCH + 1))"
+            fi
+          fi
 
           if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "Version must use semantic format like 1.0.6 or v1.0.6." >&2
@@ -58,19 +76,30 @@ jobs:
 
           TAG="v${VERSION}"
 
-          if git ls-remote --exit-code --tags origin "refs/tags/${TAG}" >/dev/null 2>&1; then
-            echo "Tag ${TAG} already exists." >&2
-            exit 1
-          fi
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            if git ls-remote --exit-code --tags origin "refs/tags/${TAG}" >/dev/null 2>&1; then
+              echo "Tag ${TAG} already exists." >&2
+              exit 1
+            fi
 
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            echo "Release ${TAG} already exists." >&2
-            exit 1
+            if gh release view "$TAG" >/dev/null 2>&1; then
+              echo "Release ${TAG} already exists." >&2
+              exit 1
+            fi
+          else
+            while git ls-remote --exit-code --tags origin "refs/tags/${TAG}" >/dev/null 2>&1 \
+              || gh release view "$TAG" >/dev/null 2>&1; do
+              IFS='.' read -r MAJOR MINOR PATCH <<< "$VERSION"
+              VERSION="${MAJOR}.${MINOR}.$((PATCH + 1))"
+              TAG="v${VERSION}"
+            done
           fi
 
           {
             echo "version=${VERSION}"
             echo "tag=${TAG}"
+            echo "draft=${{ github.event_name == 'workflow_dispatch' && inputs.draft || false }}"
+            echo "prerelease=${{ github.event_name == 'workflow_dispatch' && inputs.prerelease || false }}"
           } >> "$GITHUB_OUTPUT"
 
       - name: Check required add-in files
@@ -206,11 +235,11 @@ jobs:
             --notes-file release-notes.md
           )
 
-          if [[ "${{ inputs.prerelease }}" == "true" ]]; then
+          if [[ "${{ steps.version.outputs.prerelease }}" == "true" ]]; then
             ARGS+=(--prerelease)
           fi
 
-          if [[ "${{ inputs.draft }}" == "true" ]]; then
+          if [[ "${{ steps.version.outputs.draft }}" == "true" ]]; then
             ARGS+=(--draft)
           fi
 
@@ -235,7 +264,7 @@ jobs:
           done
 
       - name: Verify website uses stable latest links
-        if: ${{ inputs.draft == false }}
+        if: ${{ steps.version.outputs.draft == 'false' }}
         shell: bash
         run: |
           set -euo pipefail
