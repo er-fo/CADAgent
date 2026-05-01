@@ -82,8 +82,8 @@ let state = {
     visualContextEnabled: false,
     captureRunLogs: false,
     activeRun: null,
-    selectedModel: 'gpt-5.4',
-    reasoningEffort: 'medium',  // Default for OpenAI; 'off' for Anthropic
+    selectedModel: 'minimax.minimax-m2.5',
+    reasoningEffort: 'off',
     reasoning: {
         activeSession: null,
         sessionCounter: 0
@@ -1478,12 +1478,6 @@ function handleSaveApiKeys(event) {
         return;
     }
 
-    // At least one key required
-    if (!anthropicKey && !openaiKey) {
-        showApiKeysStatus('Please provide at least one API key (Anthropic or OpenAI)', 'error');
-        return;
-    }
-
     console.log('[API Keys] Saving keys...');
     if (elements.saveApiKeysBtn) {
         elements.saveApiKeysBtn.disabled = true;
@@ -1715,6 +1709,7 @@ function updateAuthUI(userEmail, options = {}) {
         if (elements.loginBtn) elements.loginBtn.classList.add('hidden');
         if (elements.userInfo) elements.userInfo.classList.remove('hidden');
         hideLoginOverlay();
+        enforceModelSelectionByKeys();
 
         // Refresh key status so model/image availability reflects current configuration
         sendToAddin({ action: 'get_api_keys_status' });
@@ -5982,11 +5977,20 @@ const REASONING_OPTIONS = {
         { value: 'off', label: 'COT: Off' },
         { value: 'on', label: 'COT: On' },
     ],
+    minimax: [
+        { value: 'off', label: 'COT: Off' },
+        { value: 'on', label: 'COT: On' },
+    ],
+    managed_bedrock: [
+        { value: 'off', label: 'COT: Off' },
+    ],
 };
 
 const REASONING_DEFAULTS = {
     openai: 'medium',
     anthropic: 'off',
+    minimax: 'off',
+    managed_bedrock: 'off',
 };
 
 // Explicit provider mapping to avoid misclassifying non-gpt OpenAI models (e.g., o1/o3).
@@ -6004,6 +6008,9 @@ const MODEL_PROVIDER_MAP = {
     // Anthropic
     'claude-sonnet-4.6': 'anthropic',
     'claude-opus-4.7': 'anthropic',
+    // CADAgent free managed models
+    'minimax.minimax-m2.5': 'minimax',
+    'moonshotai.kimi-k2.5': 'managed_bedrock',
 };
 
 /**
@@ -6018,10 +6025,18 @@ function getProviderForModel(modelValue) {
 }
 
 function isProviderConfigured(provider) {
+    if (provider === 'managed_bedrock' || provider === 'minimax') {
+        return !!state.isAuthenticated;
+    }
     return !!state.apiKeyStatus?.[provider];
 }
 
 function buildMissingApiKeyMessage(provider) {
+    if (provider === 'managed_bedrock' || provider === 'minimax') {
+        return state.isAuthenticated
+            ? 'The free model service is temporarily unavailable. Please try again shortly.'
+            : 'Log in to use the free CADAgent models.';
+    }
     const loginPrefix = state.isAuthenticated
         ? ''
         : 'Log in first, then ';
@@ -6055,7 +6070,9 @@ function enforceModelSelectionByKeys() {
 
     sel.disabled = !firstAllowedValue;
     if (!firstAllowedValue) {
-        sel.title = 'Add an API key to enable model selection';
+        sel.title = state.isAuthenticated
+            ? 'Add an API key to enable BYOK model selection'
+            : 'Log in to enable model selection';
     } else {
         sel.title = 'Select AI model';
     }
