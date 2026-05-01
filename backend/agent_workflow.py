@@ -5380,6 +5380,7 @@ async def _execute_planning_workflow(
 
     # Soft clear entity store at start of planning request (preserves persistent cache for stable refs),
     llm_api_keys = manager.get_llm_api_keys(session_id)
+    user_token = manager.get_user_token(session_id)
 
     # then repopulate if entity_context is available
     store = _get_entity_store(session_id, manager)
@@ -5413,6 +5414,7 @@ async def _execute_planning_workflow(
             model_name=model_name,
             reasoning_effort="high",
             api_keys=llm_api_keys,
+            user_token=user_token,
         ):
             event_type = event.get("type")
             content = event.get("content", "")

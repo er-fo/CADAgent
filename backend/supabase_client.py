@@ -64,12 +64,13 @@ class SupabaseAPIGateway:
         max_tokens: int = 4096,
         system: Optional[str] = None,
         tools: Optional[List[Dict]] = None,
+        reasoning_effort: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Call LLM API through Supabase edge function with usage tracking.
 
         Args:
-            provider: "anthropic" or "openai"
+            provider: "anthropic", "openai", or "bedrock"
             model: Model identifier (e.g., "claude-sonnet-4-5-20250929")
             messages: List of messages in Anthropic format
             max_tokens: Maximum tokens for response
@@ -104,6 +105,8 @@ class SupabaseAPIGateway:
             payload["input"]["system"] = system
         if tools:
             payload["input"]["tools"] = tools
+        if reasoning_effort:
+            payload["input"]["reasoning_effort"] = reasoning_effort
 
         # Build headers with authentication
         headers = {
@@ -178,6 +181,7 @@ async def call_llm_with_usage_tracking(
     max_tokens: int = 4096,
     system: Optional[str] = None,
     tools: Optional[List[Dict]] = None,
+    reasoning_effort: Optional[str] = None,
     user_token: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
@@ -194,4 +198,5 @@ async def call_llm_with_usage_tracking(
         max_tokens=max_tokens,
         system=system,
         tools=tools,
+        reasoning_effort=reasoning_effort,
     )

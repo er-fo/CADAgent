@@ -1,0 +1,16 @@
+project_id = "cadagent-backend-legacy"
+
+[api]
+enabled = true
+schemas = ["public", "graphql_public"]
+extra_search_path = ["public", "extensions"]
+max_rows = 1000
+
+[db]
+major_version = 17
+
+[db.migrations]
+enabled = true
+
+[functions.api-generate]
+verify_jwt = false
