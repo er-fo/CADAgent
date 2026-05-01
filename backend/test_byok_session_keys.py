@@ -17,6 +17,13 @@ def _configure_main_for_ws_test(monkeypatch: pytest.MonkeyPatch) -> ConnectionMa
     return manager
 
 
+def _configure_main_for_auth_bypass_ws_test(monkeypatch: pytest.MonkeyPatch) -> ConnectionManager:
+    manager = main.ConnectionManager()
+    monkeypatch.setattr(main, "manager", manager)
+    monkeypatch.setattr(main, "AUTH_BYPASS", True)
+    return manager
+
+
 def test_connection_manager_set_llm_api_keys_sanitizes_and_cleans_up() -> None:
     manager = ConnectionManager()
     session_id = "session-unit"
@@ -38,6 +45,29 @@ def test_connection_manager_set_llm_api_keys_sanitizes_and_cleans_up() -> None:
 
     manager.disconnect(session_id)
     assert manager.get_llm_api_keys(session_id) == {}
+
+
+def test_websocket_auth_bypass_authenticate_preserves_llm_api_keys(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = _configure_main_for_auth_bypass_ws_test(monkeypatch)
+    session_id = "session-auth-bypass-keys"
+
+    with TestClient(main.app) as client:
+        with client.websocket_connect(f"/ws/{session_id}") as ws:
+            ws.send_json(
+                {
+                    "type": "authenticate",
+                    "api_keys": {
+                        "anthropic_api_key": "  sk-ant-dev  ",
+                        "openai_api_key": "",
+                    },
+                }
+            )
+
+            assert ws.receive_json() == {"type": "authentication_ack", "authenticated": True}
+            assert manager.is_authenticated(session_id) is True
+            assert manager.get_llm_api_keys(session_id) == {"anthropic_api_key": "sk-ant-dev"}
 
 
 def test_websocket_update_api_keys_llm_payload_pre_auth_and_execute_rejected(

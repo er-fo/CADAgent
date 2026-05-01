@@ -519,6 +519,68 @@ def test_face_sketch_uv_preflight_rejects_out_of_bounds_circle():
     assert "Requested UV extents" in error
 
 
+def test_face_sketch_uv_preflight_checks_line_and_arc_extents():
+    async def _setup() -> _ManagerStub:
+        return _ManagerStub(EntityStore())
+
+    manager = asyncio.run(_setup())
+    sketch_store = _get_sketch_entity_store("s-line-arc", manager)  # type: ignore[arg-type]
+    sketch_store.register_sketch_metadata(
+        "wall_sketch",
+        {
+            "plane_kind": "face",
+            "face_ref": "face_0",
+            "uv_bounds": {"u_min": -1.0, "u_max": 1.0, "v_min": -1.0, "v_max": 1.0},
+        },
+    )
+
+    assert _preflight_face_sketch_uv_bounds(
+        "s-line-arc",
+        manager,  # type: ignore[arg-type]
+        tool_name="add_line",
+        tool_input={"sketch_id": "wall_sketch", "start_u": -0.5, "start_v": 0.0, "end_u": 0.5, "end_v": 0.0},
+    ) is None
+    line_error = _preflight_face_sketch_uv_bounds(
+        "s-line-arc",
+        manager,  # type: ignore[arg-type]
+        tool_name="add_line",
+        tool_input={"sketch_id": "wall_sketch", "start_u": -0.5, "start_v": 0.0, "end_u": 2.0, "end_v": 0.0},
+    )
+    assert line_error is not None
+    assert "add_line rejected by face-bounds preflight" in line_error
+
+    assert _preflight_face_sketch_uv_bounds(
+        "s-line-arc",
+        manager,  # type: ignore[arg-type]
+        tool_name="add_arc",
+        tool_input={
+            "sketch_id": "wall_sketch",
+            "center_u": 0.0,
+            "center_v": 0.0,
+            "start_u": 0.4,
+            "start_v": 0.0,
+            "end_u": 0.0,
+            "end_v": 0.4,
+        },
+    ) is None
+    arc_error = _preflight_face_sketch_uv_bounds(
+        "s-line-arc",
+        manager,  # type: ignore[arg-type]
+        tool_name="add_arc",
+        tool_input={
+            "sketch_id": "wall_sketch",
+            "center_u": 0.0,
+            "center_v": 0.0,
+            "start_u": 1.5,
+            "start_v": 0.0,
+            "end_u": 0.0,
+            "end_v": 1.5,
+        },
+    )
+    assert arc_error is not None
+    assert "add_arc rejected by face-bounds preflight" in arc_error
+
+
 def test_face_sketch_uv_preflight_blocks_when_bounds_missing():
     async def _setup() -> _ManagerStub:
         store = EntityStore()
@@ -637,7 +699,7 @@ def test_geometry_wait_ignores_mismatched_tool_use_id():
             ],
         )
 
-        success, message = await _execute_geometry_tool_call(
+        success, message, raw_result = await _execute_geometry_tool_call(
             "s-geo",
             manager,  # type: ignore[arg-type]
             "clear_face_selection",
@@ -648,6 +710,7 @@ def test_geometry_wait_ignores_mismatched_tool_use_id():
 
         assert success is True
         assert "matched" in message
+        assert raw_result["tool_use_id"] == "expected"
         assert len(manager.requeued) == 1
         assert manager.requeued[0].get("tool_use_id") == "other"
 

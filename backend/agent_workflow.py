@@ -10,7 +10,7 @@ surfacing actionable feedback to the model and UI.
 from __future__ import annotations
 
 import asyncio
-from dataclasses import asdict
+from dataclasses import asdict, replace
 import json
 import logging
 import math
@@ -464,7 +464,26 @@ def _build_failure_intent_key(tool_name: str, tool_input: Mapping[str, Any], fai
 
 WORLD_AXIS_ORDER = ["x", "y", "z"]
 
-IR_MVP_TOOLS = {"create_sketch", "add_rectangle", "add_circle", "extrude_profile", "extrude"}
+IR_ROUTED_TOOLS = {
+    "create_construction_plane",
+    "create_sketch",
+    "add_rectangle",
+    "add_circle",
+    "add_line",
+    "add_arc",
+    "list_sketch_profiles",
+    "extrude_profile",
+    "extrude",
+    "revolve_profile",
+    "create_loft",
+    "jump_to_timeline_position",
+    "delete_feature",
+}
+CODEGEN_REF_RESOLUTION_TOOLS = {
+    "create_construction_plane",
+    "create_sketch",
+    "revolve_profile",
+}
 BUILD123D_TARGET_NAMES = {"build123d", "studio"}
 _BUILD123D_EXECUTOR = Build123dTargetExecutor()
 
@@ -486,6 +505,182 @@ def _resolve_execution_target(request: Optional[Mapping[str, Any]]) -> str:
         return "fusion"
     raise UnsupportedExecutionTargetError(
         f"Unsupported execution_target '{raw_target}'. Expected one of: fusion, build123d, studio."
+    )
+
+
+def _target_result_mapping(
+    *,
+    target: str,
+    success: bool,
+    message: str,
+    data: Optional[Mapping[str, Any]] = None,
+    raw_result: Optional[Mapping[str, Any]] = None,
+    fallback_policy: Optional[Sequence[str]] = None,
+) -> Dict[str, Any]:
+    """Serialize the target execution outcome into IR-safe metadata."""
+    record: Dict[str, Any] = {
+        "target": target,
+        "success": bool(success),
+        "message": str(message or ""),
+    }
+
+    if data:
+        record["data"] = dict(data)
+    if raw_result:
+        raw = dict(raw_result)
+        record["raw_result"] = raw
+
+        created_entities = raw.get("created_entities")
+        if isinstance(created_entities, Mapping):
+            record["created_entities"] = dict(created_entities)
+
+        warnings = raw.get("warnings")
+        if warnings is None:
+            warnings = raw.get("warning")
+        if warnings:
+            record["warnings"] = warnings
+
+        fallback_flags: Dict[str, Any] = {}
+        for key in ("fallback_used", "fallback", "fallback_reason", "fallbacks"):
+            if key in raw:
+                fallback_flags[key] = raw[key]
+        if fallback_flags:
+            record["fallback"] = fallback_flags
+
+    if fallback_policy:
+        record["fallback_policy"] = list(fallback_policy)
+
+    return record
+
+
+def _operation_with_target_result(
+    operation: Any,
+    *,
+    target: str,
+    success: bool,
+    message: str,
+    data: Optional[Mapping[str, Any]] = None,
+    raw_result: Optional[Mapping[str, Any]] = None,
+) -> Any:
+    """Return a frozen IR operation copy with one appended target execution result."""
+    existing_results = [
+        dict(result)
+        for result in getattr(operation, "target_results", []) or []
+        if isinstance(result, Mapping)
+    ]
+    existing_results.append(
+        _target_result_mapping(
+            target=target,
+            success=success,
+            message=message,
+            data=data,
+            raw_result=raw_result,
+            fallback_policy=getattr(operation, "fallback_policy", None),
+        )
+    )
+    return replace(operation, target_results=existing_results)
+
+
+def _ir_state_metadata(execution_target: str, session_id: str) -> Dict[str, Any]:
+    return {
+        "source": "studio" if execution_target == "build123d" else "fusion",
+        "session_id": session_id,
+    }
+
+
+def _get_fallback_ir_document_states(manager: Any) -> Dict[str, IRDocumentState]:
+    fallback = getattr(manager, "_fallback_ir_document_states", None)
+    if not isinstance(fallback, dict):
+        fallback = {}
+        setattr(manager, "_fallback_ir_document_states", fallback)
+    return fallback
+
+
+def _persist_session_ir_document_state(
+    manager: Any,
+    session_id: str,
+    state: IRDocumentState,
+) -> None:
+    setter = getattr(manager, "set_ir_document_state", None)
+    if callable(setter):
+        setter(session_id, state)
+    saver = getattr(manager, "save_ir_document_state", None)
+    if callable(saver):
+        saver(session_id, _serialize_ir_document_state(state))
+        return
+    _get_fallback_ir_document_states(manager)[session_id] = state
+
+
+def _get_session_ir_document_state(
+    manager: Any,
+    session_id: str,
+    execution_target: str,
+) -> IRDocumentState:
+    metadata = _ir_state_metadata(execution_target, session_id)
+    state: Any = None
+
+    getter = getattr(manager, "get_ir_document_state", None)
+    if callable(getter):
+        state = getter(session_id)
+    else:
+        state = _get_fallback_ir_document_states(manager).get(session_id)
+
+    if isinstance(state, Mapping):
+        try:
+            state = _deserialize_ir_document_state(state)
+        except Exception as exc:
+            logger.warning("Unable to deserialize IR state for session %s: %s", session_id, exc)
+            state = None
+
+    if isinstance(state, IRDocumentState):
+        existing_metadata = dict(state.metadata or {})
+        if existing_metadata.get("source") and existing_metadata.get("source") != metadata["source"]:
+            state = IRDocumentState(metadata=metadata)
+        else:
+            existing_metadata.update(metadata)
+            state.metadata = existing_metadata
+    else:
+        state = IRDocumentState(metadata=metadata)
+
+    _persist_session_ir_document_state(manager, session_id, state)
+    return state
+
+
+def _append_committed_ir_operation(
+    manager: Any,
+    session_id: str,
+    state: IRDocumentState,
+    operation: Any,
+) -> None:
+    if getattr(operation, "type", "") in TIMELINE_MODIFYING_TOOLS:
+        state.operations.clear()
+    state.append(operation)
+    _persist_session_ir_document_state(manager, session_id, state)
+
+
+def _ir_dependency_lookup_operations(
+    state: IRDocumentState,
+    attempt_history: Sequence[Any],
+) -> List[Any]:
+    return [*state.operations, *attempt_history]
+
+
+async def _emit_committed_ir_operation(
+    manager: ConnectionManager,
+    session_id: str,
+    *,
+    target: str,
+    operation: Any,
+) -> None:
+    """Notify observers about the successfully executed IR operation."""
+    await _send_message_safe(
+        manager,
+        session_id,
+        {
+            "type": "ir_operation_committed",
+            "target": target,
+            "operation": asdict(operation),
+        },
     )
 
 
@@ -522,7 +717,8 @@ def _deterministic_mvp_tool_calls(user_request: str) -> Optional[List[Dict[str, 
     cube_match = re.search(rf"({number_pattern})\s*mm?\s*(cube|box)", normalized)
     if cube_match:
         size = float(cube_match.group(1))
-        half = size / 2.0
+        size_cm = size / 10.0
+        half = size_cm / 2.0
         return [
             {
                 "id": "toolu_det_1",
@@ -547,7 +743,7 @@ def _deterministic_mvp_tool_calls(user_request: str) -> Optional[List[Dict[str, 
                 "input": {
                     "sketch_id": "sketch_0",
                     "profile_index": 0,
-                    "distance": size,
+                    "distance": size_cm,
                     "operation": "NewBody",
                     "description": f"Extrude {size}mm for cube",
                 },
@@ -559,6 +755,8 @@ def _deterministic_mvp_tool_calls(user_request: str) -> Optional[List[Dict[str, 
     if "cylinder" in normalized and radius_match and height_match:
         radius = float(radius_match.group(1))
         height = float(height_match.group(1))
+        radius_cm = radius / 10.0
+        height_cm = height / 10.0
         return [
             {
                 "id": "toolu_det_1",
@@ -572,7 +770,7 @@ def _deterministic_mvp_tool_calls(user_request: str) -> Optional[List[Dict[str, 
                     "sketch_id": "sketch_0",
                     "center_u": 0.0,
                     "center_v": 0.0,
-                    "radius": radius,
+                    "radius": radius_cm,
                     "description": f"Add circle radius {radius}",
                 },
             },
@@ -582,7 +780,7 @@ def _deterministic_mvp_tool_calls(user_request: str) -> Optional[List[Dict[str, 
                 "input": {
                     "sketch_id": "sketch_0",
                     "profile_index": 0,
-                    "distance": height,
+                    "distance": height_cm,
                     "operation": "NewBody",
                     "description": f"Extrude {height}mm for cylinder",
                 },
@@ -590,6 +788,16 @@ def _deterministic_mvp_tool_calls(user_request: str) -> Optional[List[Dict[str, 
         ]
 
     return None
+
+
+def _unsupported_build123d_tool_text(tool_name: str) -> str:
+    return (
+        f"Tool '{tool_name}' is not supported by the build123d target yet. "
+        "Supported direct build123d tools: create_sketch, add_rectangle, add_circle, "
+        "list_sketch_profiles, extrude_profile. Advanced IR operations are explicit "
+        "Fusion-only or unsupported until the build123d adapter gains matching capabilities."
+    )
+
 
 # Global counter for generating unique message IDs
 _message_id_counter = 0
@@ -2512,7 +2720,7 @@ async def _handle_list_features(
     session_id: str,
     manager: ConnectionManager,
     tool_input: Mapping[str, Any],
-) -> Tuple[bool, str]:
+) -> Tuple[bool, str, Mapping[str, Any]]:
     """Render the most recent feature snapshot for the LLM."""
 
     allowed_keys = {"description"}
@@ -2533,26 +2741,26 @@ async def _handle_list_features(
         if cached is None:
             return False, (
                 "Feature snapshot unavailable. Ask the user to create or modify a feature so the cache can be populated."
-            )
+            ), {}
         snapshot = cached
         diagnostics.append("using cached snapshot (refresh timed out)")
     elif not snapshot.get("success", True):
         message = _format_feature_snapshot(snapshot) or (
             snapshot.get("error") or snapshot.get("message") or "Feature snapshot unavailable."
         )
-        return False, message
+        return False, message, snapshot
     else:
         diagnostics.append("captured fresh snapshot")
 
     message_body = _format_feature_snapshot(snapshot)
     if not message_body:
-        return True, "No recent features were captured in the snapshot."
+        return True, "No recent features were captured in the snapshot.", snapshot
 
     if diagnostics:
         diag_text = "; ".join(diagnostics)
         message_body = f"diagnostics={diag_text}\n{message_body}"
 
-    return True, message_body
+    return True, message_body, snapshot
 
 
 def _axis_index_from_key(axis_key: str) -> int:
@@ -3287,11 +3495,7 @@ async def _execute_workflow_loop(
         await _send_error(manager, session_id, "Invalid execution target", str(exc))
         return
     fusion_ir_executor = FusionTargetExecutor(manager, timeout_seconds=EXECUTION_TIMEOUT)
-    ir_doc_state = _restore_or_create_ir_document_state(
-        manager,
-        session_id,
-        execution_target=execution_target,
-    )
+    ir_doc_state = _get_session_ir_document_state(manager, session_id, execution_target)
     # Track all attempted IR operations (success + failure) so dependency mapping
     # can fail closed when an operation chain breaks mid-turn.
     ir_attempt_history: List[Any] = []
@@ -3688,12 +3892,28 @@ async def _execute_workflow_loop(
                 )
                 continue
 
-            if tool_name in IR_MVP_TOOLS:
+            if tool_name in TOPOLOGY_MUTATING_TOOLS:
+                if topology_mutation_executed:
+                    defer_text = (
+                        f"Deferred '{tool_name}' in this turn. "
+                        "Run at most one topology-changing operation per turn, then wait for refreshed entities."
+                    )
+                    messages.append(_tool_result_message(tool_use_id, defer_text))
+                    logger.warning(
+                        "Session %s deferred extra topology mutation '%s' in iteration %d",
+                        session_id,
+                        tool_name,
+                        iteration + 1,
+                    )
+                    continue
+                topology_mutation_executed = True
+
+            if tool_name in IR_ROUTED_TOOLS:
                 ir_tool_call: Mapping[str, Any] = tool_call
                 resolved_ir_input: Optional[Dict[str, Any]] = None
                 if (
                     execution_target == "fusion"
-                    and tool_name == "create_sketch"
+                    and tool_name in CODEGEN_REF_RESOLUTION_TOOLS
                     and callable(getattr(manager, "get_entity_store", None))
                 ):
                     try:
@@ -3712,18 +3932,16 @@ async def _execute_workflow_loop(
                             iteration_first_failure_intent = tool_intent_key
                         continue
 
-                    original_plane = str(tool_input.get("plane_id", "") or "").strip()
-                    resolved_plane = str(resolved_ir_input.get("plane_id", "") or "").strip()
-                    if original_plane and resolved_plane and original_plane != resolved_plane:
+                    if resolved_ir_input != tool_input:
                         logger.info(
-                            "Session %s resolved IR create_sketch plane '%s' -> token for Fusion execution",
+                            "Session %s resolved IR codegen refs for '%s' before Fusion execution",
                             session_id,
-                            original_plane,
+                            tool_name,
                         )
                     ir_tool_call = dict(tool_call)
                     ir_tool_call["input"] = resolved_ir_input
 
-                if tool_name in {"add_rectangle", "add_circle"}:
+                if tool_name in {"add_rectangle", "add_circle", "add_line", "add_arc"}:
                     sketch_preflight_error = _preflight_face_sketch_uv_bounds(
                         session_id,
                         manager,
@@ -3758,7 +3976,7 @@ async def _execute_workflow_loop(
                         ir_tool_call,
                         ir_doc_state,
                         metadata=ir_metadata,
-                        dependency_operations=[*ir_doc_state.operations, *ir_attempt_history],
+                        dependency_operations=_ir_dependency_lookup_operations(ir_doc_state, ir_attempt_history),
                     )
                 except UnsupportedToolMappingError as exc:
                     error_text = str(exc)
@@ -3895,8 +4113,21 @@ async def _execute_workflow_loop(
                     )
                 else:
                     # Commit operation only after successful target execution.
-                    ir_doc_state.append(ir_op)
-                    _manager_save_ir_document_state(manager, session_id, ir_doc_state)
+                    committed_ir_op = _operation_with_target_result(
+                        ir_op,
+                        target=target_result.target,
+                        success=target_result.success,
+                        message=target_result.message,
+                        data=target_result.data if isinstance(target_result.data, Mapping) else None,
+                        raw_result=raw_result_payload,
+                    )
+                    _append_committed_ir_operation(manager, session_id, ir_doc_state, committed_ir_op)
+                    await _emit_committed_ir_operation(
+                        manager,
+                        session_id,
+                        target=execution_target,
+                        operation=committed_ir_op,
+                    )
                     logger.info(
                         "Session %s IR tool '%s' executed on target %s",
                         session_id,
@@ -3922,7 +4153,7 @@ async def _execute_workflow_loop(
                             refresh_result["success"] = target_result.success
                         if "message" not in refresh_result and result_text:
                             refresh_result["message"] = result_text
-                        if tool_name in {"create_sketch", "add_rectangle", "add_circle"}:
+                        if tool_name in {"create_sketch", "add_rectangle", "add_circle", "add_line", "add_arc"}:
                             refresh_result.setdefault("no_op", True)
 
                         try:
@@ -3967,22 +4198,6 @@ async def _execute_workflow_loop(
                             force_snapshot_refresh=tool_name not in REFRESH_ON_SUCCESS_TOOLS,
                         )
                 continue
-
-            if tool_name in TOPOLOGY_MUTATING_TOOLS:
-                if topology_mutation_executed:
-                    defer_text = (
-                        f"Deferred '{tool_name}' in this turn. "
-                        "Run at most one topology-changing operation per turn, then wait for refreshed entities."
-                    )
-                    messages.append(_tool_result_message(tool_use_id, defer_text))
-                    logger.warning(
-                        "Session %s deferred extra topology mutation '%s' in iteration %d",
-                        session_id,
-                        tool_name,
-                        iteration + 1,
-                    )
-                    continue
-                topology_mutation_executed = True
 
             if tool_name in DUPLICATE_INTENT_GUARD_TOOLS:
                 if tool_intent_key in seen_guarded_intents:
@@ -4209,6 +4424,15 @@ async def _execute_workflow_loop(
                 continue
 
             if tool_name in GEOMETRY_OPERATION_TOOLS:
+                if execution_target == "build123d":
+                    unsupported_text = _unsupported_build123d_tool_text(tool_name)
+                    await _send_error(manager, session_id, "Unsupported build123d tool", unsupported_text)
+                    messages.append(_tool_result_message(tool_use_id, unsupported_text, is_error=True))
+                    iteration_had_failure = True
+                    if iteration_first_failure_intent is None:
+                        iteration_first_failure_intent = tool_intent_key
+                    continue
+
                 # =============================================================
                 # ENTITY CONTEXT VALIDATION GATE (Spatial Validation Block - Rule 26)
                 # Before executing tools that require face/edge/body refs, validate
@@ -4284,6 +4508,54 @@ async def _execute_workflow_loop(
                         continue
 
                 if tool_name in FEATURE_OPERATION_TOOLS:
+                    ir_feature_op = None
+                    ir_metadata = {
+                        "source": "studio" if execution_target == "build123d" else "fusion",
+                        "request_id": str((request or {}).get("request_id") or ""),
+                        "iteration": iteration + 1,
+                    }
+                    try:
+                        ir_feature_op = map_tool_call_to_ir(
+                            tool_call,
+                            ir_doc_state,
+                            metadata=ir_metadata,
+                            dependency_operations=_ir_dependency_lookup_operations(ir_doc_state, ir_attempt_history),
+                        )
+                    except UnsupportedToolMappingError as exc:
+                        error_text = str(exc)
+                        await _send_error(manager, session_id, "IR mapping failed", error_text)
+                        messages.append(_tool_result_message(tool_use_id, error_text, is_error=True))
+                        iteration_had_failure = True
+                        if iteration_first_failure_intent is None:
+                            iteration_first_failure_intent = tool_intent_key
+                        continue
+
+                    ir_attempt_history.append(ir_feature_op)
+                    validation_errors = validate_ir_candidate(ir_feature_op, ir_doc_state.operations)
+                    if validation_errors:
+                        has_dependency_block = any(
+                            "depends on uncommitted operation" in err for err in validation_errors
+                        )
+                        title = "IR dependency blocked" if has_dependency_block else "IR validation failed"
+                        prefix = "IR dependency blocked: " if has_dependency_block else "IR validation failed: "
+                        error_text = prefix + "; ".join(validation_errors)
+                        await _send_error(manager, session_id, title, error_text)
+                        messages.append(_tool_result_message(tool_use_id, error_text, is_error=True))
+                        iteration_had_failure = True
+                        if iteration_first_failure_intent is None:
+                            iteration_first_failure_intent = tool_intent_key
+                        continue
+
+                    await _send_message_safe(
+                        manager,
+                        session_id,
+                        {
+                            "type": "ir_operation",
+                            "target": execution_target,
+                            "operation": asdict(ir_feature_op),
+                        },
+                    )
+
                     # Handle feature operations (fillet, chamfer, holes, patterns) - pass full tool_input with description
                     try:
                         success, result_text, raw_result = await _execute_feature_tool_call(
@@ -4304,6 +4576,7 @@ async def _execute_workflow_loop(
                         )
                         continue
 
+                    target_result_text = result_text
                     # Inject build plan context if active
                     plan_context = await _handle_build_plan_step(session_id, manager, tool_name, success)
                     if plan_context:
@@ -4332,6 +4605,38 @@ async def _execute_workflow_loop(
                             session_id,
                             tool_name,
                             result_text,
+                        )
+                        committed_feature_op = ir_feature_op
+                        if tool_name == "create_pattern_feature" and isinstance(raw_result, Mapping):
+                            resolved_refs = raw_result.get("resolved_feature_refs")
+                            if isinstance(resolved_refs, list) and resolved_refs:
+                                try:
+                                    committed_feature_op = replace(
+                                        ir_feature_op,
+                                        params=replace(
+                                            ir_feature_op.params,
+                                            feature_refs=[str(ref) for ref in resolved_refs],
+                                        ),
+                                    )
+                                except TypeError:
+                                    logger.warning(
+                                        "Session %s could not persist resolved pattern refs into IR params.",
+                                        session_id,
+                                    )
+                        committed_feature_op = _operation_with_target_result(
+                            committed_feature_op,
+                            target="fusion",
+                            success=success,
+                            message=target_result_text,
+                            data={"tool_name": tool_name, "tool_input": dict(tool_input)},
+                            raw_result=raw_result if isinstance(raw_result, Mapping) else None,
+                        )
+                        _append_committed_ir_operation(manager, session_id, ir_doc_state, committed_feature_op)
+                        await _emit_committed_ir_operation(
+                            manager,
+                            session_id,
+                            target=execution_target,
+                            operation=committed_feature_op,
                         )
                         try:
                             await _refresh_and_enrich_after_success(
@@ -4391,8 +4696,51 @@ async def _execute_workflow_loop(
                 else:  # pragma: no cover - guarded by GEOMETRY_OPERATION_TOOLS
                     raise SelectionToolCallError(f"Unsupported geometry tool '{tool_name}'.")
 
+                ir_selection_op = None
+                ir_metadata = {
+                    "source": "studio" if execution_target == "build123d" else "fusion",
+                    "request_id": str((request or {}).get("request_id") or ""),
+                    "iteration": iteration + 1,
+                }
                 try:
-                    success, result_text = await _execute_geometry_tool_call(
+                    ir_selection_op = map_tool_call_to_ir(
+                        tool_call,
+                        ir_doc_state,
+                        metadata=ir_metadata,
+                        dependency_operations=_ir_dependency_lookup_operations(ir_doc_state, ir_attempt_history),
+                    )
+                except UnsupportedToolMappingError as exc:
+                    error_text = str(exc)
+                    await _send_error(manager, session_id, "IR mapping failed", error_text)
+                    messages.append(_tool_result_message(tool_use_id, error_text, is_error=True))
+                    iteration_had_failure = True
+                    if iteration_first_failure_intent is None:
+                        iteration_first_failure_intent = tool_intent_key
+                    continue
+
+                ir_attempt_history.append(ir_selection_op)
+                validation_errors = validate_ir_candidate(ir_selection_op, ir_doc_state.operations)
+                if validation_errors:
+                    error_text = "IR validation failed: " + "; ".join(validation_errors)
+                    await _send_error(manager, session_id, "IR validation failed", error_text)
+                    messages.append(_tool_result_message(tool_use_id, error_text, is_error=True))
+                    iteration_had_failure = True
+                    if iteration_first_failure_intent is None:
+                        iteration_first_failure_intent = tool_intent_key
+                    continue
+
+                await _send_message_safe(
+                    manager,
+                    session_id,
+                    {
+                        "type": "ir_operation",
+                        "target": execution_target,
+                        "operation": asdict(ir_selection_op),
+                    },
+                )
+
+                try:
+                    success, result_text, raw_result = await _execute_geometry_tool_call(
                         session_id, manager, tool_name, tool_use_id, geometry_tool_input, geometry_kind, description
                     )
                 except SelectionToolCallError as exc:
@@ -4411,6 +4759,7 @@ async def _execute_workflow_loop(
                     )
                     continue
 
+                target_result_text = result_text
                 # Inject build plan context if active
                 plan_context = await _handle_build_plan_step(session_id, manager, tool_name, success)
                 if plan_context:
@@ -4436,6 +4785,21 @@ async def _execute_workflow_loop(
                     )
                 else:
                     iteration_had_success = True
+                    committed_selection_op = _operation_with_target_result(
+                        ir_selection_op,
+                        target="fusion",
+                        success=success,
+                        message=target_result_text,
+                        data={"tool_name": tool_name, "tool_input": dict(geometry_tool_input)},
+                        raw_result=raw_result if isinstance(raw_result, Mapping) else None,
+                    )
+                    _append_committed_ir_operation(manager, session_id, ir_doc_state, committed_selection_op)
+                    await _emit_committed_ir_operation(
+                        manager,
+                        session_id,
+                        target=execution_target,
+                        operation=committed_selection_op,
+                    )
                     logger.info(
                         "Session %s %s tool '%s' completed successfully: %s",
                         session_id,
@@ -4446,10 +4810,7 @@ async def _execute_workflow_loop(
                 continue
 
             if execution_target == "build123d":
-                unsupported_text = (
-                    f"Tool '{tool_name}' is not supported by the build123d target yet. "
-                    "Supported MVP tools: create_sketch, add_rectangle, add_circle, extrude_profile."
-                )
+                unsupported_text = _unsupported_build123d_tool_text(tool_name)
                 await _send_error(manager, session_id, "Unsupported build123d tool", unsupported_text)
                 messages.append(_tool_result_message(tool_use_id, unsupported_text, is_error=True))
                 iteration_had_failure = True
@@ -4460,7 +4821,7 @@ async def _execute_workflow_loop(
             # Remove narrative-only fields before translation to keep tool schema strict.
             codegen_input = dict(tool_input)
 
-            if tool_name in {"add_rectangle", "add_circle"}:
+            if tool_name in {"add_rectangle", "add_circle", "add_line", "add_arc"}:
                 sketch_preflight_error = _preflight_face_sketch_uv_bounds(
                     session_id,
                     manager,
@@ -7821,7 +8182,7 @@ async def _execute_geometry_tool_call(
     tool_input: Mapping[str, Any],
     geometry_kind: str,
     description: str = "",
-) -> Tuple[bool, str]:
+) -> Tuple[bool, str, Mapping[str, Any]]:
     """Send an edge, face, or body tool request to Fusion and return the formatted result."""
     if geometry_kind not in {"edge", "face", "body"}:
         raise SelectionToolCallError(f"Unsupported geometry kind '{geometry_kind}'.")
@@ -7945,7 +8306,7 @@ async def _execute_geometry_tool_call(
     elif tool_name == "clear_body_selection":
         message_text = _format_clear_bodies_message(result, message_text)
 
-    return success, message_text
+    return success, message_text, result
 
 
 async def _attach_entity_refs_to_listing(
@@ -8597,7 +8958,7 @@ def _preflight_face_sketch_uv_bounds(
     tool_name: str,
     tool_input: Mapping[str, Any],
 ) -> Optional[str]:
-    if tool_name not in {"add_rectangle", "add_circle"}:
+    if tool_name not in {"add_rectangle", "add_circle", "add_line", "add_arc"}:
         return None
 
     sketch_id = str(tool_input.get("sketch_id") or "").strip()
@@ -8637,6 +8998,30 @@ def _preflight_face_sketch_uv_bounds(
             requested_u_max = cu + radius
             requested_v_min = cv - radius
             requested_v_max = cv + radius
+        elif tool_name == "add_line":
+            start_u = float(tool_input.get("start_u"))
+            start_v = float(tool_input.get("start_v"))
+            end_u = float(tool_input.get("end_u"))
+            end_v = float(tool_input.get("end_v"))
+            requested_u_min = min(start_u, end_u)
+            requested_u_max = max(start_u, end_u)
+            requested_v_min = min(start_v, end_v)
+            requested_v_max = max(start_v, end_v)
+        elif tool_name == "add_arc":
+            center_u = float(tool_input.get("center_u"))
+            center_v = float(tool_input.get("center_v"))
+            start_u = float(tool_input.get("start_u"))
+            start_v = float(tool_input.get("start_v"))
+            end_u = float(tool_input.get("end_u"))
+            end_v = float(tool_input.get("end_v"))
+            radius = max(
+                math.hypot(start_u - center_u, start_v - center_v),
+                math.hypot(end_u - center_u, end_v - center_v),
+            )
+            requested_u_min = center_u - radius
+            requested_u_max = center_u + radius
+            requested_v_min = center_v - radius
+            requested_v_max = center_v + radius
         else:
             c1u = float(tool_input.get("corner1_u"))
             c1v = float(tool_input.get("corner1_v"))
@@ -8701,51 +9086,63 @@ def _resolve_codegen_entity_refs(
     store = _get_entity_store(session_id, manager)
     resolved_input = dict(tool_input)
 
+    def _normalize_ref_alias(target: Dict[str, Any], ref_key: str, token_key: str) -> None:
+        if ref_key not in target:
+            return
+        if not str(target.get(token_key) or "").strip():
+            target[token_key] = target[ref_key]
+        target.pop(ref_key, None)
+
+    def _resolve_token_or_ref(
+        target: Dict[str, Any],
+        token_key: str,
+        ref_key: str,
+        *,
+        expected_kind: Optional[str] = None,
+    ) -> None:
+        _normalize_ref_alias(target, ref_key, token_key)
+        _resolve_token_field_inplace(store, target, token_key, expected_kind=expected_kind)
+
     if tool_name == "revolve_profile":
-        axis_spec = resolved_input.get("axis_spec")
+        axis_key = "axis" if isinstance(resolved_input.get("axis"), Mapping) else "axis_spec"
+        axis_spec = resolved_input.get(axis_key)
         if isinstance(axis_spec, Mapping):
+            axis_spec = dict(axis_spec)
+            resolved_input[axis_key] = axis_spec
             axis_type = axis_spec.get("type")
             if axis_type == "edge":
-                _resolve_token_field_inplace(store, axis_spec, "edge_token", expected_kind="edge")
-                _resolve_token_field_inplace(store, axis_spec, "edge_ref", expected_kind="edge")
-                # normalize: if edge_ref used, set edge_token
-                if "edge_ref" in axis_spec and "edge_token" not in axis_spec:
-                    axis_spec["edge_token"] = axis_spec.pop("edge_ref")
+                _resolve_token_or_ref(axis_spec, "edge_token", "edge_ref", expected_kind="edge")
             elif axis_type == "face":
-                _resolve_token_field_inplace(store, axis_spec, "face_token", expected_kind="face")
-                _resolve_token_field_inplace(store, axis_spec, "face_ref", expected_kind="face")
-                if "face_ref" in axis_spec and "face_token" not in axis_spec:
-                    axis_spec["face_token"] = axis_spec.pop("face_ref")
+                _resolve_token_or_ref(axis_spec, "face_token", "face_ref", expected_kind="face")
 
-        extent_spec = resolved_input.get("extent_spec")
+        extent_key = "extent" if isinstance(resolved_input.get("extent"), Mapping) else "extent_spec"
+        extent_spec = resolved_input.get(extent_key)
         if isinstance(extent_spec, Mapping):
-            _resolve_token_field_inplace(store, extent_spec, "to_entity_token")
-            _resolve_token_field_inplace(store, extent_spec, "to_entity1_token")
-            _resolve_token_field_inplace(store, extent_spec, "to_entity2_token")
-            _resolve_token_field_inplace(store, extent_spec, "to_entity_ref")
-            _resolve_token_field_inplace(store, extent_spec, "to_entity1_ref")
-            _resolve_token_field_inplace(store, extent_spec, "to_entity2_ref")
-            # Normalize *_ref → *_token if only ref was provided
-            for ref_key, token_key in [
-                ("to_entity_ref", "to_entity_token"),
-                ("to_entity1_ref", "to_entity1_token"),
-                ("to_entity2_ref", "to_entity2_token"),
+            extent_spec = dict(extent_spec)
+            resolved_input[extent_key] = extent_spec
+            for token_key, ref_key in [
+                ("to_entity_token", "to_entity_ref"),
+                ("to_entity1_token", "to_entity1_ref"),
+                ("to_entity2_token", "to_entity2_ref"),
             ]:
-                if ref_key in extent_spec and token_key not in extent_spec:
-                    extent_spec[token_key] = extent_spec.pop(ref_key)
+                _resolve_token_or_ref(extent_spec, token_key, ref_key)
 
-        _resolve_token_field_inplace(store, resolved_input, "creation_occurrence_token")
-        _resolve_token_field_inplace(store, resolved_input, "creation_occurrence_ref")
-        if "creation_occurrence_ref" in resolved_input and "creation_occurrence_token" not in resolved_input:
-            resolved_input["creation_occurrence_token"] = resolved_input.pop("creation_occurrence_ref")
+        _resolve_token_or_ref(resolved_input, "creation_occurrence_token", "creation_occurrence_ref")
 
     elif tool_name in {"create_construction_plane"}:
-        for key in ("reference_edge_token", "reference_edge_ref", "face_token", "face_ref"):
-            _resolve_token_field_inplace(store, resolved_input, key, expected_kind="edge" if "edge" in key else "face")
-            if key.endswith("_ref"):
-                token_key = key.replace("_ref", "_token")
-                if key in resolved_input and token_key not in resolved_input:
-                    resolved_input[token_key] = resolved_input.pop(key)
+        _resolve_token_or_ref(
+            resolved_input,
+            "reference_edge_token",
+            "reference_edge_ref",
+            expected_kind="edge",
+        )
+        _resolve_token_or_ref(
+            resolved_input,
+            "reference_face_token",
+            "reference_face_ref",
+            expected_kind="face",
+        )
+        _resolve_token_or_ref(resolved_input, "face_token", "face_ref", expected_kind="face")
 
     elif tool_name == "create_sketch":
         # Allow plane_id to be a face ref (face_0, face_1, ...)
@@ -9142,8 +9539,8 @@ async def _execute_feature_tool_call(
     """Send a feature tool request (fillet, chamfer) to Fusion and return the formatted result."""
 
     if tool_name == "list_features":
-        success, text = await _handle_list_features(session_id, manager, tool_input)
-        return success, text, {}
+        success, text, snapshot = await _handle_list_features(session_id, manager, tool_input)
+        return success, text, snapshot
 
     pattern_prep: Optional[PatternPreparation] = None
 
@@ -9735,6 +10132,13 @@ async def _execute_feature_tool_call(
         raise SelectionToolCallError(
             f"Timed out waiting for Fusion to finish '{tool_name}' (tool_use_id={tool_use_id})."
         ) from exc
+
+    result = dict(result)
+    if pattern_prep:
+        result.setdefault("executed_parameters", dict(pattern_prep.parameters))
+        resolved_feature_refs = pattern_prep.parameters.get("feature_tokens")
+        if isinstance(resolved_feature_refs, list):
+            result.setdefault("resolved_feature_refs", list(resolved_feature_refs))
 
     success = bool(result.get("success"))
     message_text = result.get("message") or f"{tool_name} completed."

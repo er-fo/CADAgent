@@ -5,7 +5,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import List
 
-from ...ir.types import AddCircleParams, AddRectangleParams, CreateSketchParams, ExtrudeParams, IRDocument
+from ...ir.types import (
+    AddCircleParams,
+    AddRectangleParams,
+    CreateSketchParams,
+    ExtrudeParams,
+    IRDocument,
+    ListSketchProfilesParams,
+)
 
 
 @dataclass(frozen=True)
@@ -114,7 +121,23 @@ def translate_ir_document_to_build123d(document: IRDocument) -> Build123dProgram
             )
             continue
 
-        raise ValueError(f"Unsupported IR operation for build123d translator: {op.type}")
+        if op.type == "list_sketch_profiles":
+            params = op.params
+            if not isinstance(params, ListSketchProfilesParams):
+                raise ValueError("list_sketch_profiles IR params shape mismatch")
+            lines.extend(
+                [
+                    f"    # {op.id}: list_sketch_profiles",
+                    f"    if {params.sketch!r} not in _sketch_planes:",
+                    f"        raise ValueError(\"Sketch plane missing for '{params.sketch}'. Ensure create_sketch succeeded before list_sketch_profiles.\")",
+                ]
+            )
+            continue
+
+        raise ValueError(
+            f"Unsupported IR operation for build123d translator: {op.type}. "
+            "This operation requires a target capability that the build123d adapter has not implemented directly."
+        )
 
     lines.extend(
         [

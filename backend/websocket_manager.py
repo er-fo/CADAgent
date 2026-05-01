@@ -74,6 +74,7 @@ class ConnectionManager:
         self.operation_checkpoints: Dict[str, List[Dict[str, Any]]] = {}
         self.ir_document_states: Dict[str, Dict[str, Any]] = {}
         self.feature_snapshots: Dict[str, Dict[str, Any]] = {}
+        self.ir_document_states: Dict[str, Any] = {}
         self.entity_stores: Dict[str, "EntityStore"] = {}
         self.sketch_entity_stores: Dict[str, "SketchEntityStore"] = {}
         self.user_tokens: Dict[str, Optional[str]] = {}  # JWT tokens for usage tracking
@@ -198,6 +199,8 @@ class ConnectionManager:
 
         if session_id in self.feature_snapshots:
             del self.feature_snapshots[session_id]
+        if session_id in self.ir_document_states:
+            del self.ir_document_states[session_id]
         if session_id in self.entity_stores:
             del self.entity_stores[session_id]
         if session_id in self.sketch_entity_stores:
@@ -337,6 +340,19 @@ class ConnectionManager:
         """Remove any cached feature snapshot for a session."""
         if session_id in self.feature_snapshots:
             del self.feature_snapshots[session_id]
+
+    def get_ir_document_state(self, session_id: str) -> Any:
+        """Retrieve the mutable committed IR document state for a session."""
+        return self.ir_document_states.get(session_id)
+
+    def set_ir_document_state(self, session_id: str, state: Any) -> None:
+        """Store the mutable committed IR document state for a session."""
+        self.ir_document_states[session_id] = state
+
+    def clear_ir_document_state(self, session_id: str) -> None:
+        """Remove committed IR document state for a session."""
+        if session_id in self.ir_document_states:
+            del self.ir_document_states[session_id]
 
     def set_latest_entity_context(self, session_id: str, entity_context: Dict[str, Any]) -> None:
         """Store the most recent full entity context for a session."""

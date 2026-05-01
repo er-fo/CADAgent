@@ -249,13 +249,13 @@ CRITICAL RULES:
    5. Line: (T,B) → (0,B)         [top of vertical leg]
    6. Line: (0,B) → (0,0)         [left side, back to start]
 
-   This creates ONE closed loop = ONE profile (index 0).
+   After these lines, call list_sketch_profiles to inspect the closed loop and use the returned profile index.
 
    STRATEGY FOR PERPENDICULAR FLANGES (brackets, angles):
    Option A - Cross-section extrude (PREFERRED, simpler):
      1. Choose plane showing the L/T cross-section (e.g., XZ for vertical bracket)
      2. Draw the profile as connected lines forming one closed loop
-     3. Extrude to give depth/width
+     3. Call list_sketch_profiles, then extrude the returned profile index to give depth/width
 
    Option B - Multi-feature build (when flanges need different operations):
      1. Create first flange as rectangular extrusion
@@ -488,7 +488,7 @@ CRITICAL RULES:
        4. If still ambiguous: Ask user for clarification rather than guessing
 
     H) COORDINATE SYSTEM INTEGRATION:
-       - Design Entities uses WORLD coordinates (x, y, z) in cm
+       - Design Entities uses WORLD coordinates (x, y, z) in mm
        - When placing sketch geometry, convert world height (Z) to sketch plane offset
        - When placing holes/threads, use world coordinates directly from face analysis
        - Never mix sketch (u,v) with world (x,y,z) - reference rule #10
@@ -812,7 +812,7 @@ TOOL REFERENCE:
         "tools": ["extrude_profile", "revolve_profile", "create_loft"],
         "description": "Convert 2D profiles to 3D geometry",
         "documentation": """
-- extrude_profile: Requires closed profile, specify distance and operation (NewBody/Join/Cut)
+- extrude_profile: Requires closed profile, specify distance and operation (NewBody/Join/Cut/Intersect)
    - Multi-profile extrude (PREFERRED for overlapping shapes): When overlapping primitives (circle + rectangle, etc.) create multiple profiles, use profile_indices=[0,1,...,N-1] to extrude ALL regions as one unified feature in a single call. This is far more reliable than sequential single-profile extrusions with Join.
    - If using profile_indices: omit profile_index from the tool input entirely (mutually exclusive).
    - Do NOT pass profile_indices=[] (empty array) — either omit the field or provide actual indices.
@@ -883,10 +883,10 @@ ALWAYS use the appropriate hole tool:
 **Tool Selection Guide:**
 | Hole Type | Tool | When to Use |
 |-----------|------|-------------|
-| Plain through-hole | create_simple_hole (through_all=true) | Clearance holes, mounting holes, vent holes |
-| Plain blind hole | create_simple_hole (through_all=false) | Dowel holes, sensor pockets |
+| Plain through-hole | create_simple_hole with extent_type="through_all" | Clearance holes, mounting holes, vent holes |
+| Plain blind hole | create_simple_hole with extent_type="distance" and depth | Dowel holes, sensor pockets |
 | Counterbore | create_counterbore_hole | Socket head cap screws (SHCS), recessed bolt heads |
-| Countersink | create_counterbore_hole (with angle) | Flat head screws |
+| Countersink | unsupported as a dedicated tool | Ask before approximating with other operations |
 | Tapped/threaded | create_tapped_hole | Screws thread directly into part |
 
 **Why hole tools instead of sketch+extrude:**

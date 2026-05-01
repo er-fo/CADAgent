@@ -240,7 +240,7 @@ def test_execute_workflow_reuses_committed_ir_state_across_fusion_requests(monke
             raw_result={"success": True, "tool_use_id": tool_use_id, "message": f"{operation.type} ok"},
         )
 
-    async def fake_refresh_after_success(session_id, manager, tool_name, result, messages):
+    async def fake_refresh_after_success(*args, **kwargs):
         return None
 
     async def fake_runtime_sync(*args, **kwargs):
@@ -254,13 +254,13 @@ def test_execute_workflow_reuses_committed_ir_state_across_fusion_requests(monke
 
     asyncio.run(
         agent_workflow._execute_workflow_loop(
-            session_id="s-ir-continuity",
-            messages=[{"role": "user", "content": [{"type": "text", "text": "create sketch"}]}],
-            max_iterations=2,
+            session_id="s-topology-defer",
+            messages=[{"role": "user", "content": [{"type": "text", "text": "two extrudes"}]}],
+            max_iterations=3,
             model_name=None,
             manager=manager,  # type: ignore[arg-type]
             last_user_message_sent=None,
-            request={"execution_target": "fusion", "request_id": "r-create"},
+            request={"execution_target": "fusion", "request_id": "topology-1"},
             feature_snapshot=None,
         )
     )
@@ -285,6 +285,543 @@ def test_execute_workflow_reuses_committed_ir_state_across_fusion_requests(monke
     assert [op["type"] for op in manager.ir_state["operations"]] == ["create_sketch", "add_rectangle"]
     assert manager.ir_state["operations"][1]["dependencies"] == ["op_1"]
     assert not any("IR validation failed" in text for text in _extract_tool_result_texts(manager.history))
+
+
+def test_execute_workflow_reuses_committed_ir_state_across_same_session_requests(monkeypatch: pytest.MonkeyPatch):
+    manager = _FakeManager()
+    responses = [
+        {
+            "stop_reason": "tool_use",
+            "content": [
+                {"type": "tool_use", "id": "toolu_sketch", "name": "create_sketch", "input": {"plane_id": "XY", "sketch_id": "s0"}},
+                {"type": "tool_use", "id": "toolu_circle", "name": "add_circle", "input": {"sketch_id": "s0", "center_u": 0, "center_v": 0, "radius": 1}},
+            ],
+        },
+        _end_turn_response(),
+        {
+            "stop_reason": "tool_use",
+            "content": [
+                {"type": "tool_use", "id": "toolu_extrude", "name": "extrude_profile", "input": {"sketch_id": "s0", "profile_index": 0, "distance": 2}},
+            ],
+        },
+        _end_turn_response(),
+    ]
+    executed_ops: List[tuple[str, str, List[str]]] = []
+
+    async def fake_call_claude_with_tools(*args, **kwargs):
+        return responses.pop(0)
+
+    async def fake_execute_operation(self, session_id, operation, tool_use_id, description=""):
+        executed_ops.append((operation.id, operation.type, list(operation.dependencies)))
+        return TargetExecutionResult(
+            success=True,
+            target="fusion",
+            message=f"{operation.type} ok",
+            data={"tool_name": operation.type, "tool_input": {"sketch_id": "s0", "plane_id": "XY"}},
+            raw_result={"success": True, "tool_use_id": tool_use_id, "message": f"{operation.type} ok"},
+        )
+
+    async def fake_refresh_after_success(*args, **kwargs):
+        return None
+
+    async def fake_runtime_sync(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(agent_workflow, "USE_PROMPT_ROUTING", False)
+    monkeypatch.setattr(agent_workflow, "call_claude_with_tools", fake_call_claude_with_tools)
+    monkeypatch.setattr(agent_workflow.FusionTargetExecutor, "execute_operation", fake_execute_operation)
+    monkeypatch.setattr(agent_workflow, "_refresh_and_enrich_after_success", fake_refresh_after_success)
+    monkeypatch.setattr(agent_workflow, "_ensure_runtime_entity_context_synced", fake_runtime_sync)
+
+    for request_id, prompt in (("state-1", "Create circle sketch"), ("state-2", "Extrude it")):
+        asyncio.run(
+            agent_workflow._execute_workflow_loop(
+                session_id="s-persist-ir",
+                messages=[{"role": "user", "content": [{"type": "text", "text": prompt}]}],
+                max_iterations=3,
+                model_name=None,
+                manager=manager,  # type: ignore[arg-type]
+                last_user_message_sent=None,
+                request={"execution_target": "fusion", "request_id": request_id},
+                feature_snapshot=None,
+            )
+        )
+
+    assert [(op_id, op_type) for op_id, op_type, _deps in executed_ops] == [
+        ("op_1", "create_sketch"),
+        ("op_2", "add_circle"),
+        ("op_3", "extrude"),
+    ]
+    assert executed_ops[-1][2] == ["op_2", "op_1"]
+    state = manager.get_ir_document_state("s-persist-ir")
+    assert state is not None
+    assert [operation["id"] for operation in state["operations"]] == ["op_1", "op_2", "op_3"]
+    committed_events = [msg for msg in manager.sent_messages if msg.get("type") == "ir_operation_committed"]
+    assert [event["operation"]["id"] for event in committed_events] == ["op_1", "op_2", "op_3"]
+
+
+def test_execute_workflow_commits_target_results_into_ir(monkeypatch: pytest.MonkeyPatch):
+    manager = _FakeManager()
+    call_count = {"llm": 0}
+    appended_ops: List[Any] = []
+    original_append = agent_workflow.IRDocumentState.append
+
+    async def fake_call_claude_with_tools(*args, **kwargs):
+        call_count["llm"] += 1
+        if call_count["llm"] == 1:
+            return {
+                "stop_reason": "tool_use",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "toolu_sketch",
+                        "name": "create_sketch",
+                        "input": {"plane_id": "XY", "sketch_id": "sketch_0"},
+                    }
+                ],
+            }
+        return _end_turn_response()
+
+    async def fake_execute_operation(self, session_id, operation, tool_use_id, description=""):
+        return TargetExecutionResult(
+            success=True,
+            target="fusion",
+            message="sketch ok",
+            data={"tool_name": "create_sketch", "tool_input": {"plane_id": "XY", "sketch_id": "sketch_0"}},
+            raw_result={
+                "success": True,
+                "tool_use_id": tool_use_id,
+                "message": "sketch ok",
+                "created_entities": {"sketches": ["sketch_0"]},
+                "warnings": ["minor warning"],
+            },
+        )
+
+    def capture_append(self, operation):
+        appended_ops.append(operation)
+        original_append(self, operation)
+
+    async def fake_refresh_after_success(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(agent_workflow, "USE_PROMPT_ROUTING", False)
+    monkeypatch.setattr(agent_workflow, "call_claude_with_tools", fake_call_claude_with_tools)
+    monkeypatch.setattr(agent_workflow.FusionTargetExecutor, "execute_operation", fake_execute_operation)
+    monkeypatch.setattr(agent_workflow.IRDocumentState, "append", capture_append)
+    monkeypatch.setattr(agent_workflow, "_refresh_and_enrich_after_success", fake_refresh_after_success)
+
+    asyncio.run(
+        agent_workflow._execute_workflow_loop(
+            session_id="s-target-results",
+            messages=[{"role": "user", "content": [{"type": "text", "text": "Create sketch"}]}],
+            max_iterations=3,
+            model_name=None,
+            manager=manager,  # type: ignore[arg-type]
+            last_user_message_sent=None,
+            request={"execution_target": "fusion", "request_id": "target-results-1"},
+            feature_snapshot=None,
+        )
+    )
+
+    assert appended_ops
+    target_result = appended_ops[0].target_results[0]
+    assert target_result["target"] == "fusion"
+    assert target_result["success"] is True
+    assert target_result["created_entities"] == {"sketches": ["sketch_0"]}
+    assert target_result["warnings"] == ["minor warning"]
+    assert target_result["raw_result"]["tool_use_id"] == "toolu_sketch"
+    committed_events = [msg for msg in manager.sent_messages if msg.get("type") == "ir_operation_committed"]
+    assert committed_events
+    assert committed_events[0]["operation"]["target_results"][0]["raw_result"]["tool_use_id"] == "toolu_sketch"
+
+
+def test_execute_workflow_commits_feature_target_results_into_ir(monkeypatch: pytest.MonkeyPatch):
+    manager = _FakeManager()
+    call_count = {"llm": 0}
+    appended_ops: List[Any] = []
+    original_append = agent_workflow.IRDocumentState.append
+
+    async def fake_call_claude_with_tools(*args, **kwargs):
+        call_count["llm"] += 1
+        if call_count["llm"] == 1:
+            return {
+                "stop_reason": "tool_use",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "toolu_features",
+                        "name": "list_features",
+                        "input": {"description": "inspect timeline"},
+                    }
+                ],
+            }
+        return _end_turn_response()
+
+    async def fake_execute_feature_tool_call(*args, **kwargs):
+        return True, "features ok", {"features": [{"entity_token": "feature_token_0"}], "warnings": ["cached"]}
+
+    async def fake_refresh_after_success(*args, **kwargs):
+        return None
+
+    def capture_append(self, operation):
+        appended_ops.append(operation)
+        original_append(self, operation)
+
+    monkeypatch.setattr(agent_workflow, "USE_PROMPT_ROUTING", False)
+    monkeypatch.setattr(agent_workflow, "call_claude_with_tools", fake_call_claude_with_tools)
+    monkeypatch.setattr(agent_workflow, "_execute_feature_tool_call", fake_execute_feature_tool_call)
+    monkeypatch.setattr(agent_workflow, "_refresh_and_enrich_after_success", fake_refresh_after_success)
+    monkeypatch.setattr(agent_workflow.IRDocumentState, "append", capture_append)
+
+    asyncio.run(
+        agent_workflow._execute_workflow_loop(
+            session_id="s-feature-target-results",
+            messages=[{"role": "user", "content": [{"type": "text", "text": "List features"}]}],
+            max_iterations=3,
+            model_name=None,
+            manager=manager,  # type: ignore[arg-type]
+            last_user_message_sent=None,
+            request={"execution_target": "fusion", "request_id": "feature-target-results-1"},
+            feature_snapshot=None,
+        )
+    )
+
+    assert appended_ops
+    target_result = appended_ops[0].target_results[0]
+    assert target_result["target"] == "fusion"
+    assert target_result["raw_result"]["features"][0]["entity_token"] == "feature_token_0"
+    assert target_result["warnings"] == ["cached"]
+    committed_events = [msg for msg in manager.sent_messages if msg.get("type") == "ir_operation_committed"]
+    assert committed_events
+    assert committed_events[0]["operation"]["target_results"][0]["raw_result"]["features"][0]["entity_token"] == "feature_token_0"
+
+
+def test_execute_feature_tool_call_returns_list_features_snapshot():
+    class _FeatureSnapshotManager(_FakeManager):
+        def __init__(self) -> None:
+            super().__init__()
+            self.feature_snapshot: Optional[Dict[str, Any]] = None
+
+        async def wait_for_fusion_result(self, session_id: str, timeout=None):
+            request = next(msg for msg in reversed(self.sent_messages) if msg.get("type") == "feature_snapshot_request")
+            return {
+                "type": "feature_snapshot",
+                "success": True,
+                "message_id": request["message_id"],
+                "features": [
+                    {
+                        "entity_token": "feature_token_0",
+                        "name": "Extrude 1",
+                        "timeline_index": 3,
+                    }
+                ],
+            }
+
+        async def store_fusion_result(self, session_id: str, result: Dict[str, Any]) -> None:
+            pass
+
+        def set_feature_snapshot(self, session_id: str, snapshot: Dict[str, Any]) -> None:
+            self.feature_snapshot = dict(snapshot)
+
+        def get_feature_snapshot(self, session_id: str) -> Optional[Dict[str, Any]]:
+            return dict(self.feature_snapshot) if self.feature_snapshot else None
+
+    async def _run():
+        manager = _FeatureSnapshotManager()
+        success, message, raw = await agent_workflow._execute_feature_tool_call(
+            "s-list-features",
+            manager,  # type: ignore[arg-type]
+            "list_features",
+            "toolu_features",
+            {"description": "inspect timeline"},
+        )
+
+        assert success is True
+        assert "Extrude 1" in message
+        assert raw["features"][0]["entity_token"] == "feature_token_0"
+
+    asyncio.run(_run())
+
+
+def test_execute_workflow_commits_selection_raw_target_results(monkeypatch: pytest.MonkeyPatch):
+    manager = _FakeManager()
+    appended_ops: List[Any] = []
+    original_append = agent_workflow.IRDocumentState.append
+
+    async def fake_call_claude_with_tools(*args, **kwargs):
+        return {
+            "stop_reason": "tool_use",
+            "content": [
+                {
+                    "type": "tool_use",
+                    "id": "toolu_select",
+                    "name": "select_edges",
+                    "input": {"edge_refs": ["e0"], "clear_existing": True},
+                }
+            ],
+        }
+
+    async def fake_execute_geometry_tool_call(*args, **kwargs):
+        return True, "selected ok", {"success": True, "selected_count": 1, "missing_tokens": []}
+
+    def capture_append(self, operation):
+        appended_ops.append(operation)
+        original_append(self, operation)
+
+    monkeypatch.setattr(agent_workflow, "USE_PROMPT_ROUTING", False)
+    monkeypatch.setattr(agent_workflow, "call_claude_with_tools", fake_call_claude_with_tools)
+    monkeypatch.setattr(agent_workflow, "_validate_entity_store_for_tool", lambda *args, **kwargs: (True, "ok"))
+    monkeypatch.setattr(agent_workflow, "_execute_geometry_tool_call", fake_execute_geometry_tool_call)
+    monkeypatch.setattr(agent_workflow.IRDocumentState, "append", capture_append)
+
+    asyncio.run(
+        agent_workflow._execute_workflow_loop(
+            session_id="s-selection-target-results",
+            messages=[{"role": "user", "content": [{"type": "text", "text": "Select edge"}]}],
+            max_iterations=3,
+            model_name=None,
+            manager=manager,  # type: ignore[arg-type]
+            last_user_message_sent=None,
+            request={"execution_target": "fusion", "request_id": "selection-target-results-1"},
+            feature_snapshot=None,
+        )
+    )
+
+    assert appended_ops
+    target_result = appended_ops[0].target_results[0]
+    assert target_result["raw_result"]["selected_count"] == 1
+    committed_events = [msg for msg in manager.sent_messages if msg.get("type") == "ir_operation_committed"]
+    assert committed_events
+    assert committed_events[0]["operation"]["target_results"][0]["raw_result"]["selected_count"] == 1
+
+
+def test_execute_workflow_commits_resolved_pattern_feature_refs(monkeypatch: pytest.MonkeyPatch):
+    class _PatternManager(_FakeManager):
+        def __init__(self) -> None:
+            super().__init__()
+            self.feature_snapshot: Optional[Dict[str, Any]] = None
+
+        async def wait_for_fusion_result(self, session_id: str, timeout=None):
+            last = self.sent_messages[-1]
+            if last.get("type") == "feature_snapshot_request":
+                return {
+                    "type": "feature_snapshot",
+                    "success": True,
+                    "message_id": last["message_id"],
+                    "features": [
+                        {
+                            "entity_token": "feature_token_latest",
+                            "name": "Hole 1",
+                            "timeline_index": 5,
+                            "bounds_cm": {"min": [0, 0, 0], "max": [1, 1, 1]},
+                        }
+                    ],
+                }
+            return {
+                "tool_use_id": "toolu_pattern",
+                "success": True,
+                "message": "pattern ok",
+                "pattern_token": "pattern_token_0",
+            }
+
+        async def store_fusion_result(self, session_id: str, result: Dict[str, Any]) -> None:
+            pass
+
+        def set_feature_snapshot(self, session_id: str, snapshot: Dict[str, Any]) -> None:
+            self.feature_snapshot = dict(snapshot)
+
+        def get_feature_snapshot(self, session_id: str) -> Optional[Dict[str, Any]]:
+            return dict(self.feature_snapshot) if self.feature_snapshot else None
+
+    manager = _PatternManager()
+    appended_ops: List[Any] = []
+    original_append = agent_workflow.IRDocumentState.append
+
+    async def fake_call_claude_with_tools(*args, **kwargs):
+        return {
+            "stop_reason": "tool_use",
+            "content": [
+                {
+                    "type": "tool_use",
+                    "id": "toolu_pattern",
+                    "name": "create_pattern_feature",
+                    "input": {
+                        "pattern_type": "rectangular",
+                        "feature_tokens": ["auto_last"],
+                        "count_x": 2,
+                        "description": "pattern latest feature",
+                    },
+                }
+            ],
+        }
+
+    async def fake_refresh_after_success(*args, **kwargs):
+        return None
+
+    def capture_append(self, operation):
+        appended_ops.append(operation)
+        original_append(self, operation)
+
+    monkeypatch.setattr(agent_workflow, "USE_PROMPT_ROUTING", False)
+    monkeypatch.setattr(agent_workflow, "call_claude_with_tools", fake_call_claude_with_tools)
+    monkeypatch.setattr(agent_workflow, "_refresh_and_enrich_after_success", fake_refresh_after_success)
+    monkeypatch.setattr(agent_workflow.IRDocumentState, "append", capture_append)
+
+    asyncio.run(
+        agent_workflow._execute_workflow_loop(
+            session_id="s-pattern-target-results",
+            messages=[{"role": "user", "content": [{"type": "text", "text": "Pattern latest feature"}]}],
+            max_iterations=3,
+            model_name=None,
+            manager=manager,  # type: ignore[arg-type]
+            last_user_message_sent=None,
+            request={"execution_target": "fusion", "request_id": "pattern-target-results-1"},
+            feature_snapshot=None,
+        )
+    )
+
+    assert appended_ops
+    assert appended_ops[0].params.feature_refs == ["feature_token_latest"]
+    target_result = appended_ops[0].target_results[0]
+    assert target_result["raw_result"]["resolved_feature_refs"] == ["feature_token_latest"]
+    committed_events = [msg for msg in manager.sent_messages if msg.get("type") == "ir_operation_committed"]
+    assert committed_events
+    assert committed_events[0]["operation"]["params"]["feature_refs"] == ["feature_token_latest"]
+
+
+@pytest.mark.parametrize(
+    "tool_call",
+    [
+        {
+            "id": "toolu_fillet",
+            "name": "apply_fillet",
+            "input": {"edge_refs": ["e0"], "radius": 2, "description": "round edge"},
+        },
+        {
+            "id": "toolu_hole",
+            "name": "create_simple_hole",
+            "input": {
+                "face_ref": "face_0",
+                "center_x": 0,
+                "center_y": 0,
+                "center_z": 0,
+                "diameter": 4,
+                "extent_type": "through_all",
+                "description": "hole",
+            },
+        },
+        {
+            "id": "toolu_select",
+            "name": "select_edges",
+            "input": {"edge_refs": ["e0"], "description": "select"},
+        },
+        {
+            "id": "toolu_features",
+            "name": "list_features",
+            "input": {"description": "inspect"},
+        },
+    ],
+)
+def test_build123d_rejects_fusion_only_feature_and_selection_tools(
+    monkeypatch: pytest.MonkeyPatch,
+    tool_call: Dict[str, Any],
+):
+    manager = _FakeManager()
+    call_count = {"llm": 0, "feature_exec": 0, "geometry_exec": 0}
+
+    async def fake_call_claude_with_tools(*args, **kwargs):
+        call_count["llm"] += 1
+        if call_count["llm"] == 1:
+            return {"stop_reason": "tool_use", "content": [{"type": "tool_use", **tool_call}]}
+        return _end_turn_response()
+
+    async def fake_execute_feature_tool_call(*args, **kwargs):
+        call_count["feature_exec"] += 1
+        return True, "should not execute", {}
+
+    async def fake_execute_geometry_tool_call(*args, **kwargs):
+        call_count["geometry_exec"] += 1
+        return True, "should not execute"
+
+    monkeypatch.setattr(agent_workflow, "USE_PROMPT_ROUTING", False)
+    monkeypatch.setattr(agent_workflow, "call_claude_with_tools", fake_call_claude_with_tools)
+    monkeypatch.setattr(agent_workflow, "_execute_feature_tool_call", fake_execute_feature_tool_call)
+    monkeypatch.setattr(agent_workflow, "_execute_geometry_tool_call", fake_execute_geometry_tool_call)
+
+    asyncio.run(
+        agent_workflow._execute_workflow_loop(
+            session_id="s-build-unsupported",
+            messages=[{"role": "user", "content": [{"type": "text", "text": "run unsupported"}]}],
+            max_iterations=3,
+            model_name=None,
+            manager=manager,  # type: ignore[arg-type]
+            last_user_message_sent=None,
+            request={"execution_target": "build123d", "request_id": "unsupported-1"},
+            feature_snapshot=None,
+        )
+    )
+
+    assert call_count["feature_exec"] == 0
+    assert call_count["geometry_exec"] == 0
+    assert any(msg.get("message") == "Unsupported build123d tool" for msg in manager.sent_messages)
+    assert any("not supported by the build123d target" in text for text in _extract_tool_result_texts(manager.history))
+
+
+def test_ir_routed_topology_mutations_are_deferred_after_first_mutation(monkeypatch: pytest.MonkeyPatch):
+    manager = _FakeManager()
+    call_count = {"llm": 0}
+    executed_ops: List[str] = []
+
+    async def fake_call_claude_with_tools(*args, **kwargs):
+        call_count["llm"] += 1
+        if call_count["llm"] == 1:
+            return {
+                "stop_reason": "tool_use",
+                "content": [
+                    {"type": "tool_use", "id": "toolu_1", "name": "create_sketch", "input": {"plane_id": "XY", "sketch_id": "s0"}},
+                    {"type": "tool_use", "id": "toolu_2", "name": "add_circle", "input": {"sketch_id": "s0", "center_u": 0, "center_v": 0, "radius": 1}},
+                    {"type": "tool_use", "id": "toolu_3", "name": "extrude_profile", "input": {"sketch_id": "s0", "profile_index": 0, "distance": 2}},
+                    {"type": "tool_use", "id": "toolu_4", "name": "extrude_profile", "input": {"sketch_id": "s0", "profile_index": 0, "distance": 1}},
+                ],
+            }
+        return _end_turn_response()
+
+    async def fake_execute_operation(self, session_id, operation, tool_use_id, description=""):
+        executed_ops.append(operation.type)
+        return TargetExecutionResult(
+            success=True,
+            target="fusion",
+            message=f"{operation.type} ok",
+            raw_result={"success": True, "tool_use_id": tool_use_id, "message": f"{operation.type} ok"},
+        )
+
+    async def fake_refresh_after_success(*args, **kwargs):
+        return None
+
+    async def fake_runtime_sync(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(agent_workflow, "USE_PROMPT_ROUTING", False)
+    monkeypatch.setattr(agent_workflow, "call_claude_with_tools", fake_call_claude_with_tools)
+    monkeypatch.setattr(agent_workflow.FusionTargetExecutor, "execute_operation", fake_execute_operation)
+    monkeypatch.setattr(agent_workflow, "_refresh_and_enrich_after_success", fake_refresh_after_success)
+    monkeypatch.setattr(agent_workflow, "_ensure_runtime_entity_context_synced", fake_runtime_sync)
+
+    asyncio.run(
+        agent_workflow._execute_workflow_loop(
+            session_id="s-topology-defer",
+            messages=[{"role": "user", "content": [{"type": "text", "text": "two extrudes"}]}],
+            max_iterations=3,
+            model_name=None,
+            manager=manager,  # type: ignore[arg-type]
+            last_user_message_sent=None,
+            request={"execution_target": "fusion", "request_id": "topology-1"},
+            feature_snapshot=None,
+        )
+    )
+
+    assert executed_ops == ["create_sketch", "add_circle", "extrude"]
+    assert any("Deferred 'extrude_profile'" in text for text in _extract_tool_result_texts(manager.history))
 
 
 def test_execute_workflow_resolves_ir_create_sketch_face_ref_for_fusion(monkeypatch: pytest.MonkeyPatch):
@@ -357,6 +894,120 @@ def test_execute_workflow_resolves_ir_create_sketch_face_ref_for_fusion(monkeypa
     )
 
     assert captured_planes == ["face_token_abc"]
+
+
+def test_execute_workflow_resolves_ir_codegen_refs_for_construction_plane_and_revolve(monkeypatch: pytest.MonkeyPatch):
+    async def _setup_store() -> EntityStore:
+        store = EntityStore()
+        await store.register_entities(
+            "face",
+            [{"entity_token": "face_token_0", "surface_type": "planar", "area": 10.0}],
+        )
+        await store.register_entities(
+            "edge",
+            [{"entity_token": "edge_token_0", "length": 10.0}],
+        )
+        return store
+
+    class _StoreManager(_FakeManager):
+        def __init__(self, store: EntityStore) -> None:
+            super().__init__()
+            self._store = store
+
+        def get_entity_store(self, session_id: str) -> EntityStore:
+            return self._store
+
+    manager = _StoreManager(asyncio.run(_setup_store()))
+    call_count = {"llm": 0}
+    captured: Dict[str, Any] = {}
+
+    async def fake_call_claude_with_tools(*args, **kwargs):
+        call_count["llm"] += 1
+        if call_count["llm"] == 1:
+            return {
+                "stop_reason": "tool_use",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "toolu_plane",
+                        "name": "create_construction_plane",
+                        "input": {
+                            "plane_id": "face_plane",
+                            "mode": "face_normal",
+                            "face_token": "face_0",
+                            "description": "plane on face",
+                        },
+                    },
+                    {
+                        "type": "tool_use",
+                        "id": "toolu_sketch",
+                        "name": "create_sketch",
+                        "input": {"plane_id": "XY", "sketch_id": "profile_sketch"},
+                    },
+                    {
+                        "type": "tool_use",
+                        "id": "toolu_circle",
+                        "name": "add_circle",
+                        "input": {"sketch_id": "profile_sketch", "center_u": 1, "center_v": 0, "radius": 0.5},
+                    },
+                    {
+                        "type": "tool_use",
+                        "id": "toolu_revolve",
+                        "name": "revolve_profile",
+                        "input": {
+                            "sketch_id": "profile_sketch",
+                            "profile_index": 0,
+                            "axis": {"type": "edge", "edge_token": "e0"},
+                            "extent": {"mode": "to", "to_entity_token": "face_0"},
+                            "operation": "NewBody",
+                            "description": "revolve to face",
+                        },
+                    },
+                ],
+            }
+        return _end_turn_response()
+
+    async def fake_execute_operation(self, session_id, operation, tool_use_id, description=""):
+        if operation.type == "create_construction_plane":
+            captured["plane_face"] = operation.params.face
+        if operation.type == "revolve":
+            captured["revolve_axis"] = dict(operation.params.axis)
+            captured["revolve_extent"] = dict(operation.params.extent)
+        return TargetExecutionResult(
+            success=True,
+            target="fusion",
+            message=f"{operation.type} ok",
+            raw_result={"success": True, "tool_use_id": tool_use_id, "message": f"{operation.type} ok"},
+        )
+
+    async def fake_refresh_after_success(*args, **kwargs):
+        return None
+
+    async def fake_runtime_sync(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(agent_workflow, "USE_PROMPT_ROUTING", False)
+    monkeypatch.setattr(agent_workflow, "call_claude_with_tools", fake_call_claude_with_tools)
+    monkeypatch.setattr(agent_workflow.FusionTargetExecutor, "execute_operation", fake_execute_operation)
+    monkeypatch.setattr(agent_workflow, "_refresh_and_enrich_after_success", fake_refresh_after_success)
+    monkeypatch.setattr(agent_workflow, "_ensure_runtime_entity_context_synced", fake_runtime_sync)
+
+    asyncio.run(
+        agent_workflow._execute_workflow_loop(
+            session_id="s-codegen-ref-resolution",
+            messages=[{"role": "user", "content": [{"type": "text", "text": "Resolve codegen refs"}]}],
+            max_iterations=4,
+            model_name=None,
+            manager=manager,  # type: ignore[arg-type]
+            last_user_message_sent=None,
+            request={"execution_target": "fusion", "request_id": "r-codegen-ref-resolution"},
+            feature_snapshot=None,
+        )
+    )
+
+    assert captured["plane_face"] == "face_token_0"
+    assert captured["revolve_axis"]["edge_token"] == "edge_token_0"
+    assert captured["revolve_extent"]["to_entity_token"] == "face_token_0"
 
 
 def test_execute_workflow_defers_same_turn_face_sketch_geometry(monkeypatch: pytest.MonkeyPatch):

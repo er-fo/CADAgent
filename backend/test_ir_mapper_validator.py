@@ -1,12 +1,32 @@
+from dataclasses import replace
+
 import pytest
 
 try:
     from .ir.document import IRDocumentState
     from .ir.mapper import UnsupportedToolMappingError, map_tool_call_to_ir
+    from .ir.types import (
+        AddLineParams,
+        ExtrudeParams,
+        ExternalThreadParams,
+        IROperation,
+        PatternFeatureParams,
+        SimpleHoleParams,
+        TappedHoleParams,
+    )
     from .ir.validator import validate_ir_candidate, validate_ir_sequence, validate_operation
 except ImportError:  # pragma: no cover
     from backend.backend.ir.document import IRDocumentState
     from backend.backend.ir.mapper import UnsupportedToolMappingError, map_tool_call_to_ir
+    from backend.backend.ir.types import (
+        AddLineParams,
+        ExtrudeParams,
+        ExternalThreadParams,
+        IROperation,
+        PatternFeatureParams,
+        SimpleHoleParams,
+        TappedHoleParams,
+    )
     from backend.backend.ir.validator import validate_ir_candidate, validate_ir_sequence, validate_operation
 
 
@@ -34,12 +54,34 @@ def test_mapper_converts_rectangle_and_extrude_to_shared_ir():
     assert extrude_op.type == "extrude"
 
     assert rect_op.params.center == [0.0, 0.0]
-    assert rect_op.params.width == 50.0
-    assert rect_op.params.height == 50.0
+    assert rect_op.params.width == 500.0
+    assert rect_op.params.height == 500.0
+    assert rect_op.params.rectangle_id == "op_2_rectangle"
 
     assert extrude_op.params.profile == "sketch_0:profile_0"
+    assert extrude_op.params.distance == 500.0
     assert extrude_op.params.direction == "positive"
     assert extrude_op.params.operation == "new"
+
+
+def test_mapper_synthesizes_sketch_entity_ids_when_model_omits_them():
+    state = IRDocumentState()
+    map_tool_call_to_ir(
+        {"name": "create_sketch", "input": {"plane_id": "XY", "sketch_id": "sketch_0"}},
+        state,
+    )
+
+    line_op = map_tool_call_to_ir(
+        {"name": "add_line", "input": {"sketch_id": "sketch_0", "start_u": 0, "start_v": 0, "end_u": 1, "end_v": 0}},
+        state,
+    )
+    circle_op = map_tool_call_to_ir(
+        {"name": "add_circle", "input": {"sketch_id": "sketch_0", "center_u": 0, "center_v": 0, "radius": 1}},
+        state,
+    )
+
+    assert line_op.params.line_id == "op_2_line"
+    assert circle_op.params.circle_id == "op_3_circle"
 
 
 def test_mapper_preserves_profile_indices_for_multi_profile_extrude():
@@ -61,6 +103,7 @@ def test_mapper_preserves_profile_indices_for_multi_profile_extrude():
     assert op.params.profile_indices == [0, 1, 2]
     assert op.params.profile_index is None
     assert op.params.direction == "negative"
+    assert op.params.distance == 250.0
     assert op.params.operation == "cut"
     assert op.params.profile == "sketch_0:profile_0"
 
@@ -75,6 +118,74 @@ def test_validator_rejects_invalid_extrude_distance():
     errors = validate_operation(op)
     assert errors
     assert "distance must be > 0" in errors[0]
+
+
+@pytest.mark.parametrize(
+    "operation",
+    [
+        IROperation(
+            id="op_nan_extrude",
+            type="extrude",
+            params=ExtrudeParams(
+                profile="sketch_0:profile_0",
+                distance=float("nan"),
+                direction="positive",
+                operation="new",
+            ),
+        ),
+        IROperation(
+            id="op_inf_line",
+            type="add_line",
+            params=AddLineParams(sketch="sketch_0", start=[float("inf"), 0.0], end=[1.0, 0.0]),
+        ),
+        IROperation(
+            id="op_inf_hole",
+            type="create_simple_hole",
+            params=SimpleHoleParams(
+                face_ref="face_0",
+                center=[0.0, float("-inf"), 0.0],
+                diameter=4.0,
+                extent_type="distance",
+                depth=10.0,
+            ),
+        ),
+        IROperation(
+            id="op_inf_tapped",
+            type="create_tapped_hole",
+            params=TappedHoleParams(
+                face_ref="face_0",
+                center=[0.0, 0.0, 0.0],
+                thread_type="metric",
+                thread_size="M6",
+                thread_depth=float("inf"),
+            ),
+        ),
+        IROperation(
+            id="op_nan_thread",
+            type="create_external_thread",
+            params=ExternalThreadParams(
+                face_ref="face_0",
+                thread_type="metric",
+                thread_size="M6",
+                is_full_length=False,
+                thread_length=float("nan"),
+            ),
+        ),
+        IROperation(
+            id="op_inf_pattern",
+            type="pattern_feature",
+            params=PatternFeatureParams(
+                pattern_type="rectangular",
+                feature_refs=["feature_token_0"],
+                count_x=2,
+                spacing_x=float("inf"),
+            ),
+        ),
+    ],
+)
+def test_validator_rejects_nonfinite_numeric_values(operation):
+    errors = validate_operation(operation)
+    assert any("must be finite" in error or "must be a finite number" in error for error in errors)
 
 
 def test_sequence_validator_enforces_sketch_dependencies():
@@ -93,7 +204,7 @@ def test_sequence_validator_enforces_sketch_dependencies():
 def test_mapper_raises_for_unsupported_tool():
     state = IRDocumentState()
     with pytest.raises(UnsupportedToolMappingError):
-        map_tool_call_to_ir({"name": "apply_fillet", "input": {}}, state)
+        map_tool_call_to_ir({"name": "respond_to_user", "input": {}}, state)
 
 
 def test_mapper_preserves_non_datum_create_sketch_planes_for_fusion():
@@ -249,3 +360,275 @@ def test_mapper_rejects_empty_profile_indices():
             },
             state,
         )
+
+
+def test_mapper_canonicalizes_fusion_centimeters_to_ir_millimeters():
+    state = IRDocumentState()
+
+    line = map_tool_call_to_ir(
+        {
+            "name": "add_line",
+            "input": {
+                "sketch_id": "s0",
+                "start_u": 1.25,
+                "start_v": -2.0,
+                "end_u": 3.0,
+                "end_v": 4.5,
+            },
+        },
+        state,
+    )
+    circle = map_tool_call_to_ir(
+        {"name": "add_circle", "input": {"sketch_id": "s0", "center_u": 1, "center_v": 2, "radius": 0.75}},
+        state,
+    )
+
+    assert line.params.start == [12.5, -20.0]
+    assert line.params.end == [30.0, 45.0]
+    assert circle.params.center == [10.0, 20.0]
+    assert circle.params.radius == 7.5
+
+
+def test_mapper_covers_revolve_loft_and_feature_operations():
+    state = IRDocumentState()
+
+    revolve = map_tool_call_to_ir(
+        {
+            "name": "revolve_profile",
+            "input": {
+                "sketch_id": "profile_sketch",
+                "profile_index": 1,
+                "axis": {"type": "construction", "axis": "z"},
+                "extent": {"mode": "full"},
+                "operation": "Intersect",
+                "feature_name": "Turned Cut",
+                "description": "revolve",
+            },
+        },
+        state,
+    )
+    loft = map_tool_call_to_ir(
+        {
+            "name": "create_loft",
+            "input": {"profile_ids": ["s0", "s1"], "operation": "Join", "description": "loft"},
+        },
+        state,
+    )
+    fillet = map_tool_call_to_ir(
+        {
+            "name": "apply_fillet",
+            "input": {"edge_refs": ["edge_0"], "radius": 2.5, "radius_unit": "mm", "description": "round"},
+        },
+        state,
+    )
+    hole = map_tool_call_to_ir(
+        {
+            "name": "create_simple_hole",
+            "input": {
+                "face_ref": "face_0",
+                "center_x": 10,
+                "center_y": 20,
+                "center_z": 30,
+                "diameter": 0.4,
+                "diameter_unit": "cm",
+                "extent_type": "distance",
+                "depth": 12,
+                "description": "hole",
+            },
+        },
+        state,
+    )
+
+    assert revolve.type == "revolve"
+    assert revolve.params.operation == "intersect"
+    assert revolve.params.profile == "profile_sketch:profile_1"
+    assert loft.type == "loft"
+    assert loft.params.operation == "join"
+    assert fillet.type == "fillet"
+    assert fillet.params.radius == 2.5
+    assert fillet.effects.invalidates["edges"] == ["*"]
+    assert hole.type == "create_simple_hole"
+    assert hole.params.diameter == 4.0
+    assert hole.params.depth == 12.0
+
+
+def test_validator_rejects_invalid_widened_operations():
+    state = IRDocumentState()
+    bad_shell = map_tool_call_to_ir(
+        {
+            "name": "create_shell",
+            "input": {
+                "mode": "closed",
+                "face_refs": ["face_0"],
+                "inside_thickness": 2,
+                "description": "bad shell",
+            },
+        },
+        state,
+    )
+    bad_counterbore = map_tool_call_to_ir(
+        {
+            "name": "create_counterbore_hole",
+            "input": {
+                "face_ref": "face_0",
+                "center_x": 0,
+                "center_y": 0,
+                "center_z": 0,
+                "hole_diameter": 8,
+                "hole_depth": 10,
+                "counterbore_diameter": 6,
+                "counterbore_depth": 2,
+                "description": "bad counterbore",
+            },
+        },
+        state,
+    )
+
+    assert any("closed mode must not include face refs" in err for err in validate_operation(bad_shell))
+    assert any("counterbore_diameter must be larger" in err for err in validate_operation(bad_counterbore))
+
+
+def test_list_sketch_profiles_does_not_satisfy_profile_geometry_requirement():
+    state = IRDocumentState()
+    sketch = map_tool_call_to_ir(
+        {"name": "create_sketch", "input": {"plane_id": "XY", "sketch_id": "empty_sketch"}},
+        state,
+    )
+    state.append(sketch)
+    profiles = map_tool_call_to_ir(
+        {"name": "list_sketch_profiles", "input": {"sketch_id": "empty_sketch"}},
+        state,
+    )
+    extrude = map_tool_call_to_ir(
+        {
+            "name": "extrude_profile",
+            "input": {"sketch_id": "empty_sketch", "profile_index": 0, "distance": 1.0},
+        },
+        state,
+        dependency_operations=[sketch, profiles],
+    )
+
+    profile_errors = validate_ir_candidate(profiles, [sketch])
+    extrude_errors = validate_ir_candidate(extrude, [sketch, profiles])
+
+    assert any("requires committed sketch geometry" in err for err in profile_errors)
+    assert any("requires at least one committed profile operation" in err for err in extrude_errors)
+
+
+def test_validator_rejects_extrude_after_single_open_line():
+    state = IRDocumentState()
+    sketch = map_tool_call_to_ir(
+        {"name": "create_sketch", "input": {"plane_id": "XY", "sketch_id": "open_sketch"}},
+        state,
+    )
+    state.append(sketch)
+    line = map_tool_call_to_ir(
+        {
+            "name": "add_line",
+            "input": {
+                "sketch_id": "open_sketch",
+                "start_u": 0,
+                "start_v": 0,
+                "end_u": 1,
+                "end_v": 0,
+            },
+        },
+        state,
+    )
+    state.append(line)
+
+    extrude = map_tool_call_to_ir(
+        {
+            "name": "extrude_profile",
+            "input": {"sketch_id": "open_sketch", "profile_index": 0, "distance": 1.0},
+        },
+        state,
+    )
+
+    errors = validate_ir_candidate(extrude, state.operations)
+    assert any("requires at least one committed profile operation" in err for err in errors)
+
+
+def test_validator_accepts_successful_profile_inspection_as_profile_source():
+    state = IRDocumentState()
+    sketch = map_tool_call_to_ir(
+        {"name": "create_sketch", "input": {"plane_id": "XY", "sketch_id": "closed_by_lines"}},
+        state,
+    )
+    state.append(sketch)
+    line = map_tool_call_to_ir(
+        {
+            "name": "add_line",
+            "input": {
+                "sketch_id": "closed_by_lines",
+                "start_u": 0,
+                "start_v": 0,
+                "end_u": 1,
+                "end_v": 0,
+            },
+        },
+        state,
+    )
+    state.append(line)
+    profiles = map_tool_call_to_ir(
+        {"name": "list_sketch_profiles", "input": {"sketch_id": "closed_by_lines"}},
+        state,
+    )
+    committed_profiles = replace(
+        profiles,
+        target_results=[
+            {
+                "target": "fusion",
+                "success": True,
+                "raw_result": {"profile_count": 1, "profiles": [{"index": 0}]},
+            }
+        ],
+    )
+    state.append(committed_profiles)
+
+    extrude = map_tool_call_to_ir(
+        {
+            "name": "extrude_profile",
+            "input": {"sketch_id": "closed_by_lines", "profile_index": 0, "distance": 1.0},
+        },
+        state,
+    )
+
+    errors = validate_ir_candidate(extrude, state.operations)
+    assert not any("requires at least one committed profile operation" in err for err in errors)
+
+
+def test_thread_ir_validation_uses_thread_catalog():
+    state = IRDocumentState()
+    tapped = map_tool_call_to_ir(
+        {
+            "name": "create_tapped_hole",
+            "input": {
+                "face_ref": "face_0",
+                "center_x": 0,
+                "center_y": 0,
+                "center_z": 0,
+                "thread_type": "metric",
+                "thread_size": "1/4-20",
+                "thread_depth": 10,
+                "description": "wrong catalog",
+            },
+        },
+        state,
+    )
+    external = map_tool_call_to_ir(
+        {
+            "name": "create_external_thread",
+            "input": {
+                "face_ref": "face_1",
+                "thread_type": "unc",
+                "thread_size": "M6",
+                "is_full_length": True,
+                "description": "wrong catalog",
+            },
+        },
+        state,
+    )
+
+    assert any("thread spec invalid" in err for err in validate_operation(tapped))
+    assert any("thread spec invalid" in err for err in validate_operation(external))

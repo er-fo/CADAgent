@@ -142,6 +142,19 @@ def test_extrude_profile_only_profile_indices_no_profile_index():
     assert "if _profile_indices is None:" in code
 
 
+def test_extrude_profile_intersect_is_codegen_supported():
+    code = translate_tool_call(
+        "extrude_profile",
+        {
+            "sketch_id": "sk1",
+            "distance": 2.0,
+            "operation": "Intersect",
+            "description": "Intersect profile",
+        },
+    )
+    assert "FeatureOperations.IntersectFeatureOperation" in code
+
+
 def test_revolve_profile_axis_empty_object_is_rejected():
     with pytest.raises(CodeGenerationError) as exc:
         translate_tool_call(
