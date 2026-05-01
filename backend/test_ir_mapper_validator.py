@@ -56,11 +56,32 @@ def test_mapper_converts_rectangle_and_extrude_to_shared_ir():
     assert rect_op.params.center == [0.0, 0.0]
     assert rect_op.params.width == 500.0
     assert rect_op.params.height == 500.0
+    assert rect_op.params.rectangle_id == "op_2_rectangle"
 
     assert extrude_op.params.profile == "sketch_0:profile_0"
     assert extrude_op.params.distance == 500.0
     assert extrude_op.params.direction == "positive"
     assert extrude_op.params.operation == "new"
+
+
+def test_mapper_synthesizes_sketch_entity_ids_when_model_omits_them():
+    state = IRDocumentState()
+    map_tool_call_to_ir(
+        {"name": "create_sketch", "input": {"plane_id": "XY", "sketch_id": "sketch_0"}},
+        state,
+    )
+
+    line_op = map_tool_call_to_ir(
+        {"name": "add_line", "input": {"sketch_id": "sketch_0", "start_u": 0, "start_v": 0, "end_u": 1, "end_v": 0}},
+        state,
+    )
+    circle_op = map_tool_call_to_ir(
+        {"name": "add_circle", "input": {"sketch_id": "sketch_0", "center_u": 0, "center_v": 0, "radius": 1}},
+        state,
+    )
+
+    assert line_op.params.line_id == "op_2_line"
+    assert circle_op.params.circle_id == "op_3_circle"
 
 
 def test_mapper_preserves_profile_indices_for_multi_profile_extrude():

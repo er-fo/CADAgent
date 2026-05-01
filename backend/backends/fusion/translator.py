@@ -146,7 +146,7 @@ def translate_ir_to_fusion_tool_call(operation: IROperation) -> Tuple[str, Dict[
             "corner1_v": _mm_to_cm(c_v - half_h),
             "corner2_u": _mm_to_cm(c_u + half_w),
             "corner2_v": _mm_to_cm(c_v + half_h),
-            "rectangle_id": params.rectangle_id or "",
+            "rectangle_id": params.rectangle_id or f"{operation.id}_rectangle",
             "description": f"Add rectangle to {params.sketch}",
         }
 
@@ -160,7 +160,7 @@ def translate_ir_to_fusion_tool_call(operation: IROperation) -> Tuple[str, Dict[
             "center_u": _mm_to_cm(params.center[0]),
             "center_v": _mm_to_cm(params.center[1]),
             "radius": _mm_to_cm(params.radius),
-            "circle_id": params.circle_id or "",
+            "circle_id": params.circle_id or f"{operation.id}_circle",
             "description": f"Add circle to {params.sketch}",
         }
 
@@ -174,7 +174,7 @@ def translate_ir_to_fusion_tool_call(operation: IROperation) -> Tuple[str, Dict[
             "start_v": _mm_to_cm(params.start[1]),
             "end_u": _mm_to_cm(params.end[0]),
             "end_v": _mm_to_cm(params.end[1]),
-            "line_id": params.line_id or "",
+            "line_id": params.line_id or f"{operation.id}_line",
             "description": f"Add line to {params.sketch}",
         }
 
@@ -190,7 +190,7 @@ def translate_ir_to_fusion_tool_call(operation: IROperation) -> Tuple[str, Dict[
             "start_v": _mm_to_cm(params.start[1]),
             "end_u": _mm_to_cm(params.end[0]),
             "end_v": _mm_to_cm(params.end[1]),
-            "arc_id": params.arc_id or "",
+            "arc_id": params.arc_id or f"{operation.id}_arc",
             "description": f"Add arc to {params.sketch}",
         }
 

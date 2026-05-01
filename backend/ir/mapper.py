@@ -416,7 +416,7 @@ def map_tool_call_to_ir(
         width = abs(c2u - c1u)
         height = abs(c2v - c1v)
         center = [(c1u + c2u) / 2.0, (c1v + c2v) / 2.0]
-        rectangle_id = str(params.get("rectangle_id") or "").strip() or None
+        rectangle_id = str(params.get("rectangle_id") or "").strip() or f"{operation_id}_rectangle"
         return IROperation(
             id=operation_id,
             type="add_rectangle",
@@ -454,7 +454,7 @@ def map_tool_call_to_ir(
             _length_to_mm(params.get("center_v"), field_name="center_v", unit="cm"),
         ]
         radius = _length_to_mm(params.get("radius"), field_name="radius", unit="cm")
-        circle_id = str(params.get("circle_id") or "").strip() or None
+        circle_id = str(params.get("circle_id") or "").strip() or f"{operation_id}_circle"
         return IROperation(
             id=operation_id,
             type="add_circle",
@@ -479,7 +479,7 @@ def map_tool_call_to_ir(
 
     if name == "add_line":
         sketch_id = str(params.get("sketch_id") or "").strip()
-        line_id = str(params.get("line_id") or "").strip() or None
+        line_id = str(params.get("line_id") or "").strip() or f"{operation_id}_line"
         start = [
             _length_to_mm(params.get("start_u"), field_name="start_u", unit="cm"),
             _length_to_mm(params.get("start_v"), field_name="start_v", unit="cm"),
@@ -509,7 +509,7 @@ def map_tool_call_to_ir(
 
     if name == "add_arc":
         sketch_id = str(params.get("sketch_id") or "").strip()
-        arc_id = str(params.get("arc_id") or "").strip() or None
+        arc_id = str(params.get("arc_id") or "").strip() or f"{operation_id}_arc"
         center = [
             _length_to_mm(params.get("center_u"), field_name="center_u", unit="cm"),
             _length_to_mm(params.get("center_v"), field_name="center_v", unit="cm"),

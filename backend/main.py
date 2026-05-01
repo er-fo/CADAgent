@@ -477,6 +477,7 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                 if AUTH_BYPASS:
                     manager.set_user_id(session_id, "dev-bypass")
                     manager.set_user_token(session_id, None)
+                    manager.set_llm_api_keys(session_id, data.get("llm_api_keys") or data.get("api_keys"))
                     manager.mark_authenticated(session_id, True)
                     await manager.send_message(session_id, {
                         "type": "authentication_ack",

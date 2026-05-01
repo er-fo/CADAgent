@@ -609,6 +609,37 @@ def test_build123d_translator_fails_explicitly_for_unsupported_widened_ir():
         translate_ir_document_to_build123d(document)
 
 
+def test_fusion_translator_synthesizes_missing_sketch_entity_ids():
+    rect_name, rect_input = translate_ir_to_fusion_tool_call(
+        IROperation(
+            id="op_rect",
+            type="add_rectangle",
+            params=AddRectangleParams(sketch="sketch_0", center=[0.0, 0.0], width=10.0, height=6.0),
+        )
+    )
+    line_name, line_input = translate_ir_to_fusion_tool_call(
+        IROperation(
+            id="op_line",
+            type="add_line",
+            params=AddLineParams(sketch="sketch_0", start=[0.0, 0.0], end=[10.0, 0.0]),
+        )
+    )
+    circle_name, circle_input = translate_ir_to_fusion_tool_call(
+        IROperation(
+            id="op_circle",
+            type="add_circle",
+            params=AddCircleParams(sketch="sketch_0", center=[0.0, 0.0], radius=2.0),
+        )
+    )
+
+    assert rect_name == "add_rectangle"
+    assert rect_input["rectangle_id"] == "op_rect_rectangle"
+    assert line_name == "add_line"
+    assert line_input["line_id"] == "op_line_line"
+    assert circle_name == "add_circle"
+    assert circle_input["circle_id"] == "op_circle_circle"
+
+
 def test_build123d_translator_emits_fail_closed_sketch_plane_guards():
     document = IRDocument(
         version="1.0",
