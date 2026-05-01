@@ -1,4 +1,5 @@
 import asyncio
+import copy
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
@@ -29,6 +30,7 @@ class _FakeManager:
     def __init__(self) -> None:
         self.sent_messages: List[Dict[str, Any]] = []
         self.history: List[Dict[str, Any]] = []
+        self.ir_state: Dict[str, Any] = {}
         self.reasoning_context = _FakeReasoningContext()
         self.active_build_plan: Optional[Dict[str, Any]] = None
 
@@ -46,6 +48,15 @@ class _FakeManager:
 
     def set_conversation_history(self, session_id: str, messages: List[Dict[str, Any]]) -> None:
         self.history = list(messages)
+
+    def save_ir_document_state(self, session_id: str, ir_state: Dict[str, Any]) -> None:
+        self.ir_state = copy.deepcopy(ir_state)
+
+    def get_ir_document_state(self, session_id: str) -> Optional[Dict[str, Any]]:
+        return copy.deepcopy(self.ir_state) if self.ir_state else None
+
+    def clear_ir_document_state(self, session_id: str) -> None:
+        self.ir_state = {}
 
     def get_active_build_plan(self, session_id: str) -> Optional[Dict[str, Any]]:
         return self.active_build_plan
@@ -179,6 +190,101 @@ def test_execute_workflow_routes_ir_tools_to_fusion_adapter(monkeypatch: pytest.
 
     assert call_count["fusion_exec"] == 3
     assert [item["tool_use_id"] for item in refresh_payloads] == ["toolu_1", "toolu_2", "toolu_3"]
+
+
+def test_execute_workflow_reuses_committed_ir_state_across_fusion_requests(monkeypatch: pytest.MonkeyPatch):
+    manager = _FakeManager()
+    responses = [
+        {
+            "stop_reason": "tool_use",
+            "content": [
+                {
+                    "type": "tool_use",
+                    "id": "toolu_create",
+                    "name": "create_sketch",
+                    "input": {"plane_id": "XY", "sketch_id": "base_square"},
+                }
+            ],
+        },
+        _end_turn_response(),
+        {
+            "stop_reason": "tool_use",
+            "content": [
+                {
+                    "type": "tool_use",
+                    "id": "toolu_rect",
+                    "name": "add_rectangle",
+                    "input": {
+                        "sketch_id": "base_square",
+                        "corner1_u": -2.5,
+                        "corner1_v": -2.5,
+                        "corner2_u": 2.5,
+                        "corner2_v": 2.5,
+                    },
+                }
+            ],
+        },
+        _end_turn_response(),
+    ]
+    executed_ops: List[str] = []
+
+    async def fake_call_claude_with_tools(*args, **kwargs):
+        return responses.pop(0)
+
+    async def fake_execute_operation(self, session_id, operation, tool_use_id, description=""):
+        executed_ops.append(operation.type)
+        return TargetExecutionResult(
+            success=True,
+            target="fusion",
+            message=f"{operation.type} ok",
+            raw_result={"success": True, "tool_use_id": tool_use_id, "message": f"{operation.type} ok"},
+        )
+
+    async def fake_refresh_after_success(session_id, manager, tool_name, result, messages):
+        return None
+
+    async def fake_runtime_sync(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(agent_workflow, "USE_PROMPT_ROUTING", False)
+    monkeypatch.setattr(agent_workflow, "call_claude_with_tools", fake_call_claude_with_tools)
+    monkeypatch.setattr(agent_workflow.FusionTargetExecutor, "execute_operation", fake_execute_operation)
+    monkeypatch.setattr(agent_workflow, "_refresh_and_enrich_after_success", fake_refresh_after_success)
+    monkeypatch.setattr(agent_workflow, "_ensure_runtime_entity_context_synced", fake_runtime_sync)
+
+    asyncio.run(
+        agent_workflow._execute_workflow_loop(
+            session_id="s-ir-continuity",
+            messages=[{"role": "user", "content": [{"type": "text", "text": "create sketch"}]}],
+            max_iterations=2,
+            model_name=None,
+            manager=manager,  # type: ignore[arg-type]
+            last_user_message_sent=None,
+            request={"execution_target": "fusion", "request_id": "r-create"},
+            feature_snapshot=None,
+        )
+    )
+
+    assert executed_ops == ["create_sketch"]
+    assert [op["type"] for op in manager.ir_state["operations"]] == ["create_sketch"]
+
+    asyncio.run(
+        agent_workflow._execute_workflow_loop(
+            session_id="s-ir-continuity",
+            messages=[{"role": "user", "content": [{"type": "text", "text": "add rectangle"}]}],
+            max_iterations=2,
+            model_name=None,
+            manager=manager,  # type: ignore[arg-type]
+            last_user_message_sent=None,
+            request={"execution_target": "fusion", "request_id": "r-rect"},
+            feature_snapshot=None,
+        )
+    )
+
+    assert executed_ops == ["create_sketch", "add_rectangle"]
+    assert [op["type"] for op in manager.ir_state["operations"]] == ["create_sketch", "add_rectangle"]
+    assert manager.ir_state["operations"][1]["dependencies"] == ["op_1"]
+    assert not any("IR validation failed" in text for text in _extract_tool_result_texts(manager.history))
 
 
 def test_execute_workflow_resolves_ir_create_sketch_face_ref_for_fusion(monkeypatch: pytest.MonkeyPatch):

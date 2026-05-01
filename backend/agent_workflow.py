@@ -49,8 +49,16 @@ try:
     from .session_logger import initialize_session, _extract_session_context
     from .ir import IRDocument, IRDocumentState, map_tool_call_to_ir, validate_ir_candidate
     from .ir.mapper import UnsupportedToolMappingError
+    from .ir.types import (
+        AddCircleParams,
+        AddRectangleParams,
+        CreateSketchParams,
+        ExtrudeParams,
+        IROperation,
+    )
     from .backends.build123d import Build123dTargetExecutor
     from .backends.fusion import FusionTargetExecutor
+    from .attachments import attachment_debug_summary, normalize_request_attachments
 except ImportError:  # pragma: no cover - script execution fallback
     from code_generator import CodeGenerationError, format_error_for_llm, translate_tool_call  # type: ignore
     from reasoning_context import (  # type: ignore
@@ -78,8 +86,16 @@ except ImportError:  # pragma: no cover - script execution fallback
     from session_logger import initialize_session, _extract_session_context  # type: ignore
     from ir import IRDocument, IRDocumentState, map_tool_call_to_ir, validate_ir_candidate  # type: ignore
     from ir.mapper import UnsupportedToolMappingError  # type: ignore
+    from ir.types import (  # type: ignore
+        AddCircleParams,
+        AddRectangleParams,
+        CreateSketchParams,
+        ExtrudeParams,
+        IROperation,
+    )
     from backends.build123d import Build123dTargetExecutor  # type: ignore
     from backends.fusion import FusionTargetExecutor  # type: ignore
+    from attachments import attachment_debug_summary, normalize_request_attachments  # type: ignore
 
 logger = logging.getLogger(__name__)
 AUTH_BYPASS = (
@@ -157,6 +173,7 @@ FEATURE_OPERATION_TOOLS = {
     "create_external_thread",
     "list_features",
     "create_pattern_feature",
+    "adjust_feature_parameters",
 }
 GEOMETRY_OPERATION_TOOLS = EDGE_OPERATION_TOOLS | FACE_OPERATION_TOOLS | BODY_OPERATION_TOOLS | FEATURE_OPERATION_TOOLS
 
@@ -179,6 +196,7 @@ GEOMETRY_MODIFYING_TOOLS = {
     "create_tapped_hole",
     "create_external_thread",
     "create_pattern_feature",
+    "adjust_feature_parameters",
 }
 
 # Tools that modify the timeline and invalidate existing entity refs.
@@ -190,6 +208,27 @@ TIMELINE_MODIFYING_TOOLS = {
 
 # Tools that can invalidate topology refs and should run one-at-a-time per LLM turn.
 TOPOLOGY_MUTATING_TOOLS = GEOMETRY_MODIFYING_TOOLS | TIMELINE_MODIFYING_TOOLS
+
+OPERATION_CHECKPOINT_TOOLS = GEOMETRY_MODIFYING_TOOLS | TIMELINE_MODIFYING_TOOLS | {
+    "create_sketch",
+    "add_line",
+    "add_arc",
+    "add_circle",
+    "add_rectangle",
+    "draw_lines",
+    "draw_rectangle",
+    "draw_circle",
+    "draw_arc",
+    "draw_spline",
+    "draw_polygon",
+    "draw_slot",
+    "draw_point",
+    "draw_ellipse",
+    "close_sketch",
+    "create_construction_plane",
+    "revolve_profile",
+    "create_loft",
+}
 
 # Guardrail against repeated identical hole/thread operations in a single request loop.
 DUPLICATE_INTENT_GUARD_TOOLS = {
@@ -1072,9 +1111,562 @@ def _capture_checkpoint(
         "timestamp": time.time(),
         "conversation_index": conversation_index,
     }
+    checkpoint_data.update(_message_checkpoint_runtime_state(session_id, manager))
 
     manager.save_checkpoint(session_id, checkpoint_data)
     return message_id
+
+
+def _operation_display_label(tool_name: str, description: str = "") -> str:
+    """Create a compact label for a completed operation checkpoint."""
+    clean_description = " ".join(str(description or "").split())
+    if clean_description:
+        return clean_description[:120]
+    return tool_name.replace("_", " ").strip().title()
+
+
+def _checkpoint_public_metadata(checkpoint_data: Mapping[str, Any]) -> Dict[str, Any]:
+    """Return UI-safe checkpoint metadata without conversation/entity payloads."""
+    public_keys = {
+        "checkpoint_id",
+        "request_id",
+        "tool_name",
+        "tool_use_id",
+        "display_label",
+        "description",
+        "marker_position",
+        "timeline_count",
+        "conversation_index",
+        "timestamp",
+    }
+    return {key: checkpoint_data.get(key) for key in public_keys if key in checkpoint_data}
+
+
+def _operation_checkpoint_conversation_snapshot(
+    messages: Sequence[Mapping[str, Any]],
+    tool_use_id: str,
+) -> List[Dict[str, Any]]:
+    """
+    Return a provider-valid conversation prefix for an operation checkpoint.
+
+    Claude can return multiple tool_use blocks in one assistant message. The
+    backend executes those tools one at a time, so a checkpoint after the first
+    tool must not preserve later sibling tool_use blocks that do not yet have
+    matching tool_result blocks. Anthropic rejects that shape on resume.
+    """
+    snapshot = json.loads(json.dumps(list(messages), default=str))
+    target_tool_use_id = str(tool_use_id or "").strip()
+    if not target_tool_use_id:
+        return snapshot
+
+    assistant_index: Optional[int] = None
+    target_block_index: Optional[int] = None
+    allowed_tool_use_ids: List[str] = []
+
+    for message_index in range(len(snapshot) - 1, -1, -1):
+        message = snapshot[message_index]
+        if not isinstance(message, Mapping) or message.get("role") != "assistant":
+            continue
+        content = message.get("content")
+        if not isinstance(content, list):
+            continue
+
+        sibling_tool_ids: List[str] = []
+        for block_index, block in enumerate(content):
+            if not isinstance(block, Mapping) or block.get("type") != "tool_use":
+                continue
+            sibling_tool_id = str(block.get("id") or "").strip()
+            if not sibling_tool_id:
+                continue
+            sibling_tool_ids.append(sibling_tool_id)
+            if sibling_tool_id == target_tool_use_id:
+                assistant_index = message_index
+                target_block_index = block_index
+                allowed_tool_use_ids = list(sibling_tool_ids)
+                break
+        if assistant_index is not None:
+            break
+
+    if assistant_index is None or target_block_index is None or not allowed_tool_use_ids:
+        logger.warning(
+            "Unable to locate tool_use_id %s while snapshotting operation checkpoint; using full history",
+            target_tool_use_id,
+        )
+        return snapshot
+
+    allowed_tool_use_id_set = set(allowed_tool_use_ids)
+    assistant_message = dict(snapshot[assistant_index])
+    assistant_content = assistant_message.get("content")
+    if isinstance(assistant_content, list):
+        assistant_message["content"] = assistant_content[: target_block_index + 1]
+
+    trimmed_snapshot: List[Dict[str, Any]] = [
+        dict(message) if isinstance(message, Mapping) else message
+        for message in snapshot[:assistant_index]
+    ]
+    trimmed_snapshot.append(assistant_message)
+
+    target_result_seen = False
+    for message in snapshot[assistant_index + 1 :]:
+        if not isinstance(message, Mapping):
+            continue
+        content = message.get("content")
+        if not isinstance(content, list):
+            break
+
+        filtered_content: List[Any] = []
+        allowed_result_seen_in_message = False
+        for block in content:
+            if isinstance(block, Mapping) and block.get("type") == "tool_result":
+                result_tool_use_id = str(block.get("tool_use_id") or "").strip()
+                if result_tool_use_id not in allowed_tool_use_id_set:
+                    continue
+                filtered_content.append(block)
+                allowed_result_seen_in_message = True
+                if result_tool_use_id == target_tool_use_id:
+                    target_result_seen = True
+            elif allowed_result_seen_in_message:
+                filtered_content.append(block)
+
+        if filtered_content:
+            filtered_message = dict(message)
+            filtered_message["content"] = filtered_content
+            trimmed_snapshot.append(filtered_message)
+
+        if target_result_seen:
+            break
+
+    if not target_result_seen:
+        logger.warning(
+            "Unable to locate tool_result for tool_use_id %s while snapshotting operation checkpoint; using full history",
+            target_tool_use_id,
+        )
+        return snapshot
+
+    return trimmed_snapshot
+
+
+def _serialize_ir_operation(operation: IROperation) -> Dict[str, Any]:
+    """Serialize one committed IR operation into checkpoint-safe plain data."""
+    return {
+        "id": operation.id,
+        "type": operation.type,
+        "params": asdict(operation.params),
+        "dependencies": list(operation.dependencies or []),
+        "metadata": dict(operation.metadata) if operation.metadata else None,
+    }
+
+
+def _serialize_ir_document_state(ir_doc_state: IRDocumentState) -> Dict[str, Any]:
+    """Serialize committed IR document state for cross-request/resume continuity."""
+    return {
+        "version": ir_doc_state.version,
+        "units": ir_doc_state.units,
+        "counter": int(getattr(ir_doc_state, "_counter", 0) or 0),
+        "operations": [_serialize_ir_operation(operation) for operation in ir_doc_state.operations],
+        "metadata": dict(ir_doc_state.metadata) if ir_doc_state.metadata else None,
+    }
+
+
+def _deserialize_ir_operation(payload: Mapping[str, Any]) -> IROperation:
+    """Deserialize a checkpointed IR operation."""
+    operation_type = str(payload.get("type") or "").strip()
+    raw_params = payload.get("params")
+    params_payload = dict(raw_params) if isinstance(raw_params, Mapping) else {}
+
+    if operation_type == "create_sketch":
+        params = CreateSketchParams(
+            plane=str(params_payload.get("plane") or "XY").strip() or "XY",
+            sketch=str(params_payload.get("sketch") or "").strip(),
+        )
+    elif operation_type == "add_rectangle":
+        params = AddRectangleParams(
+            sketch=str(params_payload.get("sketch") or "").strip(),
+            center=[float(value) for value in (params_payload.get("center") or [0.0, 0.0])[:2]],
+            width=float(params_payload.get("width") or 0.0),
+            height=float(params_payload.get("height") or 0.0),
+        )
+    elif operation_type == "add_circle":
+        params = AddCircleParams(
+            sketch=str(params_payload.get("sketch") or "").strip(),
+            center=[float(value) for value in (params_payload.get("center") or [0.0, 0.0])[:2]],
+            radius=float(params_payload.get("radius") or 0.0),
+        )
+    elif operation_type == "extrude":
+        raw_profile_indices = params_payload.get("profile_indices")
+        profile_indices = None
+        if isinstance(raw_profile_indices, list):
+            profile_indices = [int(value) for value in raw_profile_indices]
+        raw_profile_index = params_payload.get("profile_index")
+        profile_index = int(raw_profile_index) if raw_profile_index is not None else None
+        raw_sketch = params_payload.get("sketch")
+        params = ExtrudeParams(
+            profile=str(params_payload.get("profile") or "").strip(),
+            distance=float(params_payload.get("distance") or 0.0),
+            direction=str(params_payload.get("direction") or "positive").strip() or "positive",  # type: ignore[arg-type]
+            operation=str(params_payload.get("operation") or "new").strip() or "new",  # type: ignore[arg-type]
+            sketch=str(raw_sketch).strip() if raw_sketch is not None else None,
+            profile_index=profile_index,
+            profile_indices=profile_indices,
+        )
+    else:
+        raise ValueError(f"Unsupported serialized IR operation type: {operation_type}")
+
+    raw_dependencies = payload.get("dependencies")
+    dependencies = [str(dep) for dep in raw_dependencies] if isinstance(raw_dependencies, list) else []
+    raw_metadata = payload.get("metadata")
+    metadata = dict(raw_metadata) if isinstance(raw_metadata, Mapping) else None
+
+    return IROperation(
+        id=str(payload.get("id") or "").strip(),
+        type=operation_type,  # type: ignore[arg-type]
+        params=params,
+        dependencies=dependencies,
+        metadata=metadata,  # type: ignore[arg-type]
+    )
+
+
+def _counter_floor_from_ir_operations(operations: Sequence[IROperation]) -> int:
+    """Infer a safe minimum operation counter from serialized operation ids."""
+    max_counter = len(operations)
+    for operation in operations:
+        op_id = str(operation.id or "")
+        match = re.match(r"^op_(\d+)$", op_id)
+        if match:
+            max_counter = max(max_counter, int(match.group(1)))
+    return max_counter
+
+
+def _deserialize_ir_document_state(ir_state: Mapping[str, Any]) -> IRDocumentState:
+    """Deserialize committed IR document state from manager/checkpoint storage."""
+    raw_metadata = ir_state.get("metadata")
+    state = IRDocumentState(
+        version=str(ir_state.get("version") or "1.0"),
+        units=str(ir_state.get("units") or "mm"),
+        metadata=dict(raw_metadata) if isinstance(raw_metadata, Mapping) else None,
+    )
+
+    raw_operations = ir_state.get("operations")
+    if isinstance(raw_operations, list):
+        for operation_payload in raw_operations:
+            if not isinstance(operation_payload, Mapping):
+                continue
+            state.append(_deserialize_ir_operation(operation_payload))
+
+    try:
+        stored_counter = int(ir_state.get("counter") or 0)
+    except (TypeError, ValueError):
+        stored_counter = 0
+    state._counter = max(stored_counter, _counter_floor_from_ir_operations(state.operations))
+    return state
+
+
+def _manager_get_ir_document_state(manager: ConnectionManager, session_id: str) -> Optional[Dict[str, Any]]:
+    """Best-effort accessor for serialized IR state."""
+    getter = getattr(manager, "get_ir_document_state", None)
+    if not callable(getter):
+        return None
+    ir_state = getter(session_id)
+    return ir_state if isinstance(ir_state, dict) and ir_state else None
+
+
+def _manager_save_ir_document_state(
+    manager: ConnectionManager,
+    session_id: str,
+    ir_doc_state: IRDocumentState,
+) -> None:
+    """Best-effort persistence for serialized IR state."""
+    saver = getattr(manager, "save_ir_document_state", None)
+    if callable(saver):
+        saver(session_id, _serialize_ir_document_state(ir_doc_state))
+
+
+def _manager_clear_ir_document_state(manager: ConnectionManager, session_id: str) -> None:
+    """Best-effort clearing for serialized IR state."""
+    clearer = getattr(manager, "clear_ir_document_state", None)
+    if callable(clearer):
+        clearer(session_id)
+
+
+def _restore_or_create_ir_document_state(
+    manager: ConnectionManager,
+    session_id: str,
+    *,
+    execution_target: str,
+) -> IRDocumentState:
+    """Initialize IR state from persisted session data when it matches the target."""
+    expected_source = "studio" if execution_target == "build123d" else "fusion"
+    default_metadata = {"source": expected_source, "session_id": session_id}
+    stored_state = _manager_get_ir_document_state(manager, session_id)
+    if stored_state:
+        try:
+            restored = _deserialize_ir_document_state(stored_state)
+            restored_metadata = dict(restored.metadata) if restored.metadata else {}
+            stored_source = str(restored_metadata.get("source") or "").strip()
+            if stored_source and stored_source != expected_source:
+                logger.info(
+                    "Ignoring IR state for session %s because source %s does not match target %s",
+                    session_id,
+                    stored_source,
+                    expected_source,
+                )
+            else:
+                restored_metadata.update(default_metadata)
+                restored.metadata = restored_metadata
+                logger.debug(
+                    "Restored IR state for session %s with %d committed operation(s)",
+                    session_id,
+                    len(restored.operations),
+                )
+                return restored
+        except Exception as exc:
+            logger.warning("Unable to restore IR state for session %s: %s", session_id, exc)
+            _manager_clear_ir_document_state(manager, session_id)
+
+    return IRDocumentState(metadata=default_metadata)
+
+
+def _message_checkpoint_runtime_state(
+    session_id: str,
+    manager: ConnectionManager,
+) -> Dict[str, Any]:
+    """Capture backend runtime state that must match a message-level timeline checkpoint."""
+    state: Dict[str, Any] = {}
+
+    ir_state = _manager_get_ir_document_state(manager, session_id)
+    if ir_state:
+        state["ir_state"] = ir_state
+
+    feature_snapshot = _manager_get_feature_snapshot(manager, session_id)
+    if feature_snapshot:
+        state["feature_snapshot"] = feature_snapshot
+
+    latest_entity_context = _manager_get_latest_entity_context(manager, session_id)
+    if latest_entity_context:
+        state["latest_entity_context"] = latest_entity_context
+
+    try:
+        reasoning_context = manager.get_reasoning_context(session_id)
+        reasoning_summary = reasoning_context.get_injection_text()
+        if reasoning_summary:
+            state["reasoning_summary"] = reasoning_summary
+    except Exception:
+        pass
+
+    return state
+
+
+def _latest_operation_checkpoint_at_or_before(
+    session_id: str,
+    manager: ConnectionManager,
+    conversation_index: Optional[int],
+) -> Optional[Dict[str, Any]]:
+    """Find the newest operation checkpoint at or before a message checkpoint boundary."""
+    getter = getattr(manager, "get_operation_checkpoints", None)
+    if not callable(getter):
+        return None
+
+    try:
+        max_index = int(conversation_index) if conversation_index is not None else 0
+    except (TypeError, ValueError):
+        max_index = 0
+
+    best_checkpoint: Optional[Dict[str, Any]] = None
+    best_sort_key: Tuple[int, float] = (-1, -1.0)
+    for checkpoint in getter(session_id):
+        if not isinstance(checkpoint, Mapping):
+            continue
+        try:
+            checkpoint_index = int(checkpoint.get("conversation_index", 0) or 0)
+        except (TypeError, ValueError):
+            checkpoint_index = 0
+        if checkpoint_index > max_index:
+            continue
+        try:
+            checkpoint_time = float(checkpoint.get("timestamp", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            checkpoint_time = 0.0
+        sort_key = (checkpoint_index, checkpoint_time)
+        if sort_key >= best_sort_key:
+            best_checkpoint = dict(checkpoint)
+            best_sort_key = sort_key
+
+    return best_checkpoint
+
+
+def _manager_set_feature_snapshot(manager: ConnectionManager, session_id: str, snapshot: Mapping[str, Any]) -> None:
+    setter = getattr(manager, "set_feature_snapshot", None)
+    if callable(setter):
+        setter(session_id, dict(snapshot))
+
+
+def _manager_clear_feature_snapshot(manager: ConnectionManager, session_id: str) -> None:
+    clearer = getattr(manager, "clear_feature_snapshot", None)
+    if callable(clearer):
+        clearer(session_id)
+
+
+async def _restore_message_checkpoint_runtime_state(
+    session_id: str,
+    manager: ConnectionManager,
+    checkpoint: Mapping[str, Any],
+    conversation_index: Optional[int],
+) -> None:
+    """
+    Restore backend runtime state for a message-level revert.
+
+    New message checkpoints carry their own runtime state. For checkpoints
+    created before that field existed, fall back to the latest operation
+    checkpoint at or before the same conversation boundary.
+    """
+    fallback_checkpoint = _latest_operation_checkpoint_at_or_before(session_id, manager, conversation_index)
+
+    def _state_value(key: str) -> Any:
+        value = checkpoint.get(key)
+        if value:
+            return value
+        if fallback_checkpoint:
+            return fallback_checkpoint.get(key)
+        return None
+
+    ir_state = _state_value("ir_state")
+    if isinstance(ir_state, Mapping) and ir_state:
+        try:
+            restored_ir_state = _deserialize_ir_document_state(ir_state)
+            _manager_save_ir_document_state(manager, session_id, restored_ir_state)
+        except Exception as exc:
+            logger.warning("Unable to restore IR state from message checkpoint for session %s: %s", session_id, exc)
+            _manager_clear_ir_document_state(manager, session_id)
+    else:
+        _manager_clear_ir_document_state(manager, session_id)
+
+    feature_snapshot = _state_value("feature_snapshot")
+    if isinstance(feature_snapshot, Mapping) and feature_snapshot:
+        _manager_set_feature_snapshot(manager, session_id, feature_snapshot)
+    else:
+        _manager_clear_feature_snapshot(manager, session_id)
+
+    latest_entity_context = _state_value("latest_entity_context")
+    if isinstance(latest_entity_context, Mapping) and latest_entity_context:
+        store = _get_entity_store(session_id, manager)
+        store.clear()
+        try:
+            await _prepopulate_entity_store(session_id, manager, latest_entity_context)
+        except Exception as exc:
+            logger.warning("Unable to repopulate entity store from message checkpoint for session %s: %s", session_id, exc)
+        _manager_set_latest_entity_context(manager, session_id, latest_entity_context)
+    else:
+        clearer = getattr(manager, "clear_entity_store", None)
+        if callable(clearer):
+            clearer(session_id)
+        else:
+            store = _get_entity_store(session_id, manager)
+            store.clear()
+            _manager_clear_latest_entity_context(manager, session_id)
+
+    reasoning_context = manager.get_reasoning_context(session_id)
+    reasoning_context.clear()
+    reasoning_summary = _state_value("reasoning_summary")
+    if isinstance(reasoning_summary, str) and reasoning_summary.strip():
+        reasoning_context.compacted_summary = reasoning_summary.strip()[:4000]
+
+
+async def _capture_operation_checkpoint(
+    session_id: str,
+    manager: ConnectionManager,
+    *,
+    request: Optional[Mapping[str, Any]],
+    tool_name: str,
+    tool_use_id: str,
+    description: str,
+    messages: List[Dict[str, Any]],
+    ir_doc_state: Optional[IRDocumentState] = None,
+    force_snapshot_refresh: bool = False,
+) -> Optional[Dict[str, Any]]:
+    """Persist and announce a resumable checkpoint after a successful operation."""
+    if tool_name not in OPERATION_CHECKPOINT_TOOLS:
+        return None
+    if not callable(getattr(manager, "save_operation_checkpoint", None)):
+        return None
+
+    feature_snapshot = _manager_get_feature_snapshot(manager, session_id)
+    if force_snapshot_refresh or not (feature_snapshot and feature_snapshot.get("success", True)):
+        try:
+            refreshed = await _request_feature_snapshot(
+                session_id,
+                manager,
+                reason=f"operation_checkpoint_{tool_name}",
+                max_features=FEATURE_SNAPSHOT_LIMIT,
+            )
+            if refreshed:
+                feature_snapshot = refreshed
+        except Exception as exc:
+            logger.warning("Unable to refresh feature snapshot for operation checkpoint %s: %s", tool_name, exc)
+
+    marker_position = 0
+    timeline_count = 0
+    if isinstance(feature_snapshot, Mapping):
+        try:
+            marker_position = int(feature_snapshot.get("marker_position") or 0)
+        except (TypeError, ValueError):
+            marker_position = 0
+        try:
+            timeline_count = int(feature_snapshot.get("timeline_count") or 0)
+        except (TypeError, ValueError):
+            timeline_count = 0
+
+    latest_entity_context = _manager_get_latest_entity_context(manager, session_id) or {}
+    reasoning_summary = ""
+    try:
+        reasoning_context = manager.get_reasoning_context(session_id)
+        reasoning_summary = reasoning_context.get_injection_text()
+    except Exception:
+        reasoning_summary = ""
+
+    checkpoint_id = f"opchk_{uuid4().hex}"
+    conversation_snapshot = _operation_checkpoint_conversation_snapshot(messages, tool_use_id)
+    serialized_ir_state = (
+        _serialize_ir_document_state(ir_doc_state)
+        if ir_doc_state is not None
+        else _manager_get_ir_document_state(manager, session_id)
+    )
+    checkpoint_data: Dict[str, Any] = {
+        "checkpoint_id": checkpoint_id,
+        "request_id": str((request or {}).get("request_id") or ""),
+        "tool_name": tool_name,
+        "tool_use_id": tool_use_id,
+        "display_label": _operation_display_label(tool_name, description),
+        "description": description,
+        "marker_position": marker_position,
+        "timeline_count": timeline_count,
+        "conversation_index": len(conversation_snapshot),
+        "conversation_snapshot": conversation_snapshot,
+        "ir_state": serialized_ir_state or {},
+        "latest_entity_context": latest_entity_context,
+        "feature_snapshot": feature_snapshot or {},
+        "reasoning_summary": reasoning_summary,
+        "timestamp": time.time(),
+    }
+
+    manager.save_operation_checkpoint(session_id, checkpoint_data)
+    public_checkpoint = _checkpoint_public_metadata(checkpoint_data)
+
+    await _send_message_safe(
+        manager,
+        session_id,
+        {
+            "type": "operation_checkpoint_created",
+            "checkpoint": public_checkpoint,
+        },
+    )
+    logger.info(
+        "Session %s captured operation checkpoint %s for %s at marker %s",
+        session_id,
+        checkpoint_id,
+        tool_name,
+        marker_position,
+    )
+    return public_checkpoint
 
 
 class SelectionToolCallError(Exception):
@@ -2433,8 +3025,24 @@ async def handle_execute_request(
     Main execution loop that repeatedly calls LLM for a single tool call,
     executes it in Fusion, and feeds the result back into the conversation.
     """
-    if not request.get("user_request") and not request.get("image_data"):
-        raise ValueError("Execution request must include 'user_request' or 'image_data'.")
+    request = dict(request)
+    normalized_attachments = normalize_request_attachments(request)
+    if normalized_attachments.prompt_context:
+        request["attachments_context"] = normalized_attachments.prompt_context
+    if normalized_attachments.normalized:
+        request["normalized_attachments"] = normalized_attachments.normalized
+        logger.info(
+            "Normalized attachments for session %s: %s",
+            session_id,
+            attachment_debug_summary(normalized_attachments),
+        )
+    if normalized_attachments.first_image_data and not request.get("image_data"):
+        request["image_data"] = normalized_attachments.first_image_data
+        request["image_format"] = normalized_attachments.first_image_format or "png"
+
+    has_attachments = bool(request.get("attachments")) or bool(request.get("normalized_attachments"))
+    if not request.get("user_request") and not request.get("image_data") and not has_attachments:
+        raise ValueError("Execution request must include 'user_request', 'image_data', or 'attachments'.")
 
     max_iterations = int(request.get("max_iterations", DEFAULT_MAX_ITERATIONS))
     model_name = request.get("model_name")
@@ -2679,11 +3287,10 @@ async def _execute_workflow_loop(
         await _send_error(manager, session_id, "Invalid execution target", str(exc))
         return
     fusion_ir_executor = FusionTargetExecutor(manager, timeout_seconds=EXECUTION_TIMEOUT)
-    ir_doc_state = IRDocumentState(
-        metadata={
-            "source": "studio" if execution_target == "build123d" else "fusion",
-            "session_id": session_id,
-        }
+    ir_doc_state = _restore_or_create_ir_document_state(
+        manager,
+        session_id,
+        execution_target=execution_target,
     )
     # Track all attempted IR operations (success + failure) so dependency mapping
     # can fail closed when an operation chain breaks mid-turn.
@@ -3151,7 +3758,7 @@ async def _execute_workflow_loop(
                         ir_tool_call,
                         ir_doc_state,
                         metadata=ir_metadata,
-                        dependency_operations=ir_attempt_history,
+                        dependency_operations=[*ir_doc_state.operations, *ir_attempt_history],
                     )
                 except UnsupportedToolMappingError as exc:
                     error_text = str(exc)
@@ -3289,6 +3896,7 @@ async def _execute_workflow_loop(
                 else:
                     # Commit operation only after successful target execution.
                     ir_doc_state.append(ir_op)
+                    _manager_save_ir_document_state(manager, session_id, ir_doc_state)
                     logger.info(
                         "Session %s IR tool '%s' executed on target %s",
                         session_id,
@@ -3347,6 +3955,17 @@ async def _execute_workflow_loop(
                             iteration_force_stop = True
                             break
                         iteration_had_success = True
+                        await _capture_operation_checkpoint(
+                            session_id,
+                            manager,
+                            request=request,
+                            tool_name=tool_name,
+                            tool_use_id=tool_use_id,
+                            description=description,
+                            messages=messages,
+                            ir_doc_state=ir_doc_state,
+                            force_snapshot_refresh=tool_name not in REFRESH_ON_SUCCESS_TOOLS,
+                        )
                 continue
 
             if tool_name in TOPOLOGY_MUTATING_TOOLS:
@@ -3746,6 +4365,17 @@ async def _execute_workflow_loop(
                         if tool_name in DUPLICATE_INTENT_GUARD_TOOLS:
                             seen_guarded_intents.add(tool_intent_key)
                         iteration_had_success = True
+                        await _capture_operation_checkpoint(
+                            session_id,
+                            manager,
+                            request=request,
+                            tool_name=tool_name,
+                            tool_use_id=tool_use_id,
+                            description=description,
+                            messages=messages,
+                            ir_doc_state=ir_doc_state,
+                            force_snapshot_refresh=False,
+                        )
                     continue
 
                 # Handle edge/face/body operations - remove description from tool_input
@@ -4040,6 +4670,17 @@ async def _execute_workflow_loop(
                                         if isinstance(text_block, dict) and text_block.get("type") == "text":
                                             text_block["text"] += plan_context
                                             break
+                await _capture_operation_checkpoint(
+                    session_id,
+                    manager,
+                    request=request,
+                    tool_name=tool_name,
+                    tool_use_id=tool_use_id,
+                    description=description,
+                    messages=messages,
+                    ir_doc_state=ir_doc_state,
+                    force_snapshot_refresh=tool_name not in REFRESH_ON_SUCCESS_TOOLS,
+                )
 
         if iteration_force_stop:
             break
@@ -4118,6 +4759,8 @@ async def handle_planning_request(
     # Clear conversation history for planning mode (fresh start with plan)
     manager.clear_conversation(session_id)
     manager.clear_checkpoints(session_id)
+    manager.clear_operation_checkpoints(session_id)
+    _manager_clear_ir_document_state(manager, session_id)
 
     try:
         await _execute_planning_workflow(session_id, user_request, model_name, request, manager)
@@ -4191,12 +4834,9 @@ async def handle_revert_request(
                 include_current_message=False,
             )
             manager.prune_checkpoints_after(session_id, conversation_index)
-            manager.clear_feature_snapshot(session_id)
-            
-            # Clear entity store to invalidate stale refs from reverted operations
-            store = _get_entity_store(session_id, manager)
-            store.clear()
-            logger.debug("Cleared entity store after revert for session %s", session_id)
+            manager.prune_operation_checkpoints_after(session_id, conversation_index)
+            await _restore_message_checkpoint_runtime_state(session_id, manager, checkpoint, conversation_index)
+            logger.debug("Restored runtime state after revert for session %s", session_id)
 
             await _send_message_safe(manager, session_id, {
                 "type": "revert_applied",
@@ -4226,12 +4866,9 @@ async def handle_revert_request(
                     include_current_message=False,
                 )
                 manager.prune_checkpoints_after(session_id, conversation_index)
-                manager.clear_feature_snapshot(session_id)
-                
-                # Clear entity store even when timeline unavailable (conversation still rolled back)
-                store = _get_entity_store(session_id, manager)
-                store.clear()
-                logger.debug("Cleared entity store after timeline-unavailable revert for session %s", session_id)
+                manager.prune_operation_checkpoints_after(session_id, conversation_index)
+                await _restore_message_checkpoint_runtime_state(session_id, manager, checkpoint, conversation_index)
+                logger.debug("Restored runtime state after timeline-unavailable revert for session %s", session_id)
 
                 await _send_message_safe(manager, session_id, {
                     "type": "revert_applied",
@@ -4269,6 +4906,105 @@ async def handle_revert_request(
         error_text = "Timed out waiting for Fusion to revert timeline."
         await _send_error(manager, session_id, "Revert timeout", error_text)
         logger.error("Session %s: timeout waiting for revert confirmation", session_id)
+
+
+async def handle_resume_operation_request(
+    session_id: str,
+    request: Mapping[str, Any],
+    manager: ConnectionManager,
+) -> None:
+    """Resume the session from a successful operation checkpoint."""
+    checkpoint_id = request.get("checkpoint_id") or request.get("operation_checkpoint_id")
+    if not checkpoint_id:
+        error_text = "Resume request must include 'checkpoint_id'."
+        await _send_error(manager, session_id, "Invalid resume request", error_text)
+        logger.error("Session %s: operation resume request missing checkpoint_id", session_id)
+        return
+
+    checkpoint = manager.get_operation_checkpoint(session_id, str(checkpoint_id))
+    if not checkpoint:
+        error_text = f"Operation checkpoint not found: {checkpoint_id}"
+        await _send_error(manager, session_id, "Operation checkpoint not found", error_text)
+        logger.error("Session %s: operation checkpoint not found: %s", session_id, checkpoint_id)
+        return
+
+    marker_position = int(checkpoint.get("marker_position", 0) or 0)
+    timeline_count = int(checkpoint.get("timeline_count", 0) or 0)
+
+    logger.info(
+        "Session %s: resuming from operation checkpoint %s (tool=%s marker_position=%d)",
+        session_id,
+        checkpoint_id,
+        checkpoint.get("tool_name"),
+        marker_position,
+    )
+
+    await _send_message_safe(
+        manager,
+        session_id,
+        {
+            "type": "revert_timeline",
+            "message_id": checkpoint_id,
+            "operation_checkpoint_id": checkpoint_id,
+            "marker_position": marker_position,
+            "timeline_count": timeline_count,
+        },
+    )
+
+    try:
+        result = await manager.wait_for_fusion_result(
+            session_id,
+            timeout=EXECUTION_TIMEOUT,
+            expected_message_id=str(checkpoint_id),
+        )
+    except asyncio.TimeoutError:
+        error_text = "Timed out waiting for Fusion to resume from the operation checkpoint."
+        await _send_error(manager, session_id, "Resume timeout", error_text)
+        logger.error("Session %s: timeout waiting for operation resume checkpoint %s", session_id, checkpoint_id)
+        return
+
+    if not result.get("success", False):
+        error_detail = result.get("error") or result.get("message") or "Unknown error"
+        error_text = f"Failed to restore operation checkpoint: {error_detail}"
+        await _send_error(manager, session_id, "Resume failed", error_text)
+        logger.error("Session %s: operation resume failed: %s", session_id, error_text)
+        return
+
+    manager.clear_entity_store(session_id)
+    latest_entity_context = checkpoint.get("latest_entity_context")
+    if isinstance(latest_entity_context, Mapping) and latest_entity_context:
+        await _prepopulate_entity_store(session_id, manager, latest_entity_context)
+        _manager_set_latest_entity_context(manager, session_id, dict(latest_entity_context))
+
+    trimmed_length = manager.restore_operation_checkpoint_state(session_id, checkpoint)
+    manager.prune_checkpoints_after(session_id, checkpoint.get("conversation_index"))
+    manager.prune_operation_checkpoints_after(session_id, checkpoint.get("conversation_index"))
+
+    await _send_message_safe(
+        manager,
+        session_id,
+        {
+            "type": "operation_resume_applied",
+            "checkpoint_id": checkpoint_id,
+            "operation_checkpoint_id": checkpoint_id,
+            "conversation_index": checkpoint.get("conversation_index"),
+            "conversation_length": trimmed_length,
+            "tool_name": checkpoint.get("tool_name"),
+            "display_label": checkpoint.get("display_label"),
+        },
+    )
+
+    await _send_message_safe(
+        manager,
+        session_id,
+        {
+            "type": "log",
+            "level": "success",
+            "message": f"Resumed from operation: {checkpoint.get('display_label') or checkpoint.get('tool_name')}",
+            "scope": "global",
+        },
+    )
+    logger.info("Session %s: resumed from operation checkpoint %s", session_id, checkpoint_id)
 
 
 async def _execute_planning_workflow(
@@ -4429,8 +5165,12 @@ def _build_user_message(request: Mapping[str, Any]) -> Dict[str, Any]:
     selection_context = request.get("selection_context")
     feature_snapshot = request.get("feature_snapshot")
     entity_context = request.get("entity_context")
+    attachments_context = str(request.get("attachments_context") or "").strip()
 
     sections = [f"User Request:\n{user_request}"]
+
+    if attachments_context:
+        sections.append(attachments_context)
 
     # Include entity context (bodies, faces, edges) for LLM awareness
     if entity_context:
@@ -4642,6 +5382,7 @@ def _format_feature_snapshot(feature_snapshot: Mapping[str, Any]) -> str:
         suppressed = feature.get("is_suppressed")
         instance_count = feature.get("instance_count")
         hole_details = feature.get("hole") if isinstance(feature.get("hole"), Mapping) else None
+        editable = feature.get("editable_parameters") if isinstance(feature.get("editable_parameters"), Mapping) else None
         bodies = feature.get("bodies") if isinstance(feature.get("bodies"), list) else []
 
         body_names: List[str] = []
@@ -4693,6 +5434,10 @@ def _format_feature_snapshot(feature_snapshot: Mapping[str, Any]) -> str:
             line_parts.append(f"suppressed={bool(suppressed)}")
         if instance_count is not None:
             line_parts.append(f"instances={instance_count}")
+        if editable and editable.get("supported"):
+            supported_params = editable.get("supported_parameters")
+            if isinstance(supported_params, list) and supported_params:
+                line_parts.append(f"editable={supported_params}")
         if body_summaries:
             preview = ", ".join(body_summaries[:2])
             if len(body_summaries) > 2:
@@ -4741,6 +5486,7 @@ def _format_feature_snapshot(feature_snapshot: Mapping[str, Any]) -> str:
             "body_names": body_names,
             "bounding_box": any_bbox,
             "hole": hole_details,
+            "editable_parameters": editable,
         })
 
     max_serialized = min(len(serialized_payload), 15)
@@ -8303,6 +9049,88 @@ def _format_clear_bodies_message(result: Mapping[str, Any], base_message: str) -
     return "\n".join(lines)
 
 
+def _validate_adjust_feature_parameters(tool_input: Mapping[str, Any]) -> Dict[str, Any]:
+    """Validate narrow feature parameter edits before sending them to Fusion."""
+    allowed_top_level = {
+        "feature_token",
+        "parameters",
+        "expected_name",
+        "expected_timeline_index",
+        "description",
+    }
+    extra = set(tool_input.keys()) - allowed_top_level
+    if extra:
+        raise SelectionToolCallError(f"adjust_feature_parameters received unexpected parameter(s): {sorted(extra)}")
+
+    feature_token = str(tool_input.get("feature_token") or "").strip()
+    if not feature_token:
+        raise SelectionToolCallError("adjust_feature_parameters requires a non-empty 'feature_token'.")
+
+    parameters = tool_input.get("parameters")
+    if not isinstance(parameters, Mapping) or not parameters:
+        raise SelectionToolCallError("adjust_feature_parameters requires a non-empty 'parameters' object.")
+
+    allowed_params = {
+        "name",
+        "distance",
+        "distance_unit",
+        "diameter",
+        "diameter_unit",
+        "depth",
+        "depth_unit",
+    }
+    param_extra = set(parameters.keys()) - allowed_params
+    if param_extra:
+        raise SelectionToolCallError(
+            f"adjust_feature_parameters does not support parameter(s): {sorted(param_extra)}. "
+            "Supported parameters are name, distance, diameter, and depth with optional units."
+        )
+
+    cleaned_params: Dict[str, Any] = {}
+    if "name" in parameters:
+        name = str(parameters.get("name") or "").strip()
+        if not name:
+            raise SelectionToolCallError("'parameters.name' must be non-empty when provided.")
+        cleaned_params["name"] = name[:120]
+
+    for numeric_key in ("distance", "diameter", "depth"):
+        if numeric_key not in parameters:
+            continue
+        value = parameters.get(numeric_key)
+        if not isinstance(value, (int, float)) or not math.isfinite(float(value)) or float(value) <= 0:
+            raise SelectionToolCallError(f"'parameters.{numeric_key}' must be a positive number.")
+        cleaned_params[numeric_key] = float(value)
+
+    for unit_key in ("distance_unit", "diameter_unit", "depth_unit"):
+        if unit_key not in parameters:
+            continue
+        unit = str(parameters.get(unit_key) or "").strip().lower()
+        if unit not in {"mm", "cm", "m", "in"}:
+            raise SelectionToolCallError(f"'parameters.{unit_key}' must be one of ['mm', 'cm', 'm', 'in'].")
+        cleaned_params[unit_key] = unit
+
+    if not any(key in cleaned_params for key in ("name", "distance", "diameter", "depth")):
+        raise SelectionToolCallError("Provide at least one editable parameter: name, distance, diameter, or depth.")
+
+    cleaned: Dict[str, Any] = {
+        "feature_token": feature_token,
+        "parameters": cleaned_params,
+    }
+
+    expected_name = str(tool_input.get("expected_name") or "").strip()
+    if expected_name:
+        cleaned["expected_name"] = expected_name
+
+    expected_index = tool_input.get("expected_timeline_index")
+    if expected_index is not None:
+        try:
+            cleaned["expected_timeline_index"] = int(expected_index)
+        except (TypeError, ValueError):
+            raise SelectionToolCallError("'expected_timeline_index' must be an integer when provided.")
+
+    return cleaned
+
+
 async def _execute_feature_tool_call(
     session_id: str,
     manager: ConnectionManager,
@@ -8327,7 +9155,16 @@ async def _execute_feature_tool_call(
         "parameters": dict(tool_input) if isinstance(tool_input, Mapping) else {},
     }
 
-    if tool_name == "create_pattern_feature":
+    if tool_name == "adjust_feature_parameters":
+        cleaned = _validate_adjust_feature_parameters(tool_input)
+        payload["feature_token"] = cleaned["feature_token"]
+        payload["parameters"] = cleaned["parameters"]
+        if "expected_name" in cleaned:
+            payload["expected_name"] = cleaned["expected_name"]
+        if "expected_timeline_index" in cleaned:
+            payload["expected_timeline_index"] = cleaned["expected_timeline_index"]
+
+    elif tool_name == "create_pattern_feature":
         pattern_prep = await _prepare_pattern_feature(session_id, manager, tool_input)
         payload["parameters"] = pattern_prep.parameters
 
@@ -9046,6 +9883,23 @@ async def _execute_feature_tool_call(
         if pattern_prep:
             diag_text = "; ".join(pattern_prep.diagnostics)
             lines.append(f"prep_diagnostics={diag_text}")
+        message_text = "\n".join(lines)
+
+    elif tool_name == "adjust_feature_parameters":
+        lines = [message_text]
+        if success:
+            feature_type = result.get("feature_type")
+            feature_name = result.get("feature_name")
+            timeline_index = result.get("timeline_index")
+            changed = result.get("changed_parameters")
+            if feature_type:
+                lines.append(f"feature_type={feature_type}")
+            if feature_name:
+                lines.append(f"feature_name={feature_name}")
+            if timeline_index is not None:
+                lines.append(f"timeline_index={timeline_index}")
+            if changed:
+                lines.append(f"changed_parameters={changed}")
         message_text = "\n".join(lines)
 
     return success, message_text, result

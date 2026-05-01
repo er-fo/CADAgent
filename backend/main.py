@@ -89,12 +89,22 @@ def _extract_user_id_from_jwt(token: str) -> Optional[str]:
 
 try:
     from .websocket_manager import ConnectionManager
-    from .agent_workflow import handle_execute_request, handle_planning_request, handle_revert_request
+    from .agent_workflow import (
+        handle_execute_request,
+        handle_planning_request,
+        handle_resume_operation_request,
+        handle_revert_request,
+    )
     from .session_logger import update_iteration_feedback
     from .rate_limiter import get_rate_limiter
 except ImportError:  # pragma: no cover - allows running as a script
     from websocket_manager import ConnectionManager  # type: ignore
-    from agent_workflow import handle_execute_request, handle_planning_request, handle_revert_request  # type: ignore
+    from agent_workflow import (  # type: ignore
+        handle_execute_request,
+        handle_planning_request,
+        handle_resume_operation_request,
+        handle_revert_request,
+    )
     from session_logger import update_iteration_feedback  # type: ignore
     from rate_limiter import get_rate_limiter  # type: ignore
 
@@ -449,6 +459,19 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                     message_id = data.get("message_id")
                     logger.info(f"Revert request received for session {session_id} (message_id={message_id})")
                     await _launch_session_task(session_id, handle_revert_request(session_id, data, manager))
+
+            elif message_type == "resume_operation_request":
+                allowed, error = await _check_rate_limit(session_id, message_type)
+                if not allowed:
+                    await manager.send_message(session_id, error)
+                else:
+                    checkpoint_id = data.get("checkpoint_id") or data.get("operation_checkpoint_id")
+                    logger.info(
+                        "Operation resume request received for session %s (checkpoint_id=%s)",
+                        session_id,
+                        checkpoint_id,
+                    )
+                    await _launch_session_task(session_id, handle_resume_operation_request(session_id, data, manager))
 
             elif message_type == "iteration_feedback":
                 iteration = data.get("iteration")

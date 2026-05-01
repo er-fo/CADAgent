@@ -621,7 +621,7 @@ Analyze the user request and return a JSON object specifying which clusters are 
    - create_pattern_feature → patterns
    - select_edges, select_faces, select_bodies → selection
    - list_features → inspection
-   - jump_to_timeline_position, delete_feature → timeline
+   - jump_to_timeline_position, delete_feature, adjust_feature_parameters → timeline
 9. Consider full multi-step workflows, not just the first action. Include optional clusters that might reasonably be helpful.
 10. **WHEN IN DOUBT, BE GENEROUS:** If a cluster might be useful, include it. The cost of loading extra tools is minimal compared to the cost of missing required tools.
 11. Output strict JSON only—no markdown, no comments.

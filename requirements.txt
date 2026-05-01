@@ -10,3 +10,4 @@ Pillow>=10.0.0
 PyJWT>=2.8.0
 Markdown>=3.6
 build123d>=0.8.0
+pypdf>=4.0.0

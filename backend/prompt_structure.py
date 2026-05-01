@@ -944,11 +944,12 @@ ALWAYS use the appropriate hole tool:
     Otherwise (common for bolt circles around an off-origin shaft), place the instances explicitly (e.g., multiple create_simple_hole calls)."""
     },
     "timeline": {
-        "tools": ["jump_to_timeline_position", "delete_feature"],
+        "tools": ["jump_to_timeline_position", "delete_feature", "adjust_feature_parameters"],
         "description": "Timeline manipulation",
         "documentation": """
 - jump_to_timeline_position: Rewind to specific position and delete operations after it
-- delete_feature: Remove a specific feature by entity_token (from list_features). Use when you need to delete a problematic feature in the middle of the timeline without losing subsequent work. Requires the feature's entity_token from list_features output."""
+- delete_feature: Remove a specific feature by entity_token (from list_features). Use when you need to delete a problematic feature in the middle of the timeline without losing subsequent work. Requires the feature's entity_token from list_features output.
+- adjust_feature_parameters: Narrow safe edit for one feature. Use only when list_features shows editable_parameters for the target. Supported edits: ExtrudeFeature name/distance; HoleFeature name/diameter/depth. Include expected_name or expected_timeline_index when available."""
     },
     "design_exploration": {
         "tools": ["generate_question_tree", "propose_designs", "output_build_plan"],

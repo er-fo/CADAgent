@@ -71,6 +71,8 @@ class ConnectionManager:
         self.latest_entity_contexts: Dict[str, Dict[str, Any]] = {}
         self.conversation_history: Dict[str, List[Dict[str, Any]]] = {}
         self.message_checkpoints: Dict[str, List[Dict[str, Any]]] = {}
+        self.operation_checkpoints: Dict[str, List[Dict[str, Any]]] = {}
+        self.ir_document_states: Dict[str, Dict[str, Any]] = {}
         self.feature_snapshots: Dict[str, Dict[str, Any]] = {}
         self.entity_stores: Dict[str, "EntityStore"] = {}
         self.sketch_entity_stores: Dict[str, "SketchEntityStore"] = {}
@@ -149,6 +151,7 @@ class ConnectionManager:
         self.pending_results[session_id] = asyncio.Queue()
         self.pending_entity_context[session_id] = asyncio.Queue()
         self.conversation_history[session_id] = []
+        self.ir_document_states[session_id] = {}
         from .entity_store import EntityStore  # late import to avoid circulars
         from .sketch_entity_store import SketchEntityStore  # late import to avoid circulars
         self.entity_stores[session_id] = EntityStore()
@@ -186,6 +189,12 @@ class ConnectionManager:
 
         if session_id in self.message_checkpoints:
             del self.message_checkpoints[session_id]
+
+        if session_id in self.operation_checkpoints:
+            del self.operation_checkpoints[session_id]
+
+        if session_id in self.ir_document_states:
+            del self.ir_document_states[session_id]
 
         if session_id in self.feature_snapshots:
             del self.feature_snapshots[session_id]
@@ -767,7 +776,7 @@ class ConnectionManager:
         if session_id not in self.message_checkpoints:
             self.message_checkpoints[session_id] = []
 
-        self.message_checkpoints[session_id].append(checkpoint_data.copy())
+        self.message_checkpoints[session_id].append(copy.deepcopy(checkpoint_data))
 
         # Limit checkpoint history to last 50 messages to prevent memory bloat
         max_checkpoints = 50
@@ -789,7 +798,7 @@ class ConnectionManager:
         Returns:
             List of checkpoint dictionaries in chronological order
         """
-        return self.message_checkpoints.get(session_id, []).copy()
+        return copy.deepcopy(self.message_checkpoints.get(session_id, []))
 
     def get_checkpoint_by_message_id(self, session_id: str, message_id: str) -> Optional[Dict[str, Any]]:
         """
@@ -805,7 +814,7 @@ class ConnectionManager:
         checkpoints = self.message_checkpoints.get(session_id, [])
         for checkpoint in checkpoints:
             if checkpoint.get("message_id") == message_id:
-                return checkpoint.copy()
+                return copy.deepcopy(checkpoint)
         return None
 
     def clear_checkpoints(self, session_id: str) -> None:
@@ -818,6 +827,144 @@ class ConnectionManager:
         if session_id in self.message_checkpoints:
             self.message_checkpoints[session_id] = []
             logger.info(f"Cleared checkpoints for session {session_id}")
+
+    def save_operation_checkpoint(self, session_id: str, checkpoint_data: Dict[str, Any]) -> None:
+        """Save an operation-level checkpoint for resume-from-tool-step."""
+        if session_id not in self.operation_checkpoints:
+            self.operation_checkpoints[session_id] = []
+
+        self.operation_checkpoints[session_id].append(copy.deepcopy(checkpoint_data))
+
+        max_checkpoints = 100
+        if len(self.operation_checkpoints[session_id]) > max_checkpoints:
+            self.operation_checkpoints[session_id] = self.operation_checkpoints[session_id][-max_checkpoints:]
+
+        logger.debug(
+            "Saved operation checkpoint for session %s: checkpoint_id=%s tool=%s marker_position=%s",
+            session_id,
+            checkpoint_data.get("checkpoint_id"),
+            checkpoint_data.get("tool_name"),
+            checkpoint_data.get("marker_position"),
+        )
+
+    def get_operation_checkpoints(self, session_id: str) -> List[Dict[str, Any]]:
+        """Return operation checkpoints in chronological order."""
+        return copy.deepcopy(self.operation_checkpoints.get(session_id, []))
+
+    def get_operation_checkpoint(self, session_id: str, checkpoint_id: str) -> Optional[Dict[str, Any]]:
+        """Return one operation checkpoint by id."""
+        checkpoints = self.operation_checkpoints.get(session_id, [])
+        for checkpoint in checkpoints:
+            if checkpoint.get("checkpoint_id") == checkpoint_id:
+                return copy.deepcopy(checkpoint)
+        return None
+
+    def clear_operation_checkpoints(self, session_id: str) -> None:
+        """Clear operation checkpoints for a session."""
+        if session_id in self.operation_checkpoints:
+            self.operation_checkpoints[session_id] = []
+            logger.info("Cleared operation checkpoints for session %s", session_id)
+
+    def save_ir_document_state(self, session_id: str, ir_state: Dict[str, Any]) -> None:
+        """Save serialized IR state for cross-request and resume continuity."""
+        if isinstance(ir_state, dict) and ir_state:
+            self.ir_document_states[session_id] = copy.deepcopy(ir_state)
+        else:
+            self.ir_document_states[session_id] = {}
+        operation_count = len(self.ir_document_states[session_id].get("operations", []))
+        logger.debug("Saved IR document state for session %s (%d operation(s))", session_id, operation_count)
+
+    def get_ir_document_state(self, session_id: str) -> Optional[Dict[str, Any]]:
+        """Return serialized IR state for a session, if present."""
+        ir_state = self.ir_document_states.get(session_id)
+        if not isinstance(ir_state, dict) or not ir_state:
+            return None
+        return copy.deepcopy(ir_state)
+
+    def clear_ir_document_state(self, session_id: str) -> None:
+        """Clear serialized IR state for a session."""
+        if session_id in self.ir_document_states:
+            self.ir_document_states[session_id] = {}
+            logger.info("Cleared IR document state for session %s", session_id)
+
+    def prune_operation_checkpoints_after(
+        self,
+        session_id: str,
+        max_conversation_index: Optional[int],
+    ) -> int:
+        """Drop operation checkpoints captured after the retained conversation index."""
+        checkpoints = self.operation_checkpoints.get(session_id)
+        if not checkpoints:
+            return 0
+
+        try:
+            max_index = int(max_conversation_index) if max_conversation_index is not None else 0
+        except (TypeError, ValueError):
+            max_index = 0
+
+        if max_index < 0:
+            max_index = 0
+
+        initial_len = len(checkpoints)
+        self.operation_checkpoints[session_id] = [
+            checkpoint
+            for checkpoint in checkpoints
+            if int(checkpoint.get("conversation_index", 0) or 0) <= max_index
+        ]
+        removed = initial_len - len(self.operation_checkpoints[session_id])
+
+        if removed:
+            logger.info(
+                "Pruned %d operation checkpoint(s) for session %s beyond conversation index %d",
+                removed,
+                session_id,
+                max_index,
+            )
+
+        return removed
+
+    def restore_operation_checkpoint_state(self, session_id: str, checkpoint: Dict[str, Any]) -> int:
+        """
+        Restore backend-only state from an operation checkpoint.
+
+        Geometry rewind is handled by Fusion before this is called. This method
+        restores conversation history plus cached runtime context/snapshots.
+        """
+        conversation_snapshot = checkpoint.get("conversation_snapshot")
+        if isinstance(conversation_snapshot, list):
+            self.set_conversation_history(session_id, copy.deepcopy(conversation_snapshot))
+        else:
+            self.trim_conversation_to_index(
+                session_id,
+                checkpoint.get("conversation_index"),
+                include_current_message=True,
+            )
+
+        entity_context = checkpoint.get("latest_entity_context")
+        if isinstance(entity_context, dict) and entity_context:
+            self.set_latest_entity_context(session_id, entity_context)
+        else:
+            self.clear_latest_entity_context(session_id)
+
+        feature_snapshot = checkpoint.get("feature_snapshot")
+        if isinstance(feature_snapshot, dict) and feature_snapshot:
+            self.set_feature_snapshot(session_id, feature_snapshot)
+        else:
+            self.clear_feature_snapshot(session_id)
+
+        reasoning_ctx = self.get_reasoning_context(session_id)
+        reasoning_ctx.clear()
+        reasoning_summary = checkpoint.get("reasoning_summary")
+        if isinstance(reasoning_summary, str) and reasoning_summary.strip():
+            reasoning_ctx.compacted_summary = reasoning_summary.strip()[:4000]
+
+        ir_state = checkpoint.get("ir_state")
+        if isinstance(ir_state, dict) and ir_state:
+            self.save_ir_document_state(session_id, ir_state)
+        else:
+            self.clear_ir_document_state(session_id)
+
+        return len(self.conversation_history.get(session_id, []))
 
     def prune_checkpoints_after(
         self,

@@ -845,6 +845,47 @@ TOOLS = [
         }
     },
     {
+        "name": "adjust_feature_parameters",
+        "description": "Safely adjust supported parameters on one existing timeline feature by entity_token. Supported scope is intentionally narrow: ExtrudeFeature name/distance and HoleFeature name/diameter/depth when Fusion exposes editable model parameters. Get entity_token and editable_parameters from list_features output.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "feature_token": {
+                    "type": "string",
+                    "description": "The entity_token of the feature to edit from list_features output."
+                },
+                "parameters": {
+                    "type": "object",
+                    "description": "Editable parameters to change. Use only fields listed as supported in editable_parameters.",
+                    "properties": {
+                        "name": {"type": "string", "description": "New feature/timeline name."},
+                        "distance": {"type": "number", "description": "New ExtrudeFeature distance."},
+                        "distance_unit": {"type": "string", "enum": ["mm", "cm", "m", "in"], "description": "Unit for distance; defaults to mm."},
+                        "diameter": {"type": "number", "description": "New HoleFeature diameter."},
+                        "diameter_unit": {"type": "string", "enum": ["mm", "cm", "m", "in"], "description": "Unit for diameter; defaults to mm."},
+                        "depth": {"type": "number", "description": "New HoleFeature depth for blind/distance holes."},
+                        "depth_unit": {"type": "string", "enum": ["mm", "cm", "m", "in"], "description": "Unit for depth; defaults to mm."}
+                    },
+                    "additionalProperties": False
+                },
+                "expected_name": {
+                    "type": "string",
+                    "description": "Optional safety check. If provided and current feature/timeline name differs, editing fails."
+                },
+                "expected_timeline_index": {
+                    "type": "integer",
+                    "description": "Optional safety check. If provided and current timeline index differs, editing fails."
+                },
+                "description": {
+                    "type": "string",
+                    "description": "Brief explanation of what parameter is being adjusted and why."
+                }
+            },
+            "required": ["feature_token", "parameters", "description"],
+            "additionalProperties": False
+        }
+    },
+    {
         "name": "select_edges",
         "description": "Select edges in active design. Clears existing selection by default.",
         "input_schema": {
@@ -3196,9 +3237,18 @@ async def call_claude_with_tools(
     model = normalize_model_name(model_name)
     requested_model = model
 
-    # Route through Supabase API Gateway for usage tracking if user_token is provided
-    # Allow bypass via env flag when quota tracking is not needed
-    bypass_gateway = os.environ.get("BYPASS_SUPABASE_GATEWAY", "").lower() in ("1", "true", "yes", "on")
+    # Route through Supabase API Gateway for usage tracking if user_token is provided.
+    # In local development, CADAGENT_AUTH_BYPASS intentionally disables both auth
+    # enforcement and gateway quota routing so BYOK/direct provider calls still work.
+    def _env_flag(name: str) -> bool:
+        return os.environ.get(name, "").lower() in ("1", "true", "yes", "on")
+
+    bypass_gateway = (
+        _env_flag("BYPASS_SUPABASE_GATEWAY")
+        or _env_flag("CADAGENT_AUTH_BYPASS")
+        or _env_flag("AUTH_BYPASS")
+        or _env_flag("CADAGENT_DEV_MODE")
+    )
     if user_token is not None and bypass_gateway:
         logger.info("BYPASS_SUPABASE_GATEWAY enabled – sending Anthropics calls directly (no quota tracking)")
 

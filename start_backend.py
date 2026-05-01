@@ -15,6 +15,7 @@ def main() -> None:
 
     os.environ.setdefault("CADAGENT_DEV_MODE", "true")
     os.environ.setdefault("CADAGENT_AUTH_BYPASS", "true")
+    os.environ.setdefault("BYPASS_SUPABASE_GATEWAY", "true")
 
     import uvicorn
 
