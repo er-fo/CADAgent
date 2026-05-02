@@ -94,7 +94,8 @@ let state = {
     loginStage: 'cta',
     testingMode: false,
     testingEmail: '',
-    attachments: []  // [{id, name, kind, mime_type, size, data, format}]
+    attachments: [],  // [{id, name, kind, mime_type, size, data, format}]
+    externalPartCorrectionDraft: null
 };
 
 let otpFocused = false;
@@ -291,6 +292,17 @@ const elements = {
     apiKeysFooter: document.getElementById('apiKeysFooter'),
     closeApiKeysBtn: document.getElementById('closeApiKeysBtn'),
     saveApiKeysBtn: document.getElementById('saveApiKeysBtn'),
+    externalPartCorrectionModal: document.getElementById('externalPartCorrectionModal'),
+    externalPartCorrectionForm: document.getElementById('externalPartCorrectionForm'),
+    externalPartCorrectionTitle: document.getElementById('externalPartCorrectionTitle'),
+    externalPartNameInput: document.getElementById('externalPartNameInput'),
+    externalPartFieldInput: document.getElementById('externalPartFieldInput'),
+    externalPartValueInput: document.getElementById('externalPartValueInput'),
+    externalPartReasonInput: document.getElementById('externalPartReasonInput'),
+    externalPartCorrectionStatus: document.getElementById('externalPartCorrectionStatus'),
+    closeExternalPartCorrectionBtn: document.getElementById('closeExternalPartCorrectionBtn'),
+    cancelExternalPartCorrectionBtn: document.getElementById('cancelExternalPartCorrectionBtn'),
+    submitExternalPartCorrectionBtn: document.getElementById('submitExternalPartCorrectionBtn'),
     // Attachment elements
     attachImageBtn: document.getElementById('attachImageBtn'),
     imageInput: document.getElementById('imageInput'),
@@ -510,6 +522,12 @@ function setupEventListeners() {
             if (!target || typeof target.closest !== 'function') {
                 return;
             }
+            const correctionBtn = target.closest('.external-part-action-btn');
+            if (correctionBtn && elements.chatMessages.contains(correctionBtn)) {
+                event.preventDefault();
+                handleOpenExternalPartCorrectionFromButton(correctionBtn);
+                return;
+            }
             const revertBtn = target.closest('.revert-btn');
             if (!revertBtn || !elements.chatMessages.contains(revertBtn)) {
                 return;
@@ -627,6 +645,18 @@ function setupEventListeners() {
     }
     if (elements.apiKeysModal) {
         elements.apiKeysModal.querySelector('.login-overlay-backdrop')?.addEventListener('click', handleCloseApiKeys);
+    }
+    if (elements.externalPartCorrectionForm) {
+        elements.externalPartCorrectionForm.addEventListener('submit', handleSubmitExternalPartCorrection);
+    }
+    if (elements.closeExternalPartCorrectionBtn) {
+        elements.closeExternalPartCorrectionBtn.addEventListener('click', handleCloseExternalPartCorrection);
+    }
+    if (elements.cancelExternalPartCorrectionBtn) {
+        elements.cancelExternalPartCorrectionBtn.addEventListener('click', handleCloseExternalPartCorrection);
+    }
+    if (elements.externalPartCorrectionModal) {
+        elements.externalPartCorrectionModal.querySelector('.login-overlay-backdrop')?.addEventListener('click', handleCloseExternalPartCorrection);
     }
 
     // External link handler - intercept clicks on external links and send to add-in
@@ -1614,6 +1644,246 @@ function updateApiKeysUI(status) {
 
     enforceModelSelectionByKeys();
     updateImageUploadAvailability();
+}
+
+function showExternalPartCorrectionModal() {
+    if (!elements.externalPartCorrectionModal) return;
+    elements.externalPartCorrectionModal.classList.remove('hidden');
+}
+
+function hideExternalPartCorrectionModal() {
+    if (!elements.externalPartCorrectionModal) return;
+    elements.externalPartCorrectionModal.classList.add('hidden');
+}
+
+function showExternalPartCorrectionStatus(message, type = 'info') {
+    if (!elements.externalPartCorrectionStatus) return;
+    elements.externalPartCorrectionStatus.textContent = message || '';
+    elements.externalPartCorrectionStatus.className = `login-status ${type}`;
+    elements.externalPartCorrectionStatus.classList.remove('hidden');
+}
+
+function resetExternalPartCorrectionForm() {
+    state.externalPartCorrectionDraft = null;
+    if (elements.externalPartNameInput) elements.externalPartNameInput.value = '';
+    if (elements.externalPartFieldInput) elements.externalPartFieldInput.value = '';
+    if (elements.externalPartValueInput) elements.externalPartValueInput.value = '';
+    if (elements.externalPartReasonInput) elements.externalPartReasonInput.value = '';
+    if (elements.externalPartCorrectionTitle) {
+        elements.externalPartCorrectionTitle.textContent = 'Correct cached part data';
+    }
+    if (elements.externalPartCorrectionStatus) {
+        elements.externalPartCorrectionStatus.classList.add('hidden');
+        elements.externalPartCorrectionStatus.textContent = '';
+    }
+    if (elements.submitExternalPartCorrectionBtn) {
+        elements.submitExternalPartCorrectionBtn.disabled = false;
+        elements.submitExternalPartCorrectionBtn.textContent = 'Submit correction';
+    }
+}
+
+function handleCloseExternalPartCorrection() {
+    hideExternalPartCorrectionModal();
+    resetExternalPartCorrectionForm();
+}
+
+function openExternalPartCorrectionModal(draft = {}) {
+    state.externalPartCorrectionDraft = draft;
+    if (elements.externalPartCorrectionTitle) {
+        const fieldLabel = draft.field ? ` for ${draft.field}` : '';
+        elements.externalPartCorrectionTitle.textContent = `Correct cached part data${fieldLabel}`;
+    }
+    if (elements.externalPartNameInput) elements.externalPartNameInput.value = draft.name || '';
+    if (elements.externalPartFieldInput) elements.externalPartFieldInput.value = draft.field || '';
+    if (elements.externalPartValueInput) elements.externalPartValueInput.value = draft.value || '';
+    if (elements.externalPartReasonInput) elements.externalPartReasonInput.value = '';
+    if (elements.externalPartCorrectionStatus) {
+        elements.externalPartCorrectionStatus.classList.add('hidden');
+        elements.externalPartCorrectionStatus.textContent = '';
+    }
+    showExternalPartCorrectionModal();
+    elements.externalPartValueInput?.focus();
+}
+
+function handleOpenExternalPartCorrectionFromButton(button) {
+    if (!button) return;
+    openExternalPartCorrectionModal({
+        name: button.getAttribute('data-part-name') || '',
+        field: button.getAttribute('data-part-field') || '',
+        value: button.getAttribute('data-part-value') || '',
+        fact_id: button.getAttribute('data-fact-id') || '',
+        request_id: button.getAttribute('data-request-id') || ''
+    });
+}
+
+function sendToBackendMessage(message) {
+    if (message?.type === 'external_part_lookup') {
+        return sendToAddin({
+            action: 'submit_external_part_lookup',
+            lookup: message
+        });
+    }
+    if (message?.type === 'correct_cached_part') {
+        return sendToAddin({
+            action: 'submit_external_part_correction',
+            correction: message
+        });
+    }
+    return sendToAddin({
+        action: 'send_to_backend',
+        message
+    });
+}
+
+function handleSubmitExternalPartCorrection(event) {
+    event.preventDefault();
+    const draft = state.externalPartCorrectionDraft || {};
+    const name = elements.externalPartNameInput?.value?.trim() || draft.name || '';
+    const field = elements.externalPartFieldInput?.value?.trim() || draft.field || '';
+    const value = elements.externalPartValueInput?.value?.trim() || '';
+    const reason = elements.externalPartReasonInput?.value?.trim() || '';
+
+    if (!name || !field || !value) {
+        showExternalPartCorrectionStatus('Part name, field, and corrected value are required.', 'error');
+        return;
+    }
+
+    if (!state.connected) {
+        showExternalPartCorrectionStatus('Backend not connected.', 'error');
+        return;
+    }
+
+    if (elements.submitExternalPartCorrectionBtn) {
+        elements.submitExternalPartCorrectionBtn.disabled = true;
+        elements.submitExternalPartCorrectionBtn.textContent = 'Submitting...';
+    }
+
+    sendToBackendMessage({
+        type: 'correct_cached_part',
+        name,
+        field,
+        value,
+        reason,
+        part_id: draft.part_id || draft.fact_id || undefined,
+        request_id: draft.request_id || undefined
+    });
+    showExternalPartCorrectionStatus('Submitting correction to backend...', 'info');
+}
+
+function escapeHtml(value) {
+    const div = document.createElement('div');
+    div.textContent = value == null ? '' : String(value);
+    return div.innerHTML;
+}
+
+function normalizeExternalPartFact(message) {
+    if (!message) return null;
+    return message.fact || message.external_part || message.part || message.record || null;
+}
+
+function normalizeExternalPartCitations(message) {
+    const citations = message?.citations || message?.part?.citations || message?.fact?.citations || [];
+    return Array.isArray(citations) ? citations : [];
+}
+
+function extractFactFieldAndValue(factRecord) {
+    const factValues = factRecord?.facts && typeof factRecord.facts === 'object'
+        ? factRecord.facts
+        : factRecord;
+    if (!factValues || typeof factValues !== 'object') {
+        return { field: '', value: '' };
+    }
+    const ignored = new Set(['name', 'part_id', 'id', 'citations', 'fetched_at', 'source', 'source_url', 'source_label', 'correction_history']);
+    for (const [key, rawValue] of Object.entries(factValues)) {
+        if (ignored.has(key) || rawValue == null || rawValue === '') continue;
+        if (typeof rawValue === 'object') continue;
+        return { field: key, value: String(rawValue) };
+    }
+    return { field: '', value: '' };
+}
+
+function buildExternalPartLookupHtml(message) {
+    const status = message?.status || 'unknown';
+    const fact = normalizeExternalPartFact(message);
+    const factValues = fact?.facts && typeof fact.facts === 'object' ? fact.facts : fact;
+    const citations = normalizeExternalPartCitations(message);
+    const fetchedAt = message?.fetched_at || fact?.fetched_at || '';
+    const source = message?.source || fact?.source || fact?.source_label || '';
+    const title = escapeHtml(fact?.canonical_name || fact?.name || message?.query || message?.part_name || 'External part');
+    const lines = [];
+
+    if (factValues && typeof factValues === 'object') {
+        Object.entries(factValues).forEach(([key, rawValue]) => {
+            if (['name', 'part_id', 'id', 'citations', 'fetched_at', 'source', 'source_url', 'source_label', 'correction_history'].includes(key)) return;
+            if (rawValue == null || rawValue === '' || typeof rawValue === 'object') return;
+            lines.push(`<li><strong>${escapeHtml(key)}</strong>: ${escapeHtml(String(rawValue))}</li>`);
+        });
+    }
+
+    const citationHtml = citations.length
+        ? `<ul class="external-part-trace-list">${citations.map((citation) => {
+            const url = citation?.url || citation?.source_url || '';
+            const label = citation?.label || citation?.title || url || 'Source';
+            return `<li>${url ? `<a href="#" class="external-link" data-external-url="${escapeHtml(url)}">${escapeHtml(label)}</a>` : escapeHtml(label)}</li>`;
+        }).join('')}</ul>`
+        : '<div class="external-part-trace-meta">No citations were included.</div>';
+
+    const { field, value } = extractFactFieldAndValue(fact);
+    const buttonHtml = fact
+        ? `<div class="external-part-trace-actions"><button type="button" class="external-part-action-btn" data-part-name="${escapeHtml(fact?.canonical_name || fact?.name || message?.part_name || '')}" data-part-field="${escapeHtml(field)}" data-part-value="${escapeHtml(value)}" data-fact-id="${escapeHtml(fact?.id || fact?.part_id || '')}" data-request-id="${escapeHtml(message?.request_id || '')}">Correct fact</button></div>`
+        : '';
+
+    const statusMessage = message?.message ? `<div class="external-part-trace-meta">${escapeHtml(message.message)}</div>` : '';
+    const ambiguityCandidates = Array.isArray(message?.candidates) && message.candidates.length
+        ? `<ul class="external-part-trace-list">${message.candidates.map((option) => `<li>${escapeHtml(typeof option === 'string' ? option : option?.name || JSON.stringify(option))}</li>`).join('')}</ul>`
+        : '';
+    const missingFields = Array.isArray(message?.required_fields_missing) && message.required_fields_missing.length
+        ? `<div class="external-part-trace-meta">Missing fields: ${escapeHtml(message.required_fields_missing.join(', '))}</div>`
+        : '';
+
+    return `
+        <div class="external-part-trace">
+            <div class="external-part-trace-title">External part lookup: ${title}</div>
+            <div class="external-part-trace-meta">Status: ${escapeHtml(status)}${source ? ` · Source: ${escapeHtml(source)}` : ''}${fetchedAt ? ` · Fetched: ${escapeHtml(fetchedAt)}` : ''}</div>
+            ${statusMessage}
+            ${lines.length ? `<ul class="external-part-trace-list">${lines.join('')}</ul>` : ''}
+            ${missingFields}
+            ${ambiguityCandidates}
+            ${citationHtml}
+            ${buttonHtml}
+        </div>
+    `;
+}
+
+function handleExternalPartLookupResult(message) {
+    const status = String(message?.status || '').toLowerCase();
+    const html = buildExternalPartLookupHtml(message);
+    const warningStatuses = new Set(['ambiguous', 'not_found', 'parse_failed', 'requires_user_clarification']);
+    const variant = status === 'error' ? 'error' : (warningStatuses.has(status) ? 'warning' : 'agent');
+    const level = status === 'error' ? 'error' : (warningStatuses.has(status) ? 'warning' : 'info');
+
+    addLog(level, `External part lookup: ${message?.status || 'unknown'}`, { scope: 'run' });
+    appendMessage('assistant', html, {
+        sender: 'Part trace',
+        variant,
+        contentFormat: 'html'
+    });
+}
+
+function handleExternalPartCorrectionResult(message) {
+    const success = !!message?.success;
+    const correctionMessage = message?.message || (success ? 'Correction submitted.' : 'Correction failed.');
+    if (success) {
+        showExternalPartCorrectionStatus(correctionMessage, 'success');
+        addLog('success', correctionMessage, { scope: 'run' });
+        setTimeout(() => {
+            hideExternalPartCorrectionModal();
+            resetExternalPartCorrectionForm();
+        }, 1200);
+    } else {
+        showExternalPartCorrectionStatus(correctionMessage, 'error');
+        addLog('error', correctionMessage, { scope: 'run' });
+    }
 }
 
 function handleExternalLink(url) {
@@ -5759,6 +6029,14 @@ function processAddinMessage(message) {
         case 'selection_feedback':
             console.log('← Handling selection_feedback');
             handleSelectionFeedback(message);
+            break;
+        case 'external_part_lookup_result':
+            console.log('← Handling external_part_lookup_result');
+            handleExternalPartLookupResult(message);
+            break;
+        case 'external_part_correction_result':
+            console.log('← Handling external_part_correction_result');
+            handleExternalPartCorrectionResult(message);
             break;
         case 'auth_otp_required':
             console.log('← Handling auth_otp_required');

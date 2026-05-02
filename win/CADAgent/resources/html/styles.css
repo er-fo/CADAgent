@@ -2072,6 +2072,15 @@ textarea#cadRequest::placeholder { color: var(--fg-muted); }
   margin: 16px auto;
 }
 
+.external-part-panel {
+  width: min(560px, 100%);
+}
+
+.external-part-readonly {
+  opacity: 0.8;
+  cursor: not-allowed;
+}
+
 .api-keys-panel .login-brand {
   padding-right: 28px;
 }
@@ -2092,6 +2101,58 @@ textarea#cadRequest::placeholder { color: var(--fg-muted); }
 .close-modal-btn:hover {
   background: var(--bg-surface-hover);
   color: var(--text-primary);
+}
+
+.external-part-actions {
+  display: flex;
+  gap: 10px;
+}
+
+.external-part-actions .btn-block {
+  width: 100%;
+}
+
+.external-part-trace {
+  display: grid;
+  gap: 8px;
+}
+
+.external-part-trace-title {
+  font-weight: 600;
+  color: var(--fg-primary);
+}
+
+.external-part-trace-meta {
+  color: var(--fg-secondary);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.external-part-trace-list {
+  margin: 0;
+  padding-left: 18px;
+  color: var(--fg-secondary);
+}
+
+.external-part-trace-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 4px;
+}
+
+.external-part-action-btn {
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-surface);
+  color: var(--fg-primary);
+  border-radius: 999px;
+  padding: 6px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.external-part-action-btn:hover {
+  background: var(--bg-surface-hover);
 }
 
 .api-keys-close-btn {
