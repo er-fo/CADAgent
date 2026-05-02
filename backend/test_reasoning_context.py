@@ -278,8 +278,8 @@ async def test_openai_with_reasoning_context():
     # Minimal tool set for testing
     test_tools = [
         {
-            "name": "respond_to_user",
-            "description": "Send a message to the user",
+            "name": "log_status",
+            "description": "Record a status note during the reasoning-context test",
             "input_schema": {
                 "type": "object",
                 "properties": {
@@ -413,8 +413,8 @@ async def test_multi_iteration_simulation():
     # Minimal tools
     tools = [
         {
-            "name": "respond_to_user",
-            "description": "Send a message to the user",
+            "name": "log_status",
+            "description": "Record a status note during the reasoning-context test",
             "input_schema": {
                 "type": "object",
                 "properties": {"message": {"type": "string"}},

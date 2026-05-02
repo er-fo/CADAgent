@@ -271,8 +271,8 @@ CRITICAL RULES:
    c) If profiles are separate independent features: extrude each with separate calls
    NEVER assume profile_index=0 contains all your geometry.
 
-6. Use respond_to_user if you need clarification about dimensions, materials, or design intent
-7. Never call respond_to_user with the same wording twice; once delivered, wait for new information or ask a different follow-up
+6. When the user-facing answer is ready, respond normally without calling a tool. A single clarifying question is also a normal assistant response; ask it and stop.
+7. Use tools only to gather information, mutate CAD state, perform structured UI flows such as question trees/design selection/build plans, or inspect external state.
 8. Each tool call executes immediately in Fusion 360
 9. You will see the result of each operation before deciding the next step
 10. Think step-by-step and work sequentially
@@ -384,8 +384,8 @@ CRITICAL RULES:
    If a face ref cannot be resolved, your Design Entities context is stale/empty. Do NOT treat `list_features` as an entity-ref refresh (it only provides a feature snapshot/tokens). Retry after a successful geometry operation or the next message with refreshed Design Entities.
 18. When using tools, ALWAYS provide a clear, brief description field explaining what you're doing in natural, conversational language (e.g., "Creating the base plate outline", "Rounding edges for safety").
 19. NEVER generate completion acknowledgments or summaries after tool calls. After executing a tool, STOP immediately and wait for the tool result.
-    ❌ WRONG: Calling respond_to_user("Hi!"), then respond_to_user("How can I help?"), then generating "I've greeted the user and asked how to help."
-    ✅ CORRECT: Call respond_to_user("Hi!"), STOP. Call respond_to_user("How can I help?"), STOP. Wait for user response.
+    WRONG: Calling a tool and then adding a recap like "I've completed that operation."
+    CORRECT: Call the tool and stop; wait for the tool result before deciding the next step.
     The tool execution speaks for itself—do not add confirmations, recaps, or summary text after tool use.
 
 20. BALANCED ACTION APPROACH:
@@ -523,9 +523,9 @@ CRITICAL RULES:
     D) BIAS TOWARD ACTION: If you're 80%+ confident in the design, build it or propose it. Don't ask questions just to be thorough.
 
     E) QUESTION TREE RULES (when using generate_question_tree):
-       - MANDATORY: When you need to ask TWO OR MORE design questions, you MUST use generate_question_tree instead of respond_to_user
-         * Never ask multiple questions sequentially via respond_to_user - batch them in a question tree
-         * Single clarifying question → respond_to_user is acceptable
+       - MANDATORY: When you need to ask TWO OR MORE design questions, you MUST use generate_question_tree instead of asking them one-by-one in assistant text
+         * Never ask multiple questions sequentially as separate assistant responses - batch them in a question tree
+         * Single clarifying question → normal assistant text is acceptable
          * Multiple questions about dimensions, style, function, etc. → ALWAYS generate_question_tree
        - Only ask what's unknown (never ask about stated constraints)
        - Every question must be relevant (would the answer change the design?)
@@ -533,7 +533,7 @@ CRITICAL RULES:
        - Always include "Other" option with text input
        - Add hints explaining why each question matters
        - Maximum 3-5 root questions
-       - **POST-TREE RULE**: After receiving question tree answers, IMMEDIATELY proceed to propose_designs or building. NEVER ask additional follow-up questions via respond_to_user. If info is missing, assume reasonable defaults.
+       - **POST-TREE RULE**: After receiving question tree answers, IMMEDIATELY proceed to propose_designs or building. NEVER ask additional follow-up questions. If info is missing, assume reasonable defaults.
 
        MULTI-FEATURE PART RECOGNITION - ALWAYS use generate_question_tree when:
        1. **Multiple distinct features listed**: Request mentions 2+ features (e.g., "pocket, mounting holes, and bosses")
@@ -726,30 +726,14 @@ TOOL_CLUSTERS: Dict[str, Dict[str, Any]] = {}
 TOOL_CLUSTERS["core"] = {
     "id": "core",
     "name": "Core Operations",
-    "description": "Essential communication and basic operations",
-    "tools": ["respond_to_user"],
-    "tool_schemas": [
-        {
-            "name": "respond_to_user",
-            "description": "Send a message to the user asking a question or providing a status update. Use this when you need clarification about dimensions, materials, design intent, or to inform the user about progress.",
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "message": {
-                        "type": "string",
-                        "description": "The message to send to the user. Be clear, concise, and specific. Format in markdown."
-                    }
-                },
-                "required": ["message"],
-                "additionalProperties": False
-            }
-        }
-    ],
+    "description": "Essential response and loop behavior",
+    "tools": [],
+    "tool_schemas": [],
     "documentation": """
-- respond_to_user:
-  - Use this whenever dimensions, tolerances, or strategic decisions are unclear; the conversation is part of the workflow.
-  - Recap current progress and outstanding questions so the user can respond quickly.
-  - Never repeat identical wording—varied, context-aware questions improve collaboration and reduce miscommunication.
+- Final responses:
+  - When the user-facing answer is ready, respond normally without calling a tool.
+  - For one missing dimension, tolerance, material, or design-intent detail, ask a single clear clarifying question as normal assistant text and stop.
+  - Use tools only when they perform real orchestration work: gather data, mutate CAD state, run structured UI flows, inspect state, or wait for user choices.
 """
 }
 
@@ -761,10 +745,10 @@ TOOL_CLUSTERS["core"] = {
 
 CLUSTER_TOOL_MAPPING = {
     "core": {
-        "tools": ["respond_to_user"],
-        "description": "Essential communication",
+        "tools": [],
+        "description": "Essential response behavior",
         "documentation": """
-- respond_to_user: Use whenever dimensions, tolerances, or strategic decisions are unclear"""
+- Final response: respond normally without a tool when ready to answer or ask one clarifying question."""
     },
     "sketch_tools": {
         "tools": ["create_sketch", "add_circle", "add_line", "add_arc", "add_rectangle", "list_sketch_profiles"],
@@ -963,8 +947,8 @@ You have access to tools for understanding user requirements and proposing desig
 
 **CRITICAL RULE - Multiple Questions:**
 - When you need to ask TWO OR MORE design questions, you MUST use `generate_question_tree`
-- NEVER ask multiple questions one-by-one using `respond_to_user` - this creates poor UX
-- Single clarifying question → `respond_to_user` is acceptable
+- NEVER ask multiple questions one-by-one as separate assistant responses - this creates poor UX
+- Single clarifying question → normal assistant text is acceptable
 - Multiple questions (dimensions + style, function + constraints, etc.) → ALWAYS `generate_question_tree`
 
 **Use `generate_question_tree` when:**
@@ -1050,7 +1034,7 @@ When question tree answers are received:
 1. **IMMEDIATELY proceed** to either:
    - `propose_designs` if multiple valid approaches exist, OR
    - `output_build_plan` + begin building if one clear design emerges
-2. **NEVER use `respond_to_user`** to ask clarifying questions after a question tree
+2. **NEVER ask clarifying questions** after a question tree
 3. **NEVER say** "One quick missing detail..." or "Before I proceed, I need to know..."
 4. **The question tree IS your opportunity to gather all requirements** - if you needed more info, you should have included it in the tree
 
@@ -1089,7 +1073,7 @@ If you realize critical information is missing after seeing the answers:
 
 ### How `propose_designs` reaches the user
 - The payload you send becomes design cards in the Fusion palette—it's **user-facing** output.
-- Do **not** wrap the tool call with `respond_to_user` or extra summaries. Call the tool and stop; wait for the UI to reply with `design_selected`.
+- Do **not** wrap the tool call with extra summaries. Call the tool and stop; wait for the UI to reply with `design_selected`.
 - Keep `context_summary` to 1–3 tight sentences that restate the problem and constraints you're solving.
 
 **Visual Clarity Requirements (CRITICAL for user comprehension):**

@@ -3694,6 +3694,60 @@ async def _execute_workflow_loop(
     iteration_tool_results: List[Dict[str, Any]] = []
     deterministic_fallback_used = False
 
+    async def _finalize_terminal_response(
+        assistant_text: str,
+        *,
+        iteration_count: int,
+        reason: str,
+    ) -> None:
+        """Send terminal assistant text, persist history, and close the loop."""
+        if assistant_text:
+            await _send_message_safe(
+                manager,
+                session_id,
+                {"type": "llm_message", "message": markdown_to_html(assistant_text), "format": "html"},
+            )
+            logger.info(
+                "Session %s sent terminal text response (%d chars, reason=%s)",
+                session_id,
+                len(assistant_text),
+                reason,
+            )
+
+        manager.set_conversation_history(session_id, messages)
+
+        if session_path:
+            try:
+                from .session_logger import finalize_session_cache_summary
+                cache_summary = finalize_session_cache_summary(session_path)
+                if cache_summary:
+                    logger.info(
+                        "Session %s cache summary: %d calls, hit_rate=%.1f%%, savings=$%.4f (%.1f%%)",
+                        session_id,
+                        cache_summary.get("total_api_calls", 0),
+                        cache_summary.get("overall_cache_hit_rate_pct", 0),
+                        cache_summary.get("total_savings_usd", 0),
+                        cache_summary.get("overall_savings_pct", 0),
+                    )
+            except Exception as e:
+                logger.warning("Failed to finalize cache summary: %s", e)
+
+        await _send_message_safe(manager, session_id, {
+            "type": "completed",
+            "message": "Request completed successfully"
+        })
+
+        logger.info(
+            "Session %s completed execution loop in %d iterations (reason=%s)",
+            session_id,
+            iteration_count,
+            reason,
+        )
+
+    def _discard_latest_assistant_message(assistant_message_to_discard: Dict[str, Any]) -> None:
+        if messages and messages[-1] is assistant_message_to_discard:
+            messages.pop()
+
     for iteration in range(max_iterations):
         logger.debug("Iteration %d for session %s", iteration + 1, session_id)
 
@@ -3900,9 +3954,7 @@ async def _execute_workflow_loop(
             else:
                 raise
         assistant_content = response.get("content") or []
-        if not _message_has_content({"role": "assistant", "content": assistant_content}):
-            fallback_text = _final_response_text(response) or "Execution complete."
-            assistant_content = [{"type": "text", "text": fallback_text}]
+        response_had_content = _message_has_content({"role": "assistant", "content": assistant_content})
 
         assistant_message = {"role": "assistant", "content": assistant_content}
         messages.append(assistant_message)
@@ -3913,15 +3965,15 @@ async def _execute_workflow_loop(
             if isinstance(block, dict) and block.get("type") == "text"
         ]
         assistant_text = "\n".join(filter(None, assistant_text_blocks))
+        has_real_assistant_text = response_had_content and bool(assistant_text)
 
-        # Capture reasoning from this iteration into persistent context
-        # This happens after each LLM call, regardless of stop_reason
-        if reasoning_buffer:
+        stop_reason = response.get("stop_reason")
+        tool_calls = extract_tool_calls(response)
+
+        def _capture_reasoning_context(current_tool_names: List[str]) -> None:
+            if not reasoning_buffer:
+                return
             full_reasoning = "".join(reasoning_buffer)
-            # Extract tool call names from response for this iteration
-            tool_calls_response = extract_tool_calls(response)
-            current_tool_names = [tc.get("name", "") for tc in tool_calls_response] if tool_calls_response else []
-
             try:
                 reasoning_entry = ReasoningEntry(
                     iteration=iteration + 1,
@@ -3941,62 +3993,88 @@ async def _execute_workflow_loop(
             except Exception as e:
                 logger.warning("Failed to capture reasoning context: %s", e)
 
-        stop_reason = response.get("stop_reason")
-        if stop_reason == "end_turn":
-            # Send any text content on end_turn (completion message, final status, etc.)
-            # This includes both first-iteration responses AND final completion messages after tool execution
-            if assistant_text:
-                await _send_message_safe(
-                    manager,
-                    session_id,
-                    {"type": "llm_message", "message": markdown_to_html(assistant_text), "format": "html"},
-                )
-                logger.info("Session %s sent direct text response (%d chars) on end_turn", session_id, len(assistant_text))
-
-            # Save conversation history for next request
-            manager.set_conversation_history(session_id, messages)
-
-            # Finalize cache metrics summary for this session
-            if session_path:
-                try:
-                    from .session_logger import finalize_session_cache_summary
-                    cache_summary = finalize_session_cache_summary(session_path)
-                    if cache_summary:
-                        logger.info(
-                            "Session %s cache summary: %d calls, hit_rate=%.1f%%, savings=$%.4f (%.1f%%)",
-                            session_id,
-                            cache_summary.get("total_api_calls", 0),
-                            cache_summary.get("overall_cache_hit_rate_pct", 0),
-                            cache_summary.get("total_savings_usd", 0),
-                            cache_summary.get("overall_savings_pct", 0),
-                        )
-                except Exception as e:
-                    logger.warning("Failed to finalize cache summary: %s", e)
-
-            # Notify frontend that execution has completed successfully
-            await _send_message_safe(manager, session_id, {
-                "type": "completed",
-                "message": "Request completed successfully"
-            })
-
-            logger.info("Session %s completed execution loop in %d iterations", session_id, iteration + 1)
-            return  # Exit the loop successfully
-
-        if stop_reason != "tool_use":
-            error_text = f"Unexpected stop_reason '{stop_reason}'. Expected 'tool_use' or 'end_turn'."
+        if tool_calls and stop_reason != "tool_use":
+            _discard_latest_assistant_message(assistant_message)
+            error_text = (
+                f"Claude returned {len(tool_calls)} tool call(s) with unsafe stop_reason='{stop_reason}'."
+            )
             await _send_error(manager, session_id, "Invalid stop reason from Claude", error_text)
             messages.append(_user_text_message(error_text))
-            logger.warning("Session %s received unexpected stop_reason: %s", session_id, stop_reason)
+            logger.warning(
+                "Session %s rejected tool calls with unsafe stop_reason: %s",
+                session_id,
+                stop_reason,
+            )
             continue
 
-        tool_calls = extract_tool_calls(response)
+        legacy_response_call = next(
+            (tc for tc in tool_calls if tc.get("name") == "respond_to_user"),
+            None,
+        )
+        if legacy_response_call is not None:
+            raw_legacy_input = legacy_response_call.get("input") or {}
+            legacy_input = dict(raw_legacy_input) if isinstance(raw_legacy_input, Mapping) else {}
+            message_text = str(legacy_input.get("message", "")).strip()
+            if not message_text:
+                _discard_latest_assistant_message(assistant_message)
+                error_text = "Legacy respond_to_user call was invoked without message content."
+                await _send_error(manager, session_id, "Invalid legacy response tool", error_text)
+                messages.append(_user_text_message(error_text))
+                logger.warning(
+                    "Session %s rejected empty legacy respond_to_user tool call id=%s",
+                    session_id,
+                    legacy_response_call.get("id", ""),
+                )
+                continue
+
+            _capture_reasoning_context([tc.get("name", "") for tc in tool_calls])
+            assistant_message["content"] = [{"type": "text", "text": message_text}]
+            logger.warning(
+                "Session %s converted legacy respond_to_user tool call id=%s to terminal assistant text before tool execution",
+                session_id,
+                legacy_response_call.get("id", ""),
+            )
+            await _finalize_terminal_response(
+                message_text,
+                iteration_count=iteration + 1,
+                reason="legacy_respond_to_user",
+            )
+            return
+
         if not tool_calls:
-            error_text = "Claude returned stop_reason='tool_use' but no tool calls were found."
-            await _send_error(manager, session_id, "Invalid tool usage", error_text)
+            if has_real_assistant_text and stop_reason == "end_turn":
+                _capture_reasoning_context([])
+                await _finalize_terminal_response(
+                    assistant_text,
+                    iteration_count=iteration + 1,
+                    reason=f"no_tool_calls:{stop_reason or 'unknown'}",
+                )
+                return
+
+            _discard_latest_assistant_message(assistant_message)
+
+            if has_real_assistant_text:
+                error_text = (
+                    f"Claude returned assistant text with unsafe stop_reason='{stop_reason}' and no tool calls."
+                )
+                await _send_error(manager, session_id, "Invalid stop reason from Claude", error_text)
+                messages.append(_user_text_message(error_text))
+                logger.warning(
+                    "Session %s rejected no-tool text response with unsafe stop_reason: %s",
+                    session_id,
+                    stop_reason,
+                )
+                continue
+
+            error_text = (
+                f"Claude returned stop_reason='{stop_reason}' with no tool calls and no assistant text."
+            )
+            await _send_error(manager, session_id, "Invalid empty response", error_text)
             messages.append(_user_text_message(error_text))
-            logger.warning("Session %s received tool_use stop with zero tool calls", session_id)
+            logger.warning("Session %s received empty response with stop_reason: %s", session_id, stop_reason)
             continue
 
+        _capture_reasoning_context([tc.get("name", "") for tc in tool_calls])
         for tool_call in tool_calls:
             tool_name = tool_call["name"]
             tool_use_id = tool_call["id"]
@@ -4367,40 +4445,6 @@ async def _execute_workflow_loop(
                     messages.append(_tool_result_message(tool_use_id, duplicate_text))
                     logger.warning("Session %s suppressed duplicate intent for '%s'", session_id, tool_name)
                     continue
-
-            if tool_name == "respond_to_user":
-                message_text = str(tool_input.get("message", "")).strip()
-                if not message_text:
-                    message_text = "Tool 'respond_to_user' invoked without message content."
-
-                normalized_message = _normalise_user_notification(message_text)
-                if last_user_message_sent and normalized_message == last_user_message_sent:
-                    duplicate_notice = (
-                        "Duplicate respond_to_user output suppressed. The user already received this exact wording. "
-                        "Revise the message or wait for the user to respond."
-                    )
-                    messages.append(_tool_result_message(tool_use_id, duplicate_notice, is_error=True))
-                    iteration_had_failure = True
-                    if iteration_first_failure_intent is None:
-                        iteration_first_failure_intent = tool_intent_key
-                    logger.warning(
-                        "Session %s suppressed duplicate respond_to_user message: %s",
-                        session_id,
-                        message_text,
-                    )
-                    continue
-
-                await _send_message_safe(
-                    manager,
-                    session_id,
-                    {"type": "llm_message", "message": markdown_to_html(message_text), "format": "html"},
-                )
-                confirmation_text = f"Delivered message to user: {message_text}"
-                messages.append(_tool_result_message(tool_use_id, confirmation_text))
-                last_user_message_sent = normalized_message
-                iteration_had_success = True
-                logger.debug("Session %s forwarded respond_to_user message", session_id)
-                continue
 
             # Handle design exploration tools
             if tool_name == "generate_question_tree":
@@ -5781,7 +5825,7 @@ def _build_user_message(request: Mapping[str, Any]) -> Dict[str, Any]:
 
 def _extract_last_user_notification(messages: List[Dict[str, Any]]) -> Optional[str]:
     """
-    Retrieve the most recent respond_to_user message that was delivered to the user.
+    Retrieve the most recent legacy response-tool message delivered to the user.
     """
     marker = "Delivered message to user:"
 

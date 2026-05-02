@@ -1549,21 +1549,6 @@ TOOLS = [
         }
     },
     {
-        "name": "respond_to_user",
-        "description": "Send a message to the user to ask for clarification or provide a status update. Do not send identical text more than once; wait for the user's response before repeating.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "message": {
-                    "type": "string",
-                    "description": "The message to display to the user"
-                }
-            },
-            "required": ["message"],
-            "additionalProperties": False
-        }
-    },
-    {
         "name": "generate_question_tree",
         "description": "Generate a tree of clarifying questions to understand the user's requirements. Use this when the request is ambiguous or missing critical constraints. Do not use for simple, well-specified requests.",
         "input_schema": {
@@ -3042,14 +3027,30 @@ def _extract_openai_chat_reasoning(message: Any) -> str:
     return "\n\n".join(reasoning_parts)
 
 
+def _openai_chat_stop_reason(choice: Any, *, has_tool_calls: bool) -> str:
+    """Map OpenAI Chat Completions finish reasons without hiding unsafe truncation states."""
+    finish_reason = getattr(choice, "finish_reason", None) if choice else None
+    if finish_reason == "length":
+        return "max_tokens"
+    if finish_reason == "content_filter":
+        return "content_filter"
+    if finish_reason in ("tool_calls", "function_call"):
+        return "tool_use" if has_tool_calls else str(finish_reason)
+    if finish_reason is None:
+        return "unknown"
+    if finish_reason == "stop":
+        return "stop_with_tool_calls" if has_tool_calls else "end_turn"
+    return str(finish_reason)
+
+
 def _convert_openai_chat_response_to_anthropic_format(response: Any) -> dict:
     """Convert OpenAI-compatible Chat Completions output to Anthropic-compatible content blocks."""
     content: List[Dict[str, Any]] = []
-    stop_reason = "end_turn"
 
     choice = response.choices[0] if getattr(response, "choices", None) else None
     message = getattr(choice, "message", None) if choice else None
     if message is None:
+        stop_reason = _openai_chat_stop_reason(choice, has_tool_calls=False)
         return {"stop_reason": stop_reason, "content": content, "usage": {"input_tokens": 0, "output_tokens": 0}}
 
     text = getattr(message, "content", None)
@@ -3057,8 +3058,8 @@ def _convert_openai_chat_response_to_anthropic_format(response: Any) -> dict:
         content.append({"type": "text", "text": text})
 
     tool_calls = getattr(message, "tool_calls", None) or []
+    stop_reason = _openai_chat_stop_reason(choice, has_tool_calls=bool(tool_calls))
     if tool_calls:
-        stop_reason = "tool_use"
         for tool_call in tool_calls:
             function = getattr(tool_call, "function", None)
             arguments_raw = getattr(function, "arguments", "") if function else ""
@@ -3088,6 +3089,51 @@ def _convert_openai_chat_response_to_anthropic_format(response: Any) -> dict:
     }
 
 
+def _openai_response_stop_reason(response: Any, *, has_tool_calls: bool) -> str:
+    """Map OpenAI Responses status without converting incomplete output into completion."""
+    status = getattr(response, "status", None)
+    if status != "completed":
+        if status == "incomplete":
+            details = getattr(response, "incomplete_details", None)
+            reason = getattr(details, "reason", None)
+            if reason == "max_output_tokens":
+                return "max_tokens"
+            return str(reason or "incomplete")
+        if status in ("failed", "cancelled"):
+            return str(status)
+        return str(status or "unknown")
+    if has_tool_calls:
+        return "tool_use"
+    return "end_turn"
+
+
+def _gemini_finish_reason_name(finish_reason: Any) -> Optional[str]:
+    if finish_reason is None:
+        return None
+    name = getattr(finish_reason, "name", None)
+    if isinstance(name, str) and name:
+        return name.upper()
+    value = getattr(finish_reason, "value", None)
+    if isinstance(value, str) and value:
+        return value.upper()
+    text = str(finish_reason)
+    if "." in text:
+        text = text.rsplit(".", 1)[-1]
+    return text.upper() if text else None
+
+
+def _gemini_stop_reason(candidate: Any, *, has_tool_calls: bool) -> str:
+    """Map Gemini finish reasons without laundering unsafe finishes into safe loop states."""
+    reason = _gemini_finish_reason_name(getattr(candidate, "finish_reason", None) if candidate else None)
+    if reason == "STOP":
+        return "tool_use" if has_tool_calls else "end_turn"
+    if reason == "MAX_TOKENS":
+        return "max_tokens"
+    if reason is None:
+        return "unknown"
+    return reason.lower()
+
+
 def _convert_openai_response_to_anthropic_format(response: Any) -> dict:
     """
     Convert OpenAI Responses API response to Anthropic-compatible format.
@@ -3096,7 +3142,7 @@ def _convert_openai_response_to_anthropic_format(response: Any) -> dict:
     instead of a single 'message' object. We iterate through output items to extract content.
     """
     content = []
-    stop_reason = "end_turn"
+    has_tool_calls = False
 
     # Iterate through output items (reasoning, message, function_call, function_call_output)
     for item in response.output:
@@ -3114,7 +3160,7 @@ def _convert_openai_response_to_anthropic_format(response: Any) -> dict:
 
         elif item_type == "function_call":
             # Tool calls become tool_use blocks
-            stop_reason = "tool_use"
+            has_tool_calls = True
 
             # Extract function call details
             tool_name = getattr(item, "name", "")
@@ -3150,12 +3196,14 @@ def _convert_openai_response_to_anthropic_format(response: Any) -> dict:
                 "input": arguments
             })
 
+    stop_reason = _openai_response_stop_reason(response, has_tool_calls=has_tool_calls)
+    usage = getattr(response, "usage", None)
     return {
         "stop_reason": stop_reason,
         "content": content,
         "usage": {
-            "input_tokens": response.usage.input_tokens,
-            "output_tokens": response.usage.output_tokens
+            "input_tokens": getattr(usage, "input_tokens", 0) if usage else 0,
+            "output_tokens": getattr(usage, "output_tokens", 0) if usage else 0
         }
     }
 
@@ -3307,7 +3355,7 @@ def _convert_gemini_response_to_anthropic_format(response: Any) -> dict:
     Only regular text and tool calls are included in the final response.
     """
     content: List[dict] = []
-    stop_reason = "end_turn"
+    has_tool_calls = False
 
     if response is None:
         raise RuntimeError("Gemini API returned no response object")
@@ -3328,7 +3376,7 @@ def _convert_gemini_response_to_anthropic_format(response: Any) -> dict:
 
             if getattr(part, "function_call", None):
                 fc = part.function_call
-                stop_reason = "tool_use"
+                has_tool_calls = True
                 tool_use_block = {
                     "type": "tool_use",
                     "id": getattr(fc, "id", None) or f"toolu_{idx+1}",
@@ -3362,6 +3410,7 @@ def _convert_gemini_response_to_anthropic_format(response: Any) -> dict:
         if fallback_text:
             content.append({"type": "text", "text": fallback_text})
 
+    stop_reason = _gemini_stop_reason(candidate, has_tool_calls=has_tool_calls)
     usage_meta = getattr(response, "usage_metadata", None)
     usage: Dict[str, int] = {}
     if usage_meta:
@@ -3397,8 +3446,8 @@ def _normalize_thread_tool_use(
     """
     Normalize/validate thread tool payloads before execution.
 
-    Invalid thread specs are rewritten into a respond_to_user tool call so they
-    do not reach downstream execution handlers.
+    Invalid thread specs are marked as terminal guardrail text so they do not
+    reach downstream execution handlers or require a model-visible response tool.
     """
     if tool_name not in _THREAD_TOOL_NAMES:
         return {"name": tool_name, "input": tool_input if isinstance(tool_input, dict) else {}}
@@ -3411,12 +3460,37 @@ def _normalize_thread_tool_use(
         )
     except ValueError as exc:
         message = _thread_guardrail_message(tool_name, str(exc))
-        logger.warning("Thread spec guardrail rewrote invalid tool call id=%s: %s", tool_id, message)
-        return {"name": "respond_to_user", "input": {"message": message}}
+        logger.warning("Thread spec guardrail converted invalid tool call id=%s to terminal text: %s", tool_id, message)
+        return {"guardrail_message": message}
 
     payload["thread_type"] = thread_type
     payload["thread_size"] = thread_size
     return {"name": tool_name, "input": payload}
+
+
+def _thread_guardrail_text_from_content(content: Any) -> Optional[str]:
+    """Return terminal guardrail text if content contains an invalid thread tool call."""
+    if not isinstance(content, list):
+        return None
+
+    for block in content:
+        if not isinstance(block, dict) or block.get("type") != "tool_use":
+            continue
+
+        tool_name = str(block.get("name", "")).strip()
+        if tool_name not in _THREAD_TOOL_NAMES:
+            continue
+
+        normalized = _normalize_thread_tool_use(
+            tool_id=str(block.get("id", "")).strip(),
+            tool_name=tool_name,
+            tool_input=block.get("input"),
+        )
+        message = normalized.get("guardrail_message")
+        if isinstance(message, str) and message.strip():
+            return message.strip()
+
+    return None
 
 
 def _sanitize_thread_tool_uses_in_content(content: Any) -> List[Any]:
@@ -3440,6 +3514,9 @@ def _sanitize_thread_tool_uses_in_content(content: Any) -> List[Any]:
             tool_name=tool_name,
             tool_input=block.get("input"),
         )
+        if "guardrail_message" in normalized:
+            sanitized.append({"type": "text", "text": str(normalized["guardrail_message"])})
+            continue
         rewritten_block = dict(block)
         rewritten_block["name"] = normalized["name"]
         rewritten_block["input"] = normalized["input"]
@@ -3454,6 +3531,13 @@ def _sanitize_thread_tool_uses_in_result(result: Dict[str, Any]) -> Dict[str, An
     content = result.get("content")
     if not isinstance(content, list):
         return result
+    guardrail_text = _thread_guardrail_text_from_content(content)
+    if guardrail_text:
+        updated = dict(result)
+        if result.get("stop_reason") == "tool_use":
+            updated["stop_reason"] = "end_turn"
+        updated["content"] = [{"type": "text", "text": guardrail_text}]
+        return updated
     sanitized_content = _sanitize_thread_tool_uses_in_content(content)
     if sanitized_content == content:
         return result
@@ -3810,10 +3894,11 @@ async def call_claude_with_tools(
                             "model": model,
                             "instructions": system_prompt,
                             "input": openai_messages,
-                            "tools": openai_tools,
                             "max_output_tokens": effective_max_output_tokens,
                             "store": False,
                         }
+                        if openai_tools:
+                            stream_kwargs["tools"] = openai_tools
                         if reasoning_param:
                             stream_kwargs["reasoning"] = reasoning_param
                         async with responses_client.stream(**stream_kwargs) as stream:
@@ -3849,10 +3934,11 @@ async def call_claude_with_tools(
                         "model": model,
                         "instructions": system_prompt,
                         "input": openai_messages,
-                        "tools": openai_tools,
                         "max_output_tokens": effective_max_output_tokens,
                         "store": False,  # We manage conversation state locally
                     }
+                    if openai_tools:
+                        create_kwargs["tools"] = openai_tools
                     if reasoning_param:
                         create_kwargs["reasoning"] = reasoning_param
                     response = await openai_client.responses.create(**create_kwargs)
@@ -4162,14 +4248,16 @@ async def call_claude_with_tools(
                     # Stream with extended thinking to capture reasoning
                     logger.info("Using streaming for Claude COT to capture thinking blocks")
                     anthropic_client = _get_anthropic_client(api_keys)
-                    async with anthropic_client.messages.stream(
-                        model=base_model,
-                        max_tokens=max_tokens,
-                        system=system_param,
-                        tools=tools_param,
-                        messages=messages_param,
-                        thinking=thinking_param
-                    ) as stream:
+                    stream_kwargs = {
+                        "model": base_model,
+                        "max_tokens": max_tokens,
+                        "system": system_param,
+                        "messages": messages_param,
+                        "thinking": thinking_param,
+                    }
+                    if tools_param:
+                        stream_kwargs["tools"] = tools_param
+                    async with anthropic_client.messages.stream(**stream_kwargs) as stream:
                         async for event in stream:
                             _log_stream_payload("anthropic", event, model)
                             event_type = getattr(event, "type", None)
@@ -4200,9 +4288,10 @@ async def call_claude_with_tools(
                         "model": base_model,
                         "max_tokens": max_tokens,
                         "system": system_param,
-                        "tools": tools_param,
                         "messages": messages_param
                     }
+                    if tools_param:
+                        api_kwargs["tools"] = tools_param
                     if thinking_param:
                         api_kwargs["thinking"] = thinking_param
 

@@ -120,6 +120,17 @@ class _ResultQueueManager:
         return None
 
 
+class _CapturingReasoningContext:
+    def __init__(self):
+        self.entries = []
+
+    def add_entry(self, entry):
+        self.entries.append(entry)
+
+    def get_injection_text(self):
+        return ""
+
+
 def _extract_tool_result_texts(messages):
     texts = []
     for message in messages:
@@ -138,6 +149,475 @@ def _extract_tool_result_texts(messages):
                 if isinstance(text_block, dict) and text_block.get("type") == "text":
                     texts.append(str(text_block.get("text") or ""))
     return texts
+
+
+def test_end_turn_text_is_terminal_user_response(monkeypatch: pytest.MonkeyPatch):
+    async def _run():
+        manager = _ResultQueueManager(EntityStore(), results=[])
+        llm_calls = {"count": 0}
+
+        async def fake_call_claude_with_tools(*args, **kwargs):
+            llm_calls["count"] += 1
+            return {"stop_reason": "end_turn", "content": [{"type": "text", "text": "What diameter should the hole be?"}]}
+
+        monkeypatch.setattr("backend.agent_workflow.USE_PROMPT_ROUTING", False)
+        monkeypatch.setattr("backend.agent_workflow.call_claude_with_tools", fake_call_claude_with_tools)
+
+        await _execute_workflow_loop(
+            session_id="s-final-text",
+            messages=[{"role": "user", "content": [{"type": "text", "text": "add a hole"}]}],
+            max_iterations=3,
+            model_name=None,
+            manager=manager,  # type: ignore[arg-type]
+            last_user_message_sent=None,
+            request={"execution_target": "fusion", "request_id": "final-text"},
+            feature_snapshot=None,
+        )
+
+        assert llm_calls["count"] == 1
+        assert any(
+            payload.get("type") == "llm_message" and "What diameter" in payload.get("message", "")
+            for payload in manager.sent_messages
+        )
+        assert any(payload.get("type") == "completed" for payload in manager.sent_messages)
+        assert manager.history[-1]["role"] == "assistant"
+        assert manager.history[-1]["content"][0]["text"] == "What diameter should the hole be?"
+
+    asyncio.run(_run())
+
+
+def test_text_without_tool_calls_rejects_tool_use_stop_reason(monkeypatch: pytest.MonkeyPatch):
+    async def _run():
+        manager = _ResultQueueManager(EntityStore(), results=[])
+        llm_calls = {"count": 0}
+
+        async def fake_call_claude_with_tools(*args, **kwargs):
+            llm_calls["count"] += 1
+            return {
+                "stop_reason": "tool_use",
+                "content": [{"type": "text", "text": "What diameter should the hole be?"}],
+            }
+
+        monkeypatch.setattr("backend.agent_workflow.USE_PROMPT_ROUTING", False)
+        monkeypatch.setattr("backend.agent_workflow.call_claude_with_tools", fake_call_claude_with_tools)
+
+        await _execute_workflow_loop(
+            session_id="s-text-no-tools-tool-use-stop",
+            messages=[{"role": "user", "content": [{"type": "text", "text": "add a hole"}]}],
+            max_iterations=1,
+            model_name=None,
+            manager=manager,  # type: ignore[arg-type]
+            last_user_message_sent=None,
+            request={"execution_target": "fusion", "request_id": "text-no-tools-tool-use-stop"},
+            feature_snapshot=None,
+        )
+
+        assert llm_calls["count"] == 1
+        assert any(
+            payload.get("type") == "error" and payload.get("message") == "Invalid stop reason from Claude"
+            for payload in manager.sent_messages
+        )
+        assert not any(payload.get("type") == "llm_message" for payload in manager.sent_messages)
+        assert not any(payload.get("type") == "completed" for payload in manager.sent_messages)
+        assert not any(message.get("role") == "assistant" for message in manager.history)
+
+    asyncio.run(_run())
+
+
+def test_text_without_tool_calls_rejects_unsafe_stop_reason(monkeypatch: pytest.MonkeyPatch):
+    async def _run():
+        manager = _ResultQueueManager(EntityStore(), results=[])
+        llm_calls = {"count": 0}
+
+        async def fake_call_claude_with_tools(*args, **kwargs):
+            llm_calls["count"] += 1
+            return {
+                "stop_reason": "max_tokens",
+                "content": [{"type": "text", "text": "Partial answer that should not complete."}],
+            }
+
+        monkeypatch.setattr("backend.agent_workflow.USE_PROMPT_ROUTING", False)
+        monkeypatch.setattr("backend.agent_workflow.call_claude_with_tools", fake_call_claude_with_tools)
+
+        await _execute_workflow_loop(
+            session_id="s-unsafe-stop",
+            messages=[{"role": "user", "content": [{"type": "text", "text": "continue"}]}],
+            max_iterations=1,
+            model_name=None,
+            manager=manager,  # type: ignore[arg-type]
+            last_user_message_sent=None,
+            request={"execution_target": "fusion", "request_id": "unsafe-stop"},
+            feature_snapshot=None,
+        )
+
+        assert llm_calls["count"] == 1
+        assert any(
+            payload.get("type") == "error" and payload.get("message") == "Invalid stop reason from Claude"
+            for payload in manager.sent_messages
+        )
+        assert not any(payload.get("type") == "completed" for payload in manager.sent_messages)
+        assert not any(payload.get("type") == "llm_message" for payload in manager.sent_messages)
+        assert not any(message.get("role") == "assistant" for message in manager.history)
+
+    asyncio.run(_run())
+
+
+def test_tool_calls_reject_unsafe_stop_reason_before_execution(monkeypatch: pytest.MonkeyPatch):
+    async def _run():
+        manager = _ResultQueueManager(EntityStore(), results=[])
+        llm_calls = {"count": 0}
+        executed = {"count": 0}
+
+        async def fake_call_claude_with_tools(*args, **kwargs):
+            llm_calls["count"] += 1
+            return {
+                "stop_reason": "max_tokens",
+                "content": [
+                    {"type": "text", "text": "Partial tool response."},
+                    {
+                        "type": "tool_use",
+                        "id": "toolu_create_sketch",
+                        "name": "create_sketch",
+                        "input": {
+                            "plane_id": "XY",
+                            "sketch_id": "s0",
+                            "description": "Creating a sketch that must not execute",
+                        },
+                    },
+                ],
+            }
+
+        async def fake_execute_operation(*args, **kwargs):
+            executed["count"] += 1
+            raise AssertionError("No CAD tool should execute with unsafe stop_reason")
+
+        monkeypatch.setattr("backend.agent_workflow.USE_PROMPT_ROUTING", False)
+        monkeypatch.setattr("backend.agent_workflow.call_claude_with_tools", fake_call_claude_with_tools)
+        monkeypatch.setattr("backend.agent_workflow.FusionTargetExecutor.execute_operation", fake_execute_operation)
+
+        await _execute_workflow_loop(
+            session_id="s-unsafe-tool-stop",
+            messages=[{"role": "user", "content": [{"type": "text", "text": "make a sketch"}]}],
+            max_iterations=1,
+            model_name=None,
+            manager=manager,  # type: ignore[arg-type]
+            last_user_message_sent=None,
+            request={"execution_target": "fusion", "request_id": "unsafe-tool-stop"},
+            feature_snapshot=None,
+        )
+
+        assert llm_calls["count"] == 1
+        assert executed["count"] == 0
+        assert any(
+            payload.get("type") == "error" and payload.get("message") == "Invalid stop reason from Claude"
+            for payload in manager.sent_messages
+        )
+        assert not any(payload.get("type") == "ir_operation" for payload in manager.sent_messages)
+        assert not any(payload.get("type") == "completed" for payload in manager.sent_messages)
+        assert not any(message.get("role") == "assistant" for message in manager.history)
+
+    asyncio.run(_run())
+
+
+def test_unsafe_tool_stop_reason_does_not_persist_reasoning_context(monkeypatch: pytest.MonkeyPatch):
+    async def _run():
+        manager = _ResultQueueManager(EntityStore(), results=[])
+        manager._reasoning_context = _CapturingReasoningContext()
+
+        async def fake_call_claude_with_tools(*args, **kwargs):
+            reasoning_callback = kwargs.get("reasoning_callback")
+            if reasoning_callback:
+                await reasoning_callback("Partial reasoning for a truncated tool plan.")
+            return {
+                "stop_reason": "max_tokens",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "toolu_create_sketch",
+                        "name": "create_sketch",
+                        "input": {
+                            "plane_id": "XY",
+                            "sketch_id": "s0",
+                            "description": "Creating a sketch that must not execute",
+                        },
+                    },
+                ],
+            }
+
+        monkeypatch.setattr("backend.agent_workflow.USE_PROMPT_ROUTING", False)
+        monkeypatch.setattr("backend.agent_workflow.call_claude_with_tools", fake_call_claude_with_tools)
+
+        await _execute_workflow_loop(
+            session_id="s-unsafe-reasoning-context",
+            messages=[{"role": "user", "content": [{"type": "text", "text": "make a sketch"}]}],
+            max_iterations=1,
+            model_name=None,
+            manager=manager,  # type: ignore[arg-type]
+            last_user_message_sent=None,
+            request={"execution_target": "fusion", "request_id": "unsafe-reasoning-context"},
+            feature_snapshot=None,
+        )
+
+        assert manager._reasoning_context.entries == []
+        assert any(
+            payload.get("type") == "reasoning_chunk"
+            and "truncated tool plan" in payload.get("content", "")
+            for payload in manager.sent_messages
+        )
+        assert any(
+            payload.get("type") == "error" and payload.get("message") == "Invalid stop reason from Claude"
+            for payload in manager.sent_messages
+        )
+
+    asyncio.run(_run())
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        [],
+        [{"type": "text", "text": "   "}],
+    ],
+)
+def test_empty_no_tool_response_is_not_terminal_success(monkeypatch: pytest.MonkeyPatch, content):
+    async def _run():
+        manager = _ResultQueueManager(EntityStore(), results=[])
+        llm_calls = {"count": 0}
+
+        async def fake_call_claude_with_tools(*args, **kwargs):
+            llm_calls["count"] += 1
+            return {
+                "stop_reason": "tool_use",
+                "content": content,
+            }
+
+        monkeypatch.setattr("backend.agent_workflow.USE_PROMPT_ROUTING", False)
+        monkeypatch.setattr("backend.agent_workflow.call_claude_with_tools", fake_call_claude_with_tools)
+
+        await _execute_workflow_loop(
+            session_id="s-empty-no-tools",
+            messages=[{"role": "user", "content": [{"type": "text", "text": "continue"}]}],
+            max_iterations=1,
+            model_name=None,
+            manager=manager,  # type: ignore[arg-type]
+            last_user_message_sent=None,
+            request={"execution_target": "fusion", "request_id": "empty-no-tools"},
+            feature_snapshot=None,
+        )
+
+        assert llm_calls["count"] == 1
+        assert any(
+            payload.get("type") == "error" and payload.get("message") == "Invalid empty response"
+            for payload in manager.sent_messages
+        )
+        assert not any(payload.get("type") == "completed" for payload in manager.sent_messages)
+        assert not any(payload.get("type") == "llm_message" for payload in manager.sent_messages)
+        assert not any(message.get("role") == "assistant" for message in manager.history)
+
+    asyncio.run(_run())
+
+
+def test_legacy_respond_to_user_tool_call_delivers_and_stops(monkeypatch: pytest.MonkeyPatch):
+    async def _run():
+        manager = _ResultQueueManager(EntityStore(), results=[])
+        llm_calls = {"count": 0}
+
+        async def fake_call_claude_with_tools(*args, **kwargs):
+            llm_calls["count"] += 1
+            return {
+                "stop_reason": "tool_use",
+                "content": [
+                    {"type": "text", "text": "Asking one follow-up."},
+                    {
+                        "type": "tool_use",
+                        "id": "toolu_legacy_response",
+                        "name": "respond_to_user",
+                        "input": {"message": "What wall thickness should I use?"},
+                    },
+                ],
+            }
+
+        monkeypatch.setattr("backend.agent_workflow.USE_PROMPT_ROUTING", False)
+        monkeypatch.setattr("backend.agent_workflow.call_claude_with_tools", fake_call_claude_with_tools)
+
+        await _execute_workflow_loop(
+            session_id="s-legacy-response",
+            messages=[{"role": "user", "content": [{"type": "text", "text": "make an enclosure"}]}],
+            max_iterations=3,
+            model_name=None,
+            manager=manager,  # type: ignore[arg-type]
+            last_user_message_sent=None,
+            request={"execution_target": "fusion", "request_id": "legacy-response"},
+            feature_snapshot=None,
+        )
+
+        assert llm_calls["count"] == 1
+        assert any(
+            payload.get("type") == "llm_message" and "What wall thickness" in payload.get("message", "")
+            for payload in manager.sent_messages
+        )
+        assert any(payload.get("type") == "completed" for payload in manager.sent_messages)
+        assert manager.history[-1] == {
+            "role": "assistant",
+            "content": [{"type": "text", "text": "What wall thickness should I use?"}],
+        }
+
+    asyncio.run(_run())
+
+
+def test_empty_legacy_respond_to_user_is_not_terminal_success(monkeypatch: pytest.MonkeyPatch):
+    async def _run():
+        manager = _ResultQueueManager(EntityStore(), results=[])
+        llm_calls = {"count": 0}
+
+        async def fake_call_claude_with_tools(*args, **kwargs):
+            llm_calls["count"] += 1
+            return {
+                "stop_reason": "tool_use",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "toolu_empty_legacy_response",
+                        "name": "respond_to_user",
+                        "input": {"message": "   "},
+                    },
+                ],
+            }
+
+        monkeypatch.setattr("backend.agent_workflow.USE_PROMPT_ROUTING", False)
+        monkeypatch.setattr("backend.agent_workflow.call_claude_with_tools", fake_call_claude_with_tools)
+
+        await _execute_workflow_loop(
+            session_id="s-empty-legacy-response",
+            messages=[{"role": "user", "content": [{"type": "text", "text": "make an enclosure"}]}],
+            max_iterations=1,
+            model_name=None,
+            manager=manager,  # type: ignore[arg-type]
+            last_user_message_sent=None,
+            request={"execution_target": "fusion", "request_id": "empty-legacy-response"},
+            feature_snapshot=None,
+        )
+
+        assert llm_calls["count"] == 1
+        assert any(
+            payload.get("type") == "error" and payload.get("message") == "Invalid legacy response tool"
+            for payload in manager.sent_messages
+        )
+        assert not any(payload.get("type") == "completed" for payload in manager.sent_messages)
+        assert not any(payload.get("type") == "llm_message" for payload in manager.sent_messages)
+        assert not any(message.get("role") == "assistant" for message in manager.history)
+
+    asyncio.run(_run())
+
+
+def test_legacy_respond_to_user_rejects_unsafe_stop_reason(monkeypatch: pytest.MonkeyPatch):
+    async def _run():
+        manager = _ResultQueueManager(EntityStore(), results=[])
+        llm_calls = {"count": 0}
+
+        async def fake_call_claude_with_tools(*args, **kwargs):
+            llm_calls["count"] += 1
+            return {
+                "stop_reason": "max_tokens",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "toolu_legacy_response",
+                        "name": "respond_to_user",
+                        "input": {"message": "What wall thickness should I use?"},
+                    },
+                ],
+            }
+
+        monkeypatch.setattr("backend.agent_workflow.USE_PROMPT_ROUTING", False)
+        monkeypatch.setattr("backend.agent_workflow.call_claude_with_tools", fake_call_claude_with_tools)
+
+        await _execute_workflow_loop(
+            session_id="s-unsafe-legacy-response",
+            messages=[{"role": "user", "content": [{"type": "text", "text": "make an enclosure"}]}],
+            max_iterations=1,
+            model_name=None,
+            manager=manager,  # type: ignore[arg-type]
+            last_user_message_sent=None,
+            request={"execution_target": "fusion", "request_id": "unsafe-legacy-response"},
+            feature_snapshot=None,
+        )
+
+        assert llm_calls["count"] == 1
+        assert any(
+            payload.get("type") == "error" and payload.get("message") == "Invalid stop reason from Claude"
+            for payload in manager.sent_messages
+        )
+        assert not any(payload.get("type") == "completed" for payload in manager.sent_messages)
+        assert not any(payload.get("type") == "llm_message" for payload in manager.sent_messages)
+        assert not any(message.get("role") == "assistant" for message in manager.history)
+
+    asyncio.run(_run())
+
+
+def test_mixed_legacy_respond_to_user_preempts_other_tools(monkeypatch: pytest.MonkeyPatch):
+    async def _run():
+        manager = _ResultQueueManager(EntityStore(), results=[])
+        llm_calls = {"count": 0}
+        executed = {"count": 0}
+
+        async def fake_call_claude_with_tools(*args, **kwargs):
+            llm_calls["count"] += 1
+            return {
+                "stop_reason": "tool_use",
+                "content": [
+                    {"type": "text", "text": "I need one missing detail."},
+                    {
+                        "type": "tool_use",
+                        "id": "toolu_create_sketch",
+                        "name": "create_sketch",
+                        "input": {
+                            "plane_id": "XY",
+                            "sketch_id": "s0",
+                            "description": "Creating a sketch that must not execute",
+                        },
+                    },
+                    {
+                        "type": "tool_use",
+                        "id": "toolu_legacy_response",
+                        "name": "respond_to_user",
+                        "input": {"message": "What wall thickness should I use?"},
+                    },
+                ],
+            }
+
+        async def fake_execute_operation(*args, **kwargs):
+            executed["count"] += 1
+            raise AssertionError("No CAD tool should execute when legacy respond_to_user is present")
+
+        monkeypatch.setattr("backend.agent_workflow.USE_PROMPT_ROUTING", False)
+        monkeypatch.setattr("backend.agent_workflow.call_claude_with_tools", fake_call_claude_with_tools)
+        monkeypatch.setattr("backend.agent_workflow.FusionTargetExecutor.execute_operation", fake_execute_operation)
+
+        await _execute_workflow_loop(
+            session_id="s-mixed-legacy-response",
+            messages=[{"role": "user", "content": [{"type": "text", "text": "make an enclosure"}]}],
+            max_iterations=3,
+            model_name=None,
+            manager=manager,  # type: ignore[arg-type]
+            last_user_message_sent=None,
+            request={"execution_target": "fusion", "request_id": "mixed-legacy-response"},
+            feature_snapshot=None,
+        )
+
+        assert llm_calls["count"] == 1
+        assert executed["count"] == 0
+        assert not any(payload.get("type") == "ir_operation" for payload in manager.sent_messages)
+        assert any(
+            payload.get("type") == "llm_message" and "What wall thickness" in payload.get("message", "")
+            for payload in manager.sent_messages
+        )
+        assert manager.history[-1] == {
+            "role": "assistant",
+            "content": [{"type": "text", "text": "What wall thickness should I use?"}],
+        }
+
+    asyncio.run(_run())
 
 
 def _build_store_with_stale_face(*, ambiguous: bool = False) -> tuple[EntityStore, _ManagerStub]:
