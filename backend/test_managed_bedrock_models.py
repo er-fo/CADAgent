@@ -2,6 +2,7 @@
 
 import os
 import sys
+from types import SimpleNamespace
 
 sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[1]))
 os.environ.setdefault("OPENAI_API_KEY", "test-key")
@@ -103,3 +104,89 @@ def test_extract_openai_chat_reasoning_from_minimax_fields():
         reasoning_details = [{"text": "detail reasoning"}]
 
     assert llm_client._extract_openai_chat_reasoning(Message()) == "primary reasoning\n\ndetail reasoning"
+
+
+def test_openai_chat_converter_preserves_length_finish_reason_with_text():
+    response = SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                finish_reason="length",
+                message=SimpleNamespace(content="Partial answer", tool_calls=[]),
+            )
+        ],
+        usage=SimpleNamespace(prompt_tokens=11, completion_tokens=7),
+    )
+
+    converted = llm_client._convert_openai_chat_response_to_anthropic_format(response)
+
+    assert converted["stop_reason"] == "max_tokens"
+    assert converted["content"] == [{"type": "text", "text": "Partial answer"}]
+
+
+def test_openai_chat_converter_preserves_length_finish_reason_with_tool_calls():
+    response = SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                finish_reason="length",
+                message=SimpleNamespace(
+                    content=None,
+                    tool_calls=[
+                        SimpleNamespace(
+                            id="call_1",
+                            function=SimpleNamespace(name="create_sketch", arguments='{"plane_id":"XY"}'),
+                        )
+                    ],
+                ),
+            )
+        ],
+        usage=SimpleNamespace(prompt_tokens=11, completion_tokens=7),
+    )
+
+    converted = llm_client._convert_openai_chat_response_to_anthropic_format(response)
+
+    assert converted["stop_reason"] == "max_tokens"
+    assert converted["content"][0]["type"] == "tool_use"
+    assert converted["content"][0]["name"] == "create_sketch"
+
+
+def test_openai_response_converter_preserves_incomplete_status_with_tool_calls():
+    response = SimpleNamespace(
+        status="incomplete",
+        incomplete_details=SimpleNamespace(reason="max_output_tokens"),
+        output=[
+            SimpleNamespace(
+                type="function_call",
+                name="create_sketch",
+                call_id="call_1",
+                arguments='{"plane_id":"XY"}',
+            )
+        ],
+        usage=SimpleNamespace(input_tokens=11, output_tokens=7),
+    )
+
+    converted = llm_client._convert_openai_response_to_anthropic_format(response)
+
+    assert converted["stop_reason"] == "max_tokens"
+    assert converted["content"][0]["type"] == "tool_use"
+    assert converted["content"][0]["name"] == "create_sketch"
+
+
+def test_openai_response_converter_preserves_incomplete_status_with_text():
+    response = SimpleNamespace(
+        status="incomplete",
+        incomplete_details=SimpleNamespace(reason="max_output_tokens"),
+        output=[
+            SimpleNamespace(
+                type="message",
+                content=[
+                    SimpleNamespace(type="output_text", text="Partial answer"),
+                ],
+            )
+        ],
+        usage=SimpleNamespace(input_tokens=11, output_tokens=7),
+    )
+
+    converted = llm_client._convert_openai_response_to_anthropic_format(response)
+
+    assert converted["stop_reason"] == "max_tokens"
+    assert converted["content"] == [{"type": "text", "text": "Partial answer"}]

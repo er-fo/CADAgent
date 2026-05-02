@@ -5,7 +5,9 @@ sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[1]
 os.environ.setdefault("OPENAI_API_KEY", "test-key")
 
 from backend.code_generator import OPERATION_TEMPLATES
-from backend.prompt_structure import CLUSTER_TOOL_MAPPING, CORE_INSTRUCTIONS
+from backend.llm_client import TOOLS
+from backend.prompt_builder import build_full_prompt, build_prompt
+from backend.prompt_structure import CLUSTER_TOOL_MAPPING, CORE_INSTRUCTIONS, get_cluster_tools
 
 
 def test_core_instructions_do_not_claim_list_features_refreshes_entity_refs():
@@ -47,3 +49,20 @@ def test_line_loop_prompt_requires_profile_inspection_before_extrude():
     assert "This creates ONE closed loop = ONE profile" not in CORE_INSTRUCTIONS
     assert "call list_sketch_profiles to inspect the closed loop" in CORE_INSTRUCTIONS
     assert "then extrude the returned profile index" in CORE_INSTRUCTIONS
+
+
+def test_respond_to_user_is_not_model_visible():
+    assert "respond_to_user" not in {tool["name"] for tool in TOOLS}
+    assert get_cluster_tools(["core"]) == []
+
+    _system_prompt, full_tools = build_full_prompt()
+    assert "respond_to_user" not in {tool["name"] for tool in full_tools}
+
+    _core_prompt, core_tools = build_prompt({"required": ["core"], "optional": [], "reasoning": "test"})
+    assert core_tools == []
+
+
+def test_prompt_tells_model_to_answer_without_response_tool():
+    assert "When the user-facing answer is ready, respond normally without calling a tool" in CORE_INSTRUCTIONS
+    assert "respond_to_user" not in CORE_INSTRUCTIONS
+    assert "respond_to_user" not in CLUSTER_TOOL_MAPPING["core"]["documentation"]

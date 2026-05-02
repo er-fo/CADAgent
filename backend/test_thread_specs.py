@@ -8,7 +8,7 @@ os.environ.setdefault("OPENAI_API_KEY", "test-key")
 
 import pytest
 
-from backend.llm_client import TOOLS, extract_tool_calls
+from backend.llm_client import TOOLS, _sanitize_thread_tool_uses_in_result, extract_tool_calls
 from backend.thread_specs import (
     ALL_THREAD_SIZES,
     normalize_thread_size,
@@ -68,8 +68,9 @@ def test_thread_schema_uses_explicit_thread_size_enum():
     assert external_enum == list(ALL_THREAD_SIZES)
 
 
-def test_extract_tool_calls_rewrites_invalid_thread_specs():
+def test_invalid_thread_specs_become_terminal_assistant_text():
     response = {
+        "stop_reason": "tool_use",
         "content": [
             {
                 "type": "tool_use",
@@ -89,11 +90,44 @@ def test_extract_tool_calls_rewrites_invalid_thread_specs():
         ]
     }
 
+    sanitized = _sanitize_thread_tool_uses_in_result(response)
+    assert sanitized["stop_reason"] == "end_turn"
+    assert len(sanitized["content"]) == 1
+    assert sanitized["content"][0]["type"] == "text"
+    assert "not supported" in sanitized["content"][0]["text"]
+
     calls = extract_tool_calls(response)
-    assert len(calls) == 1
-    assert calls[0]["id"] == "toolu_bad_thread"
-    assert calls[0]["name"] == "respond_to_user"
-    assert "not supported" in calls[0]["input"]["message"]
+    assert calls == []
+
+
+def test_invalid_thread_specs_do_not_mask_unsafe_stop_reason():
+    response = {
+        "stop_reason": "max_tokens",
+        "content": [
+            {
+                "type": "tool_use",
+                "id": "toolu_bad_thread",
+                "name": "create_tapped_hole",
+                "input": {
+                    "face_ref": "face_0",
+                    "center_x": 0.0,
+                    "center_y": 0.0,
+                    "center_z": 0.0,
+                    "thread_type": "metric",
+                    "thread_size": "M2.5",
+                    "thread_depth": 6.0,
+                    "description": "tap hole",
+                },
+            }
+        ],
+    }
+
+    sanitized = _sanitize_thread_tool_uses_in_result(response)
+
+    assert sanitized["stop_reason"] == "max_tokens"
+    assert len(sanitized["content"]) == 1
+    assert sanitized["content"][0]["type"] == "text"
+    assert "not supported" in sanitized["content"][0]["text"]
 
 
 def test_extract_tool_calls_normalizes_supported_thread_specs():
