@@ -150,6 +150,117 @@ def test_route_request_retries_once_and_recovers_from_non_json(monkeypatch):
     assert fake_client.chat.completions.calls == 2
 
 
+def test_route_request_extracts_json_after_wrapped_bracket_noise(monkeypatch):
+    response = {
+        "choices": [
+            {
+                "message": {
+                    "content": (
+                        "MiniMax routing notes [not-json]\n"
+                        "```json\n"
+                        "{\"required\": [\"inspection\"], \"optional\": [\"selection\"], "
+                        "\"reasoning\": \"wrapped_json\"}\n"
+                        "```\n"
+                        "Use these clusters."
+                    ),
+                }
+            }
+        ]
+    }
+
+    fake_client = _fake_client_with_responses([response])
+    monkeypatch.setattr(prompt_router, "_build_routing_client", lambda api_keys=None: fake_client)  # noqa: ARG005
+
+    result = asyncio.run(prompt_router.route_request("inspect geometry"))
+    assert "fallback" not in result
+    assert "inspection" in result["required"]
+    assert "selection" in result["optional"]
+    assert result["reasoning"] == "wrapped_json"
+    assert result["router_retry_attempted"] is False
+    assert result["router_parse_status"] == "ok"
+    assert fake_client.chat.completions.calls == 1
+
+
+def test_route_request_skips_valid_non_router_json_before_router_json(monkeypatch):
+    response = {
+        "choices": [
+            {
+                "message": {
+                    "content": (
+                        "MiniMax scratchpad [1]\n"
+                        "{\"required\": [\"inspection\"], \"optional\": [], "
+                        "\"reasoning\": \"second_json\"}"
+                    ),
+                }
+            }
+        ]
+    }
+
+    fake_client = _fake_client_with_responses([response])
+    monkeypatch.setattr(prompt_router, "_build_routing_client", lambda api_keys=None: fake_client)  # noqa: ARG005
+
+    result = asyncio.run(prompt_router.route_request("inspect geometry"))
+    assert "fallback" not in result
+    assert "inspection" in result["required"]
+    assert result["reasoning"] == "second_json"
+    assert result["router_retry_attempted"] is False
+    assert fake_client.chat.completions.calls == 1
+
+
+def test_route_request_repairs_truncated_reasoning_string_without_retry(monkeypatch):
+    response = {
+        "choices": [
+            {
+                "message": {
+                    "content": (
+                        "{\"required\": [\"inspection\"], \"optional\": [], "
+                        "\"reasoning\": \"MiniMax stopped mid reasoning"
+                    ),
+                }
+            }
+        ]
+    }
+
+    fake_client = _fake_client_with_responses([response])
+    monkeypatch.setattr(prompt_router, "_build_routing_client", lambda api_keys=None: fake_client)  # noqa: ARG005
+
+    result = asyncio.run(prompt_router.route_request("inspect geometry"))
+    assert "fallback" not in result
+    assert "inspection" in result["required"]
+    assert result["reasoning"] == "MiniMax stopped mid reasoning"
+    assert result["router_retry_attempted"] is False
+    assert result["router_parse_status"] == "repaired"
+    assert fake_client.chat.completions.calls == 1
+
+
+def test_route_request_coerces_labeled_non_json_text(monkeypatch):
+    response = {
+        "choices": [
+            {
+                "message": {
+                    "content": (
+                        "Required clusters: core, inspection\n"
+                        "Optional clusters: selection\n"
+                        "Reasoning: MiniMax returned labels instead of JSON."
+                    ),
+                }
+            }
+        ]
+    }
+
+    fake_client = _fake_client_with_responses([response])
+    monkeypatch.setattr(prompt_router, "_build_routing_client", lambda api_keys=None: fake_client)  # noqa: ARG005
+
+    result = asyncio.run(prompt_router.route_request("inspect geometry"))
+    assert "fallback" not in result
+    assert "inspection" in result["required"]
+    assert "selection" in result["optional"]
+    assert result["reasoning"] == "MiniMax returned labels instead of JSON."
+    assert result["router_retry_attempted"] is False
+    assert result["router_parse_status"] == "coerced_text_labels"
+    assert fake_client.chat.completions.calls == 1
+
+
 def test_route_request_retries_once_then_falls_back_deterministically(monkeypatch):
     first = {"choices": [{"message": {"content": "{\"required\":"}}]}
     second = {"choices": [{"message": {"content": "{\"required\":"}}]}

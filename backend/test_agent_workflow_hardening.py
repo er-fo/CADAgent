@@ -17,7 +17,9 @@ from backend.agent_workflow import (
     _get_sketch_entity_store,
     handle_execute_request,
     _preflight_face_sketch_uv_bounds,
+    _preflight_extrude_profile_selection,
     _preflight_hole_center_on_face,
+    _prepare_pattern_feature,
     _resolve_entity_tokens_or_refs,
     _resolve_single_entity_ref,
 )
@@ -610,6 +612,169 @@ def test_face_sketch_uv_preflight_blocks_when_bounds_missing():
     )
     assert error is not None
     assert "UV bounds are unavailable" in error
+
+
+def test_extrude_preflight_rejects_out_of_range_cached_profile_index():
+    async def _setup() -> _ManagerStub:
+        return _ManagerStub(EntityStore())
+
+    manager = asyncio.run(_setup())
+    sketch_store = _get_sketch_entity_store("s-extrude-profile", manager)  # type: ignore[arg-type]
+    sketch_store.register_sketch_metadata(
+        "plate_sketch",
+        {
+            "profile_count": 2,
+            "profiles": [{"index": 0}, {"index": 1}],
+            "face_ref": "face_0",
+        },
+    )
+
+    error = _preflight_extrude_profile_selection(
+        "s-extrude-profile",
+        manager,  # type: ignore[arg-type]
+        {
+            "sketch_id": "plate_sketch",
+            "profile_indices": [0, 2],
+            "distance": 1.0,
+            "operation": "NewBody",
+        },
+    )
+
+    assert error is not None
+    assert "selected profile index/indices out of range: [2]" in error
+    assert "profile_count=2" in error
+    assert "selected_profile_indices=[0, 2]" in error
+
+
+def test_extrude_preflight_rejects_join_without_target_body():
+    async def _setup() -> _ManagerStub:
+        return _ManagerStub(EntityStore())
+
+    manager = asyncio.run(_setup())
+    sketch_store = _get_sketch_entity_store("s-extrude-join", manager)  # type: ignore[arg-type]
+    sketch_store.register_sketch_metadata(
+        "boss_sketch",
+        {"profile_count": 1, "profiles": [{"index": 0}]},
+    )
+
+    error = _preflight_extrude_profile_selection(
+        "s-extrude-join",
+        manager,  # type: ignore[arg-type]
+        {
+            "sketch_id": "boss_sketch",
+            "profile_index": 0,
+            "distance": 1.0,
+            "operation": "Join",
+        },
+    )
+
+    assert error is not None
+    assert "operation 'Join' requires an existing target body" in error
+    assert "known_bodies=[]" in error
+
+
+def test_extrude_preflight_allows_cut_when_body_ref_is_loaded():
+    async def _setup() -> _ManagerStub:
+        store = EntityStore()
+        manager = _ManagerStub(store)
+        await store.register_entities("body", [{"entity_token": "body_token_0", "name": "Base"}])
+        return manager
+
+    manager = asyncio.run(_setup())
+    sketch_store = _get_sketch_entity_store("s-extrude-cut", manager)  # type: ignore[arg-type]
+    sketch_store.register_sketch_metadata(
+        "cut_sketch",
+        {"profile_count": 1, "profiles": [{"index": 0}], "face_ref": "face_0"},
+    )
+
+    assert _preflight_extrude_profile_selection(
+        "s-extrude-cut",
+        manager,  # type: ignore[arg-type]
+        {
+            "sketch_id": "cut_sketch",
+            "profile_index": 0,
+            "distance": -1.0,
+            "operation": "Cut",
+        },
+    ) is None
+
+
+def test_pattern_auto_last_rejects_non_patternable_snapshot_entry(monkeypatch: pytest.MonkeyPatch):
+    async def _run():
+        async def fake_snapshot(*args, **kwargs):
+            return {
+                "success": True,
+                "features": [
+                    {
+                        "entity_token": "sketch_token",
+                        "feature_type": "Sketch",
+                        "name": "layout_sketch",
+                    }
+                ],
+            }
+
+        monkeypatch.setattr("backend.agent_workflow._request_feature_snapshot", fake_snapshot)
+
+        with pytest.raises(SelectionToolCallError) as exc_info:
+            await _prepare_pattern_feature(
+                "s-pattern-invalid",
+                _ManagerStub(EntityStore()),  # type: ignore[arg-type]
+                {
+                    "pattern_type": "rectangular",
+                    "feature_tokens": ["auto_last"],
+                    "count_x": 3,
+                    "description": "Pattern latest feature",
+                },
+            )
+
+        msg = str(exc_info.value)
+        assert "auto_last" in msg
+        assert "could not resolve 'auto_last' to a patternable feature/body" in msg
+        assert "type=Sketch" in msg
+
+    asyncio.run(_run())
+
+
+def test_pattern_auto_last_resolves_patternable_feature_with_body_diagnostics(monkeypatch: pytest.MonkeyPatch):
+    async def _run():
+        async def fake_snapshot(*args, **kwargs):
+            return {
+                "success": True,
+                "features": [
+                    {
+                        "entity_token": "sketch_token",
+                        "feature_type": "Sketch",
+                        "name": "layout_sketch",
+                    },
+                    {
+                        "entity_token": "hole_feature_token",
+                        "feature_type": "HoleFeature",
+                        "name": "Mounting Hole",
+                        "bodies": [{"entity_token": "body_token_0", "name": "Base"}],
+                    },
+                ],
+            }
+
+        monkeypatch.setattr("backend.agent_workflow._request_feature_snapshot", fake_snapshot)
+
+        prep = await _prepare_pattern_feature(
+            "s-pattern-valid",
+            _ManagerStub(EntityStore()),  # type: ignore[arg-type]
+            {
+                "pattern_type": "rectangular",
+                "feature_tokens": ["auto_last"],
+                "count_x": 3,
+                "description": "Pattern latest feature",
+            },
+        )
+
+        assert prep.parameters["feature_tokens"] == ["hole_feature_token"]
+        diagnostics = "; ".join(prep.diagnostics)
+        assert "resolved_feature_types=['HoleFeature']" in diagnostics
+        assert "resolved_body_tokens=['body_token_0']" in diagnostics
+        assert "auto_last_used=True" in diagnostics
+
+    asyncio.run(_run())
 
 
 def test_handle_execute_request_preserves_store_when_entity_context_missing(monkeypatch: pytest.MonkeyPatch):

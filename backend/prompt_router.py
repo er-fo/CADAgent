@@ -34,6 +34,7 @@ Usage:
 import os
 import json
 import logging
+import re
 from typing import Dict, List, Any, Optional, Tuple
 from openai import AsyncOpenAI
 
@@ -298,6 +299,11 @@ def _strip_json_fences(text: str) -> str:
 def _extract_json_candidate(text: str) -> str:
     """Extract the most likely JSON object or array from a response."""
     stripped = text.strip()
+    candidates = _extract_json_candidates(text)
+    for candidate in candidates:
+        if candidate != stripped:
+            return candidate
+
     if not stripped:
         return ""
 
@@ -315,13 +321,112 @@ def _extract_json_candidate(text: str) -> str:
     return stripped
 
 
+def _extract_json_candidates(text: str) -> List[str]:
+    """Return likely JSON substrings from possibly wrapped router text."""
+    stripped = text.strip()
+    if not stripped:
+        return []
+
+    candidates: List[str] = [stripped]
+    decoder = json.JSONDecoder()
+
+    for index, char in enumerate(stripped):
+        if char not in "{[":
+            continue
+
+        suffix = stripped[index:].lstrip()
+        try:
+            _, end = decoder.raw_decode(suffix)
+            candidates.append(suffix[:end].strip())
+            continue
+        except json.JSONDecodeError:
+            pass
+
+        partial = _extract_balanced_or_truncated_json_prefix(suffix)
+        if partial:
+            candidates.append(partial)
+
+    deduped: List[str] = []
+    seen = set()
+    for candidate in candidates:
+        if candidate and candidate not in seen:
+            deduped.append(candidate)
+            seen.add(candidate)
+    return deduped
+
+
+def _extract_balanced_or_truncated_json_prefix(text: str) -> str:
+    """Extract a balanced JSON prefix, or a plausible truncated prefix."""
+    if not text or text[0] not in "{[":
+        return ""
+
+    stack: List[str] = []
+    in_string = False
+    escape = False
+
+    for index, char in enumerate(text):
+        if in_string:
+            if escape:
+                escape = False
+                continue
+            if char == "\\":
+                escape = True
+                continue
+            if char == '"':
+                in_string = False
+            continue
+
+        if char == '"':
+            in_string = True
+            continue
+
+        if char in "{[":
+            stack.append(char)
+            continue
+
+        if char in "}]":
+            if not stack:
+                return ""
+            opener = stack.pop()
+            if (opener == "{" and char != "}") or (opener == "[" and char != "]"):
+                return ""
+            if not stack:
+                return text[: index + 1].strip()
+
+    if stack:
+        return text.rstrip()
+    return ""
+
+
+def _can_close_truncated_reasoning_string(text: str) -> bool:
+    """Return True when truncation appears limited to the final reasoning text."""
+    reasoning_pos = text.rfind('"reasoning"')
+    if reasoning_pos == -1:
+        return False
+
+    if '"required"' not in text[:reasoning_pos] or '"optional"' not in text[:reasoning_pos]:
+        return False
+
+    after_reasoning = text[reasoning_pos:]
+    colon_pos = after_reasoning.find(":")
+    if colon_pos == -1:
+        return False
+
+    value_start = after_reasoning.find('"', colon_pos + 1)
+    if value_start == -1:
+        return False
+
+    value_text = after_reasoning[value_start + 1 :]
+    return '"' not in value_text
+
+
 def _bounded_json_repair_suffix(text: str) -> str:
     """
     Return a short suffix that safely closes an obviously truncated JSON value.
 
-    The repair is intentionally conservative: it only appends missing closing
-    braces/brackets when the text appears to be a complete prefix and is not
-    currently inside a string literal.
+    The repair is intentionally conservative: it appends missing closing
+    braces/brackets for complete prefixes, and only closes a string literal
+    when truncation is limited to the final reasoning value.
     """
     stripped = text.rstrip()
     if not stripped or stripped[0] not in "{[":
@@ -358,11 +463,15 @@ def _bounded_json_repair_suffix(text: str) -> str:
             if (opener == "{" and char != "}") or (opener == "[" and char != "]"):
                 return ""
 
-    if in_string:
-        return ""
-
     if not stack:
         return ""
+
+    if in_string:
+        if escape or not _can_close_truncated_reasoning_string(stripped):
+            return ""
+        if len(stack) > 4:
+            return ""
+        return '"' + "".join("}" if opener == "{" else "]" for opener in reversed(stack))
 
     last_non_ws = ""
     for char in reversed(stripped):
@@ -423,6 +532,81 @@ def _normalize_cluster_list(value: Any) -> List[str]:
         return output
 
     return []
+
+
+def _known_router_cluster_ids() -> List[str]:
+    """Return known routing cluster ids for conservative text coercion."""
+    cluster_ids = set(CLUSTER_TOOL_MAPPING.keys())
+    cluster_ids.add("core")
+    return sorted(cluster_ids, key=len, reverse=True)
+
+
+def _extract_known_clusters_from_text(text: str) -> List[str]:
+    """Extract known cluster ids from a label value while preserving order."""
+    if not text or text.strip().lower() in {"none", "[]", "n/a", "na"}:
+        return []
+
+    cluster_ids = _known_router_cluster_ids()
+    pattern = re.compile(
+        r"(?<![A-Za-z0-9_])("
+        + "|".join(re.escape(cluster_id) for cluster_id in cluster_ids)
+        + r")(?![A-Za-z0-9_])",
+        re.IGNORECASE,
+    )
+
+    output: List[str] = []
+    seen = set()
+    for match in pattern.finditer(text):
+        cluster_id = match.group(1).lower()
+        if cluster_id not in seen:
+            output.append(cluster_id)
+            seen.add(cluster_id)
+    return output
+
+
+def _coerce_labeled_router_text(text: str) -> Optional[Dict[str, Any]]:
+    """
+    Coerce MiniMax-style labeled text into router JSON shape.
+
+    This intentionally requires explicit required/optional labels so ordinary
+    prose still falls through to retry/fallback routing.
+    """
+    matches = list(
+        re.finditer(
+            r"\b(required|optional|reasoning)(?:\s+clusters?)?\s*[:=]",
+            text,
+            flags=re.IGNORECASE,
+        )
+    )
+    if not matches:
+        return None
+
+    fields: Dict[str, str] = {}
+    for index, match in enumerate(matches):
+        label = match.group(1).lower()
+        value_start = match.end()
+        value_end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
+        fields[label] = text[value_start:value_end].strip(" \t\r\n-;")
+
+    if "required" not in fields and "optional" not in fields:
+        return None
+
+    required = _extract_known_clusters_from_text(fields.get("required", ""))
+    optional = _extract_known_clusters_from_text(fields.get("optional", ""))
+    if not required and not optional:
+        return None
+
+    reasoning = fields.get("reasoning", "").strip()
+    if reasoning:
+        reasoning = reasoning.strip('"').strip("'").strip()
+    else:
+        reasoning = "No reasoning provided"
+
+    return {
+        "required": required,
+        "optional": optional,
+        "reasoning": reasoning,
+    }
 
 
 def _coerce_router_payload_shape(payload: Any) -> Tuple[Optional[Dict[str, Any]], bool]:
@@ -487,12 +671,10 @@ def _safe_parse_router_response(response_text: str) -> Tuple[Optional[Dict[str, 
     if not normalized_text:
         return None, "empty_content"
 
-    candidates = [normalized_text]
-    extracted_candidate = _extract_json_candidate(normalized_text)
-    if extracted_candidate and extracted_candidate != normalized_text:
-        candidates.append(extracted_candidate)
+    candidates = _extract_json_candidates(normalized_text)
 
     last_error: Optional[Exception] = None
+    shape_status: Optional[str] = None
 
     for candidate in candidates:
         try:
@@ -500,7 +682,7 @@ def _safe_parse_router_response(response_text: str) -> Tuple[Optional[Dict[str, 
             coerced, was_coerced = _coerce_router_payload_shape(parsed)
             if coerced is not None:
                 return coerced, "coerced_shape" if was_coerced else "ok"
-            return None, "unexpected_json_shape"
+            shape_status = "unexpected_json_shape"
         except json.JSONDecodeError as exc:
             last_error = exc
 
@@ -511,9 +693,16 @@ def _safe_parse_router_response(response_text: str) -> Tuple[Optional[Dict[str, 
                 coerced, was_coerced = _coerce_router_payload_shape(parsed)
                 if coerced is not None:
                     return coerced, "repaired_coerced_shape" if was_coerced else "repaired"
-                return None, "unexpected_json_shape"
+                shape_status = "unexpected_json_shape"
             except json.JSONDecodeError as exc:
                 last_error = exc
+
+    coerced_text = _coerce_labeled_router_text(normalized_text)
+    if coerced_text is not None:
+        return coerced_text, "coerced_text_labels"
+
+    if shape_status:
+        return None, shape_status
 
     return None, _classify_router_parse_failure(normalized_text, last_error)
 

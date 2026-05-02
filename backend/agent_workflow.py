@@ -2828,11 +2828,18 @@ def _extract_feature_bbox(feature: Mapping[str, Any]) -> Optional[Mapping[str, A
     if isinstance(bbox, Mapping):
         return bbox
 
+    bounds_cm = feature.get("bounds_cm")
+    if isinstance(bounds_cm, Mapping):
+        return bounds_cm
+
     bodies = feature.get("bodies")
     if isinstance(bodies, Sequence):
         for body in bodies:
             if isinstance(body, Mapping):
                 candidate = body.get("bounding_box")
+                if isinstance(candidate, Mapping):
+                    return candidate
+                candidate = body.get("bounds_cm")
                 if isinstance(candidate, Mapping):
                     return candidate
     return None
@@ -2841,6 +2848,19 @@ def _extract_feature_bbox(feature: Mapping[str, Any]) -> Optional[Mapping[str, A
 def _bbox_extents(bbox: Mapping[str, Any]) -> Optional[Tuple[List[float], List[float]]]:
     min_point = bbox.get("min") or bbox.get("min_point")
     max_point = bbox.get("max") or bbox.get("max_point")
+    if (
+        isinstance(min_point, Sequence)
+        and not isinstance(min_point, (str, bytes, bytearray))
+        and isinstance(max_point, Sequence)
+        and not isinstance(max_point, (str, bytes, bytearray))
+        and len(min_point) >= 3
+        and len(max_point) >= 3
+    ):
+        try:
+            return [float(min_point[idx]) for idx in range(3)], [float(max_point[idx]) for idx in range(3)]
+        except (TypeError, ValueError):  # pragma: no cover - defensive guard
+            return None
+
     if not (isinstance(min_point, Mapping) and isinstance(max_point, Mapping)):
         return None
 
@@ -2987,6 +3007,68 @@ def _infer_spacing_cm(
     return round(spacing, 4)
 
 
+def _extract_feature_body_tokens(feature: Mapping[str, Any]) -> List[str]:
+    body_tokens: List[str] = []
+
+    raw_body_tokens = feature.get("body_tokens")
+    if isinstance(raw_body_tokens, Sequence) and not isinstance(raw_body_tokens, (str, bytes, bytearray)):
+        for token in raw_body_tokens:
+            token_text = str(token or "").strip()
+            if token_text and token_text not in body_tokens:
+                body_tokens.append(token_text)
+
+    bodies = feature.get("bodies")
+    if isinstance(bodies, Sequence) and not isinstance(bodies, (str, bytes, bytearray)):
+        for body in bodies:
+            if not isinstance(body, Mapping):
+                continue
+            token_text = str(body.get("entity_token") or body.get("token") or "").strip()
+            if token_text and token_text not in body_tokens:
+                body_tokens.append(token_text)
+
+    return body_tokens
+
+
+def _describe_pattern_feature(feature: Mapping[str, Any]) -> str:
+    token = str(feature.get("entity_token") or "").strip() or "<missing-token>"
+    feature_type = str(feature.get("feature_type") or feature.get("object_type") or "unknown").strip() or "unknown"
+    name = str(feature.get("name") or "").strip()
+    body_tokens = _extract_feature_body_tokens(feature)
+
+    parts = [f"token={token}", f"type={feature_type}"]
+    if name:
+        parts.append(f"name={name}")
+    if body_tokens:
+        parts.append(f"body_tokens={body_tokens}")
+    if feature.get("is_suppressed") is not None:
+        parts.append(f"suppressed={bool(feature.get('is_suppressed'))}")
+    return " ".join(parts)
+
+
+def _pattern_feature_rejection_reason(feature: Mapping[str, Any]) -> Optional[str]:
+    if not isinstance(feature, Mapping):
+        return "snapshot entry is not an object"
+
+    token = str(feature.get("entity_token") or "").strip()
+    if not token:
+        return "missing feature token"
+
+    if bool(feature.get("is_suppressed")):
+        return "feature is suppressed"
+
+    feature_type = str(feature.get("feature_type") or feature.get("object_type") or "").strip().lower()
+    if "sketch" in feature_type or "construction" in feature_type:
+        return f"object type '{feature_type or 'unknown'}' is not patternable"
+
+    has_body_evidence = bool(_extract_feature_body_tokens(feature))
+    has_bbox = isinstance(_extract_feature_bbox(feature), Mapping)
+    has_hole_evidence = isinstance(feature.get("hole"), Mapping)
+    if not (has_body_evidence or has_bbox or has_hole_evidence):
+        return "no associated feature body, bounding box, or hole geometry in snapshot"
+
+    return None
+
+
 async def _prepare_pattern_feature(
     session_id: str,
     manager: ConnectionManager,
@@ -3051,26 +3133,32 @@ async def _prepare_pattern_feature(
 
     feature_lookup: Dict[str, Mapping[str, Any]] = {}
     for feature in features:
+        if not isinstance(feature, Mapping):
+            continue
         token = feature.get("entity_token")
         if isinstance(token, str) and token.strip():
             feature_lookup[token] = feature
 
     latest_feature = None
     for feature in features:
+        if not isinstance(feature, Mapping):
+            continue
         token = feature.get("entity_token")
-        if isinstance(token, str) and token.strip():
+        if isinstance(token, str) and token.strip() and _pattern_feature_rejection_reason(feature) is None:
             latest_feature = token
             break
 
     resolved_tokens: List[str] = []
     missing_tokens: List[str] = []
+    invalid_tokens: List[str] = []
     auto_last_used = False
+    auto_last_unresolved = False
 
     for token in raw_tokens:
         token_str = str(token).strip()
         if token_str.lower() == "auto_last":
             if latest_feature is None:
-                missing_tokens.append("auto_last")
+                auto_last_unresolved = True
                 continue
             if latest_feature not in resolved_tokens:
                 resolved_tokens.append(latest_feature)
@@ -3082,13 +3170,46 @@ async def _prepare_pattern_feature(
         else:
             missing_tokens.append(token_str)
 
+    for token in list(resolved_tokens):
+        reason = _pattern_feature_rejection_reason(feature_lookup[token])
+        if reason:
+            invalid_tokens.append(f"{token}: {reason}; {_describe_pattern_feature(feature_lookup[token])}")
+
+    if auto_last_unresolved:
+        available = [
+            _describe_pattern_feature(feature)
+            for feature in features
+            if isinstance(feature, Mapping)
+        ][:10]
+        raise SelectionToolCallError(
+            "create_pattern_feature could not resolve 'auto_last' to a patternable feature/body. "
+            f"Available snapshot entries: {available}. "
+            "Create a feature with associated body geometry or provide an explicit feature token from list_features."
+        )
+
     if missing_tokens:
         raise SelectionToolCallError(
-            f"create_pattern_feature could not find feature token(s): {missing_tokens}. Use list_features to inspect available tokens."
+            f"create_pattern_feature could not find feature token(s): {missing_tokens}. "
+            f"Available patternable features: {[ _describe_pattern_feature(feature) for feature in features if isinstance(feature, Mapping) and _pattern_feature_rejection_reason(feature) is None ][:10]}. "
+            "Use list_features to inspect available tokens."
+        )
+
+    if invalid_tokens:
+        raise SelectionToolCallError(
+            f"create_pattern_feature received non-patternable feature token(s): {invalid_tokens}. "
+            "Choose a timeline feature with an associated body/geometry from list_features."
         )
 
     if not resolved_tokens:
-        raise SelectionToolCallError("create_pattern_feature requires at least one resolvable feature token.")
+        available = [
+            _describe_pattern_feature(feature)
+            for feature in features
+            if isinstance(feature, Mapping)
+        ][:10]
+        raise SelectionToolCallError(
+            "create_pattern_feature requires at least one resolvable patternable feature token. "
+            f"Available snapshot entries: {available}."
+        )
 
     selected_features = [feature_lookup[token] for token in resolved_tokens]
 
@@ -3099,6 +3220,21 @@ async def _prepare_pattern_feature(
     hinted_axis = _axis_key_from_hint(orientation_hint)
 
     diagnostics.append(f"resolved_tokens={resolved_tokens}")
+    diagnostics.append(
+        "resolved_feature_types="
+        + str([
+            str(feature.get("feature_type") or feature.get("object_type") or "unknown")
+            for feature in selected_features
+        ])
+    )
+    diagnostics.append(
+        "resolved_body_tokens="
+        + str([
+            token
+            for feature in selected_features
+            for token in _extract_feature_body_tokens(feature)
+        ])
+    )
     diagnostics.append(f"anchor_point={tuple(round(v, 4) for v in anchor_point)}")
     diagnostics.append(f"auto_last_used={auto_last_used}")
 
@@ -3966,6 +4102,29 @@ async def _execute_workflow_loop(
                         )
                         continue
 
+                if tool_name == "extrude_profile":
+                    extrude_preflight_error = _preflight_extrude_profile_selection(
+                        session_id,
+                        manager,
+                        resolved_ir_input or tool_input,
+                    )
+                    if extrude_preflight_error:
+                        await _send_error(manager, session_id, "Extrude profile preflight failed", extrude_preflight_error)
+                        messages.append(_tool_result_message(tool_use_id, extrude_preflight_error, is_error=True))
+                        iteration_had_failure = True
+                        if iteration_first_failure_intent is None:
+                            iteration_first_failure_intent = _build_failure_intent_key(
+                                tool_name,
+                                tool_input,
+                                extrude_preflight_error,
+                            )
+                        logger.warning(
+                            "Session %s blocked extrude_profile by preflight: %s",
+                            session_id,
+                            extrude_preflight_error,
+                        )
+                        continue
+
                 ir_metadata = {
                     "source": "studio" if execution_target == "build123d" else "fusion",
                     "request_id": str((request or {}).get("request_id") or ""),
@@ -4036,7 +4195,7 @@ async def _execute_workflow_loop(
                 if isinstance(target_result.raw_result, Mapping):
                     raw_result_payload = dict(target_result.raw_result)
 
-                if target_result.success and tool_name in {"create_sketch", "add_line", "add_arc", "add_circle", "add_rectangle"}:
+                if target_result.success and tool_name in {"create_sketch", "add_line", "add_arc", "add_circle", "add_rectangle", "list_sketch_profiles"}:
                     executed_input = target_result.data.get("tool_input") if isinstance(target_result.data, Mapping) else {}
                     plane_fallback = ""
                     if tool_name == "create_sketch":
@@ -4153,7 +4312,7 @@ async def _execute_workflow_loop(
                             refresh_result["success"] = target_result.success
                         if "message" not in refresh_result and result_text:
                             refresh_result["message"] = result_text
-                        if tool_name in {"create_sketch", "add_rectangle", "add_circle", "add_line", "add_arc"}:
+                        if tool_name in {"create_sketch", "add_rectangle", "add_circle", "add_line", "add_arc", "list_sketch_profiles"}:
                             refresh_result.setdefault("no_op", True)
 
                         try:
@@ -4843,6 +5002,29 @@ async def _execute_workflow_loop(
                         session_id,
                         tool_name,
                         sketch_preflight_error,
+                    )
+                    continue
+
+            if tool_name == "extrude_profile":
+                extrude_preflight_error = _preflight_extrude_profile_selection(
+                    session_id,
+                    manager,
+                    codegen_input,
+                )
+                if extrude_preflight_error:
+                    await _send_error(manager, session_id, "Extrude profile preflight failed", extrude_preflight_error)
+                    messages.append(_tool_result_message(tool_use_id, extrude_preflight_error, is_error=True))
+                    iteration_had_failure = True
+                    if iteration_first_failure_intent is None:
+                        iteration_first_failure_intent = _build_failure_intent_key(
+                            tool_name,
+                            codegen_input,
+                            extrude_preflight_error,
+                        )
+                    logger.warning(
+                        "Session %s blocked extrude_profile by direct preflight: %s",
+                        session_id,
+                        extrude_preflight_error,
                     )
                     continue
 
@@ -7469,6 +7651,66 @@ def _user_text_message(text: str) -> Dict[str, Any]:
     return {"role": "user", "content": [{"type": "text", "text": text}]}
 
 
+def _format_failure_diagnostics(result: Mapping[str, Any]) -> str:
+    diagnostic_keys = [
+        "resolved_fusion_object_type",
+        "resolved_object_type",
+        "object_type",
+        "feature_type",
+        "selected_body_ref",
+        "selected_body_token",
+        "selected_body_name",
+        "body_ref",
+        "body_token",
+        "body_name",
+        "selected_face_ref",
+        "selected_face_token",
+        "face_ref",
+        "face_token",
+        "profile_count",
+        "profile_index",
+        "profile_indices",
+        "selected_profile_indices",
+        "resolved_feature_tokens",
+        "resolved_feature_refs",
+        "feature_tokens",
+        "missing_tokens",
+    ]
+
+    parts: List[str] = []
+    for key in diagnostic_keys:
+        if key not in result:
+            continue
+        value = result.get(key)
+        if value is None or value == "" or value == []:
+            continue
+        parts.append(f"{key}={value}")
+
+    selected_body = result.get("selected_body")
+    if isinstance(selected_body, Mapping):
+        parts.append(
+            "selected_body="
+            + str({
+                k: selected_body.get(k)
+                for k in ("entity_ref", "entity_token", "name", "object_type")
+                if selected_body.get(k) is not None
+            })
+        )
+
+    selected_face = result.get("selected_face")
+    if isinstance(selected_face, Mapping):
+        parts.append(
+            "selected_face="
+            + str({
+                k: selected_face.get(k)
+                for k in ("entity_ref", "entity_token", "body_name", "surface_type", "object_type")
+                if selected_face.get(k) is not None
+            })
+        )
+
+    return "; ".join(parts)
+
+
 def _summarise_execution_result(
     tool_name: str,
     result: Mapping[str, Any],
@@ -7496,7 +7738,9 @@ def _summarise_execution_result(
                 "extrusion direction. For Cut/Intersect, try flipping the distance sign, or ensure the sketch "
                 "is created on the intended face (e.g., plane_id=face_0) rather than a datum plane."
             )
-        return False, f"{tool_name} failed: {error_detail}{hint}"
+        diagnostics = _format_failure_diagnostics(result)
+        diagnostic_text = f" Diagnostics: {diagnostics}." if diagnostics else ""
+        return False, f"{tool_name} failed: {error_detail}{diagnostic_text}{hint}"
     
     # Use tool-specific enrichment if available
     enricher = _TOOL_RESULT_ENRICHERS.get(tool_name)
@@ -8111,6 +8355,16 @@ def _register_sketch_result_entities(
             result=result,
             fallback_plane_id=fallback_plane_id,
         )
+        return
+
+    if tool_name == "list_sketch_profiles":
+        metadata = sketch_store.get_sketch_metadata(sketch_id)
+        if result.get("profile_count") is not None:
+            metadata["profile_count"] = result.get("profile_count")
+        profiles = result.get("profiles")
+        if isinstance(profiles, list):
+            metadata["profiles"] = list(profiles)
+        sketch_store.register_sketch_metadata(sketch_id, metadata)
         return
 
     # Geometry registration
@@ -9073,6 +9327,222 @@ def _maybe_defer_face_sketch_followup(
         "This sketch was just created on a model face in the same turn. "
         "Wait for the next turn so orientation/bounds feedback can guide placement before adding geometry or extruding."
     )
+
+
+def _selected_extrude_profile_indices(tool_input: Mapping[str, Any]) -> Tuple[Optional[List[int]], Optional[str]]:
+    if "profile_indices" in tool_input and tool_input.get("profile_indices") is not None:
+        raw_indices = tool_input.get("profile_indices")
+        if not isinstance(raw_indices, Sequence) or isinstance(raw_indices, (str, bytes, bytearray)):
+            return None, '"profile_indices" must be an array of integers.'
+        if not raw_indices:
+            return None, '"profile_indices" cannot be empty.'
+
+        indices: List[int] = []
+        for raw_index in raw_indices:
+            if isinstance(raw_index, bool):
+                return None, '"profile_indices" entries must be integers, not booleans.'
+            try:
+                index = int(raw_index)
+            except (TypeError, ValueError):
+                return None, '"profile_indices" entries must be integers.'
+            indices.append(index)
+
+        if len(set(indices)) != len(indices):
+            return None, f'"profile_indices" contains duplicate entries: {indices}.'
+        return indices, None
+
+    raw_index = tool_input.get("profile_index", 0)
+    if isinstance(raw_index, bool):
+        return None, '"profile_index" must be an integer, not a boolean.'
+    try:
+        profile_index = int(raw_index)
+    except (TypeError, ValueError):
+        return None, '"profile_index" must be an integer.'
+    return [profile_index], None
+
+
+def _find_cached_sketch_profile_snapshot(
+    session_id: str,
+    manager: ConnectionManager,
+    sketch_id: str,
+) -> Tuple[Optional[Dict[str, Any]], bool, List[str]]:
+    sketch_store = _get_sketch_entity_store(session_id, manager)
+    metadata = sketch_store.get_sketch_metadata(sketch_id)
+    if metadata.get("profile_count") is not None or isinstance(metadata.get("profiles"), list):
+        return dict(metadata), True, []
+
+    snapshot = _manager_get_feature_snapshot(manager, session_id)
+    sketches = snapshot.get("sketches") if isinstance(snapshot, Mapping) else None
+    if not isinstance(sketches, list):
+        return (dict(metadata) if metadata else None), bool(metadata), []
+
+    available: List[str] = []
+    for sketch in sketches:
+        if not isinstance(sketch, Mapping):
+            continue
+        candidate_names = [
+            str(sketch.get("sketch_id") or "").strip(),
+            str(sketch.get("id") or "").strip(),
+            str(sketch.get("name") or "").strip(),
+        ]
+        available.extend(name for name in candidate_names if name and name not in available)
+        if sketch_id in candidate_names:
+            return dict(sketch), True, available
+
+    return None, False, available
+
+
+def _current_body_descriptions(
+    session_id: str,
+    manager: ConnectionManager,
+    *,
+    limit: int = 12,
+) -> List[str]:
+    descriptions: List[str] = []
+
+    def _append(description: str) -> None:
+        if description and description not in descriptions and len(descriptions) < limit:
+            descriptions.append(description)
+
+    context = _manager_get_latest_entity_context(manager, session_id)
+    bodies = context.get("bodies") if isinstance(context, Mapping) else None
+    if isinstance(bodies, list):
+        for body in bodies:
+            if not isinstance(body, Mapping):
+                continue
+            ref = str(body.get("entity_ref") or body.get("ref") or "").strip()
+            name = str(body.get("name") or body.get("body_name") or "").strip()
+            token = str(body.get("entity_token") or body.get("token") or "").strip()
+            parts = []
+            if ref:
+                parts.append(ref)
+            if name:
+                parts.append(f"name={name}")
+            if token:
+                parts.append(f"token={token}")
+            _append(" ".join(parts) or str(body))
+
+    store = _get_entity_store(session_id, manager)
+    for ref in sorted(store.get_refs_by_kind("body"), key=_ref_sort_key):
+        entry = store.get_entry(ref)
+        if not entry:
+            continue
+        name = str(entry.metadata.get("name") or entry.metadata.get("body_name") or "").strip()
+        parts = [ref]
+        if name:
+            parts.append(f"name={name}")
+        if entry.token:
+            parts.append(f"token={entry.token}")
+        _append(" ".join(parts))
+
+    snapshot = _manager_get_feature_snapshot(manager, session_id)
+    features = snapshot.get("features") if isinstance(snapshot, Mapping) else None
+    if isinstance(features, list):
+        for feature in features:
+            if not isinstance(feature, Mapping):
+                continue
+            feature_name = str(feature.get("name") or "").strip()
+            for body_token in _extract_feature_body_tokens(feature):
+                label = f"token={body_token}"
+                if feature_name:
+                    label += f" feature={feature_name}"
+                _append(label)
+
+    return descriptions
+
+
+def _preflight_extrude_profile_selection(
+    session_id: str,
+    manager: ConnectionManager,
+    tool_input: Mapping[str, Any],
+) -> Optional[str]:
+    sketch_id = str(tool_input.get("sketch_id") or "").strip()
+    if not sketch_id:
+        return None
+
+    selected_indices, index_error = _selected_extrude_profile_indices(tool_input)
+    if index_error:
+        return f"extrude_profile preflight failed for sketch '{sketch_id}': {index_error}"
+    if selected_indices is None:
+        return None
+
+    operation = _normalize_extrude_operation_name(tool_input.get("operation"))
+    operation_display = str(tool_input.get("operation") or "NewBody").strip() or "NewBody"
+
+    diagnostics = [
+        f"sketch_id={sketch_id}",
+        f"operation={operation_display}",
+        f"selected_profile_indices={selected_indices}",
+    ]
+
+    sketch_snapshot, sketch_known, available_sketches = _find_cached_sketch_profile_snapshot(session_id, manager, sketch_id)
+    if not sketch_known and available_sketches:
+        return (
+            f"extrude_profile preflight failed: sketch '{sketch_id}' is not in the cached sketch snapshot. "
+            f"Available sketches: {available_sketches[:20]}. "
+            "Use an existing sketch_id from the current context or create/list the sketch first."
+        )
+
+    if isinstance(sketch_snapshot, Mapping):
+        face_ref = str(sketch_snapshot.get("face_ref") or "").strip()
+        face_token = str(sketch_snapshot.get("face_token") or "").strip()
+        if face_ref:
+            diagnostics.append(f"selected_face_ref={face_ref}")
+        if face_token:
+            diagnostics.append(f"selected_face_token={face_token}")
+
+        raw_profile_count = sketch_snapshot.get("profile_count")
+        profiles = sketch_snapshot.get("profiles")
+        if raw_profile_count is not None:
+            try:
+                profile_count = int(raw_profile_count)
+            except (TypeError, ValueError):
+                profile_count = None
+            else:
+                diagnostics.append(f"profile_count={profile_count}")
+                if profile_count <= 0:
+                    return (
+                        f"extrude_profile preflight failed: sketch '{sketch_id}' has no closed profiles. "
+                        f"{'; '.join(diagnostics)}. Add closed sketch geometry or run list_sketch_profiles again."
+                    )
+                out_of_range = [idx for idx in selected_indices if idx < 0 or idx >= profile_count]
+                if out_of_range:
+                    return (
+                        f"extrude_profile preflight failed: selected profile index/indices out of range: {out_of_range}. "
+                        f"{'; '.join(diagnostics)}."
+                    )
+
+        if isinstance(profiles, list) and profiles:
+            available_indices: List[int] = []
+            for fallback_index, profile in enumerate(profiles):
+                if isinstance(profile, Mapping):
+                    raw_index = profile.get("index", fallback_index)
+                else:
+                    raw_index = fallback_index
+                try:
+                    available_indices.append(int(raw_index))
+                except (TypeError, ValueError):
+                    continue
+            if available_indices:
+                diagnostics.append(f"available_profile_indices={available_indices}")
+                missing_indices = [idx for idx in selected_indices if idx not in available_indices]
+                if missing_indices:
+                    return (
+                        f"extrude_profile preflight failed: selected profile index/indices not present in profile snapshot: {missing_indices}. "
+                        f"{'; '.join(diagnostics)}."
+                    )
+
+    if operation in {"join", "cut", "intersect"}:
+        body_descriptions = _current_body_descriptions(session_id, manager)
+        diagnostics.append(f"known_bodies={body_descriptions}")
+        if not body_descriptions:
+            return (
+                f"extrude_profile preflight failed: operation '{operation_display}' requires an existing target body, "
+                "but no bodies are available in current entity context, entity refs, or feature snapshot. "
+                f"{'; '.join(diagnostics)}. Use operation='NewBody' for the first solid, or refresh/list bodies before Join/Cut/Intersect."
+            )
+
+    return None
 
 
 def _resolve_codegen_entity_refs(
