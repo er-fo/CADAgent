@@ -66,3 +66,31 @@ def test_prompt_tells_model_to_answer_without_response_tool():
     assert "When the user-facing answer is ready, respond normally without calling a tool" in CORE_INSTRUCTIONS
     assert "respond_to_user" not in CORE_INSTRUCTIONS
     assert "respond_to_user" not in CLUSTER_TOOL_MAPPING["core"]["documentation"]
+
+
+def test_adjust_feature_parameters_prompt_and_schema_reference_widened_support():
+    timeline_docs = CLUSTER_TOOL_MAPPING["timeline"]["documentation"]
+    adjust_tool = next(tool for tool in TOOLS if tool["name"] == "adjust_feature_parameters")
+    parameter_props = adjust_tool["input_schema"]["properties"]["parameters"]["properties"]
+
+    assert "FilletFeature radius" in timeline_docs
+    assert "ChamferFeature chamfer_distance" in timeline_docs
+    assert "ShellFeature inside_thickness/outside_thickness" in timeline_docs
+    assert "RectangularPatternFeature/CircularPatternFeature" in timeline_docs
+
+    for key in {
+        "radius",
+        "radius_unit",
+        "chamfer_distance",
+        "chamfer_distance_unit",
+        "inside_thickness",
+        "outside_thickness",
+        "rectangular_count_one",
+        "rectangular_spacing_one",
+        "rectangular_count_two",
+        "rectangular_spacing_two",
+        "circular_count",
+        "circular_total_angle",
+        "circular_total_angle_unit",
+    }:
+        assert key in parameter_props

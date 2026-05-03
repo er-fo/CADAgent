@@ -810,7 +810,7 @@ Analyze the user request and return a JSON object specifying which clusters are 
    - create_pattern_feature → patterns
    - select_edges, select_faces, select_bodies → selection
    - list_features → inspection
-   - jump_to_timeline_position, delete_feature, adjust_feature_parameters → timeline
+   - delete_feature, adjust_feature_parameters, suppress_feature, unsuppress_feature → timeline
 9. Consider full multi-step workflows, not just the first action. Include optional clusters that might reasonably be helpful.
 10. **WHEN IN DOUBT, BE GENEROUS:** If a cluster might be useful, include it. The cost of loading extra tools is minimal compared to the cost of missing required tools.
 11. Output strict JSON only—no markdown, no comments.
@@ -821,6 +821,8 @@ Examples:
 - "add M6 thread to existing cylinder" → required: [core, inspection, threading, holes]; optional: [selection]
 - "delete the faulty fillet" → required: [core, inspection, timeline]; optional: []
 - "remove the last extrude" → required: [core, inspection, timeline]; optional: []
+- "temporarily suppress the shell" → required: [core, inspection, timeline]; optional: []
+- "restore the suppressed fillet" → required: [core, inspection, timeline]; optional: []
 - "machined aluminum enclosure with mounting holes and pocket" → required: [core, design_exploration, sketch_tools, 3d_modeling, holes]; optional: [modification]
 - "bracket with four corner holes" → required: [core, design_exploration, sketch_tools, 3d_modeling, holes]; optional: []
 - "part with bosses for standoffs" → required: [core, design_exploration, sketch_tools, 3d_modeling, holes]; optional: [threading, modification]
@@ -1273,7 +1275,7 @@ def _fallback_routing(user_request: str, fallback_reason: str = "ai_router_faile
     # AGGRESSIVE hole detection - any indication of holes/fasteners/mounting → include holes cluster
     # This is intentionally broad to prevent missing hole tools
     hole_keywords = [
-        "hole", "drill", "bore", "tap", "tapped",
+        "hole", "vent", "ventilation", "airflow", "drill", "bore", "tap", "tapped",
         "mounting hole", "corner hole", "clearance hole", "pilot hole",
         "boss", "standoff", "mounting", "mount",
         "counterbore", "countersink", "cbore", "csink",
@@ -1288,7 +1290,7 @@ def _fallback_routing(user_request: str, fallback_reason: str = "ai_router_faile
         if "inspection" not in required and any(kw in request_lower for kw in ["hole", "drill", "bore"]):
             required.append("inspection")
 
-    if any(kw in request_lower for kw in ["housing", "enclosure", "container", "tray", "case", "box enclosure", "shell"]):
+    if any(kw in request_lower for kw in ["housing", "enclosure", "container", "tray", "case", "casing", "box enclosure", "shell"]):
         required.extend(["sketch_tools", "3d_modeling", "modification", "inspection"])
 
     if any(kw in request_lower for kw in ["thread", "screw", "bolt"]):
@@ -1302,6 +1304,20 @@ def _fallback_routing(user_request: str, fallback_reason: str = "ai_router_faile
 
     if any(kw in request_lower for kw in ["angle", "tilt", "rotate", "offset"]):
         required.append("construction")
+
+    timeline_action_keywords = [
+        "delete", "remove", "erase", "revert", "undo",
+        "suppress", "unsuppress", "restore",
+    ]
+    timeline_target_keywords = [
+        "feature", "timeline", "operation", "created", "last",
+        "extrude", "hole", "fillet", "chamfer", "shell", "pattern",
+    ]
+    if (
+        any(kw in request_lower for kw in timeline_action_keywords)
+        and any(kw in request_lower for kw in timeline_target_keywords)
+    ):
+        required.extend(["inspection", "timeline"])
 
     # For complex multi-step requests mentioning multiple operations
     operation_count = sum([
@@ -1329,9 +1345,9 @@ def _fallback_routing(user_request: str, fallback_reason: str = "ai_router_faile
         # Manufacturing methods
         "machined", "milled", "cnc", "3d printed", "cast", "injection molded",
         # Enclosure/housing language
-        "enclosure", "housing", "chassis", "case base",
+        "enclosure", "housing", "chassis", "case", "casing", "case base",
         # Feature keywords (when combined)
-        "pocket", "standoff", "boss", "rib", "slot", "cavity",
+        "pocket", "standoff", "boss", "rib", "slot", "vent", "ventilation", "cavity",
         # Electronics integration
         "pcb mount", "board mount", "electronics",
         # Material + function patterns

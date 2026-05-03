@@ -9,6 +9,7 @@ try:
         AddLineParams,
         ExtrudeParams,
         ExternalThreadParams,
+        FeatureSuppressionParams,
         IROperation,
         PatternFeatureParams,
         SimpleHoleParams,
@@ -22,6 +23,7 @@ except ImportError:  # pragma: no cover
         AddLineParams,
         ExtrudeParams,
         ExternalThreadParams,
+        FeatureSuppressionParams,
         IROperation,
         PatternFeatureParams,
         SimpleHoleParams,
@@ -205,6 +207,76 @@ def test_mapper_raises_for_unsupported_tool():
     state = IRDocumentState()
     with pytest.raises(UnsupportedToolMappingError):
         map_tool_call_to_ir({"name": "respond_to_user", "input": {}}, state)
+
+
+def test_mapper_converts_feature_suppression_to_shared_ir():
+    state = IRDocumentState()
+
+    op = map_tool_call_to_ir(
+        {
+            "name": "suppress_feature",
+            "input": {
+                "feature_token": "feature-token-1",
+                "expected_name": "Shell1",
+                "expected_timeline_index": 7,
+                "description": "Temporarily disable shell",
+            },
+        },
+        state,
+    )
+
+    assert op.type == "set_feature_suppression"
+    assert isinstance(op.params, FeatureSuppressionParams)
+    assert op.params.feature_ref == "feature-token-1"
+    assert op.params.suppress is True
+    assert op.params.expected_name == "Shell1"
+    assert op.params.expected_timeline_index == 7
+    assert op.requires == ["parametric_timeline", "feature_lifecycle"]
+    assert validate_operation(op) == []
+
+
+def test_mapper_converts_feature_unsuppression_to_shared_ir():
+    state = IRDocumentState()
+
+    op = map_tool_call_to_ir(
+        {
+            "name": "unsuppress_feature",
+            "input": {"feature_ref": "feature-token-2"},
+        },
+        state,
+    )
+
+    assert op.type == "set_feature_suppression"
+    assert isinstance(op.params, FeatureSuppressionParams)
+    assert op.params.feature_ref == "feature-token-2"
+    assert op.params.suppress is False
+    assert validate_ir_candidate(op, []) == []
+
+
+def test_feature_suppression_ir_rejects_empty_ref_and_bad_expected_index():
+    state = IRDocumentState()
+    missing_ref = map_tool_call_to_ir({"name": "suppress_feature", "input": {}}, state)
+
+    assert "set_feature_suppression feature_ref must be provided" in validate_operation(missing_ref)
+
+    with pytest.raises(UnsupportedToolMappingError, match="expected_timeline_index"):
+        map_tool_call_to_ir(
+            {
+                "name": "suppress_feature",
+                "input": {"feature_token": "feature-token-1", "expected_timeline_index": True},
+            },
+            state,
+        )
+
+    negative_index = map_tool_call_to_ir(
+        {
+            "name": "suppress_feature",
+            "input": {"feature_token": "feature-token-1", "expected_timeline_index": -1},
+        },
+        state,
+    )
+
+    assert "set_feature_suppression expected_timeline_index must be >= 0" in validate_operation(negative_index)
 
 
 def test_mapper_preserves_non_datum_create_sketch_planes_for_fusion():

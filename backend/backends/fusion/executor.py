@@ -23,7 +23,11 @@ _FEATURE_PAYLOAD_TOOLS = {
     "create_tapped_hole",
     "create_external_thread",
     "create_pattern_feature",
+    "suppress_feature",
+    "unsuppress_feature",
 }
+_DELETE_FEATURE_TOOL = "delete_feature"
+_TIMELINE_DELETE_CAPABILITY = "timeline_feature_delete"
 _SELECTION_PAYLOAD_TYPES = {
     "select_edges": "edge_operation",
     "clear_edge_selection": "edge_operation",
@@ -54,14 +58,66 @@ def _as_string_list(value: Any) -> list[str]:
     return []
 
 
+def _request_declares_capability(
+    request: Optional[Mapping[str, Any]],
+    capability_name: str,
+    *legacy_aliases: str,
+) -> bool:
+    capabilities = (request or {}).get("client_capabilities")
+    if capabilities is None:
+        capabilities = (request or {}).get("capabilities")
+
+    aliases = tuple(alias for alias in legacy_aliases if alias)
+    if isinstance(capabilities, Mapping):
+        value = capabilities.get(capability_name)
+        if value is None:
+            for alias in aliases:
+                if alias in capabilities:
+                    value = capabilities.get(alias)
+                    break
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, int) and not isinstance(value, bool):
+            return value in (1,)
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"true", "1", "yes", "on"}:
+                return True
+            if normalized in {"false", "0", "no", "off"}:
+                return False
+        return False
+
+    if isinstance(capabilities, (list, tuple, set, frozenset)):
+        normalized = {str(item).strip().lower() for item in capabilities}
+        return capability_name in normalized or any(alias in normalized for alias in aliases)
+
+    return False
+
+
 class FusionTargetExecutor:
     """Execute IR operations by reusing the current Fusion execution semantics."""
 
     target_name = "fusion"
 
-    def __init__(self, manager: ConnectionManager, *, timeout_seconds: int = 30):
+    def __init__(
+        self,
+        manager: ConnectionManager,
+        *,
+        timeout_seconds: int = 30,
+        request: Optional[Mapping[str, Any]] = None,
+    ):
         self._manager = manager
         self._timeout_seconds = timeout_seconds
+        self._request = dict(request) if isinstance(request, Mapping) else None
+
+    def _should_send_feature_payload(self, tool_name: str) -> bool:
+        if tool_name == _DELETE_FEATURE_TOOL:
+            return _request_declares_capability(
+                self._request,
+                _TIMELINE_DELETE_CAPABILITY,
+                "feature_delete",
+            )
+        return tool_name in _FEATURE_PAYLOAD_TOOLS
 
     def _resolve_token(self, session_id: str, ref_or_token: str, *, expected_kind: Optional[str] = None) -> str:
         cleaned = str(ref_or_token or "").strip()
@@ -374,7 +430,7 @@ class FusionTargetExecutor:
                 raw_result=raw_result,
             )
 
-        if tool_name in _FEATURE_PAYLOAD_TOOLS or tool_name in _SELECTION_PAYLOAD_TYPES:
+        if self._should_send_feature_payload(tool_name) or tool_name in _SELECTION_PAYLOAD_TYPES:
             try:
                 payload_parameters = self._prepare_payload_parameters(session_id, tool_name, tool_input)
             except ValueError as exc:
@@ -385,7 +441,7 @@ class FusionTargetExecutor:
                     data={"tool_name": tool_name, "tool_input": tool_input},
                 )
 
-            payload_type = "feature_operation" if tool_name in _FEATURE_PAYLOAD_TOOLS else _SELECTION_PAYLOAD_TYPES[tool_name]
+            payload_type = "feature_operation" if self._should_send_feature_payload(tool_name) else _SELECTION_PAYLOAD_TYPES[tool_name]
             payload = {
                 "type": payload_type,
                 "operation": tool_name,

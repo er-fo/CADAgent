@@ -854,29 +854,6 @@ TOOLS = [
         }
     },
     {
-        "name": "jump_to_timeline_position",
-        "description": "Jump back to a specific point in the timeline by repositioning the user's view (marker) and deleting all operations after that point. The marker position represents the state of the project that the user currently sees. Use this when you want to undo recent operations and continue from an earlier state, or when explicitly requested by the user to continue from a specific timeline position. This is like git reset --hard - operations after the target position will be permanently deleted.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "target_index": {
-                    "type": "integer",
-                    "description": "The timeline index to jump back to (0-based). The user's view (marker) will be positioned here and everything after will be deleted. Must be between 0 and the current timeline count."
-                },
-                "reason": {
-                    "type": "string",
-                    "description": "Brief explanation of why you're jumping back (for logging and user context)"
-                },
-                "description": {
-                    "type": "string",
-                    "description": "Brief explanation of what you're doing and why (e.g., 'Reverting to try a different approach')"
-                }
-            },
-            "required": ["target_index", "description"],
-            "additionalProperties": False
-        }
-    },
-    {
         "name": "delete_feature",
         "description": "Delete a feature (extrude, fillet, revolve, etc.) from the timeline by its entity_token. Use this to remove problematic features (faulty fillets, incorrect extrusions, failed operations) without reverting the entire timeline. Get the entity_token from list_features output. NOTE: Sketches cannot be deleted with this tool - only timeline features.",
         "input_schema": {
@@ -905,7 +882,7 @@ TOOLS = [
     },
     {
         "name": "adjust_feature_parameters",
-        "description": "Safely adjust supported parameters on one existing timeline feature by entity_token. Supported scope is intentionally narrow: ExtrudeFeature name/distance and HoleFeature name/diameter/depth when Fusion exposes editable model parameters. Get entity_token and editable_parameters from list_features output.",
+        "description": "Safely adjust supported parameters on one existing timeline feature by entity_token. Supported scope is intentionally narrow and depends on list_features.editable_parameters: ExtrudeFeature name/distance; HoleFeature name/diameter/depth; constant-radius FilletFeature radius; equal-distance ChamferFeature chamfer_distance; ShellFeature inside_thickness/outside_thickness when those model parameters exist; rectangular and circular pattern counts/spacings/angle only when Fusion exposes unambiguous editable model parameters. Get entity_token and editable_parameters from list_features output.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -923,7 +900,24 @@ TOOLS = [
                         "diameter": {"type": "number", "description": "New HoleFeature diameter."},
                         "diameter_unit": {"type": "string", "enum": ["mm", "cm", "m", "in"], "description": "Unit for diameter; defaults to mm."},
                         "depth": {"type": "number", "description": "New HoleFeature depth for blind/distance holes."},
-                        "depth_unit": {"type": "string", "enum": ["mm", "cm", "m", "in"], "description": "Unit for depth; defaults to mm."}
+                        "depth_unit": {"type": "string", "enum": ["mm", "cm", "m", "in"], "description": "Unit for depth; defaults to mm."},
+                        "radius": {"type": "number", "description": "New constant-radius FilletFeature radius."},
+                        "radius_unit": {"type": "string", "enum": ["mm", "cm", "m", "in"], "description": "Unit for radius; defaults to mm."},
+                        "chamfer_distance": {"type": "number", "description": "New equal-distance ChamferFeature offset distance."},
+                        "chamfer_distance_unit": {"type": "string", "enum": ["mm", "cm", "m", "in"], "description": "Unit for chamfer_distance; defaults to mm."},
+                        "inside_thickness": {"type": "number", "description": "New ShellFeature inside thickness when the feature exposes that model parameter."},
+                        "inside_thickness_unit": {"type": "string", "enum": ["mm", "cm", "m", "in"], "description": "Unit for inside_thickness; defaults to mm."},
+                        "outside_thickness": {"type": "number", "description": "New ShellFeature outside thickness when the feature exposes that model parameter."},
+                        "outside_thickness_unit": {"type": "string", "enum": ["mm", "cm", "m", "in"], "description": "Unit for outside_thickness; defaults to mm."},
+                        "rectangular_count_one": {"type": "integer", "description": "New quantity in direction one for editable RectangularPatternFeature parameters."},
+                        "rectangular_spacing_one": {"type": "number", "description": "New spacing in direction one for spacing-based RectangularPatternFeature parameters."},
+                        "rectangular_spacing_one_unit": {"type": "string", "enum": ["mm", "cm", "m", "in"], "description": "Unit for rectangular_spacing_one; defaults to mm."},
+                        "rectangular_count_two": {"type": "integer", "description": "New quantity in direction two for editable RectangularPatternFeature parameters."},
+                        "rectangular_spacing_two": {"type": "number", "description": "New spacing in direction two for spacing-based RectangularPatternFeature parameters."},
+                        "rectangular_spacing_two_unit": {"type": "string", "enum": ["mm", "cm", "m", "in"], "description": "Unit for rectangular_spacing_two; defaults to mm."},
+                        "circular_count": {"type": "integer", "description": "New quantity for editable CircularPatternFeature parameters."},
+                        "circular_total_angle": {"type": "number", "description": "New total sweep angle for editable CircularPatternFeature parameters."},
+                        "circular_total_angle_unit": {"type": "string", "enum": ["deg", "rad"], "description": "Unit for circular_total_angle; defaults to deg."}
                     },
                     "additionalProperties": False
                 },
@@ -941,6 +935,60 @@ TOOLS = [
                 }
             },
             "required": ["feature_token", "parameters", "description"],
+            "additionalProperties": False
+        }
+    },
+    {
+        "name": "suppress_feature",
+        "description": "Temporarily suppress one timeline feature by entity_token without deleting it. Prefer this over delete_feature when the user may want to restore the feature later or when removal intent is reversible/ambiguous. Get entity_token from list_features output.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "feature_token": {
+                    "type": "string",
+                    "description": "The entity_token of the feature to suppress from list_features output."
+                },
+                "expected_name": {
+                    "type": "string",
+                    "description": "Optional safety check. If provided and current feature/timeline name differs, suppression fails."
+                },
+                "expected_timeline_index": {
+                    "type": "integer",
+                    "description": "Optional safety check. If provided and current timeline index differs, suppression fails."
+                },
+                "description": {
+                    "type": "string",
+                    "description": "Brief explanation of why this feature is being suppressed."
+                }
+            },
+            "required": ["feature_token", "description"],
+            "additionalProperties": False
+        }
+    },
+    {
+        "name": "unsuppress_feature",
+        "description": "Restore one previously suppressed timeline feature by entity_token. Get entity_token from list_features output and include expected_name or expected_timeline_index when available.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "feature_token": {
+                    "type": "string",
+                    "description": "The entity_token of the feature to unsuppress from list_features output."
+                },
+                "expected_name": {
+                    "type": "string",
+                    "description": "Optional safety check. If provided and current feature/timeline name differs, unsuppression fails."
+                },
+                "expected_timeline_index": {
+                    "type": "integer",
+                    "description": "Optional safety check. If provided and current timeline index differs, unsuppression fails."
+                },
+                "description": {
+                    "type": "string",
+                    "description": "Brief explanation of why this feature is being restored."
+                }
+            },
+            "required": ["feature_token", "description"],
             "additionalProperties": False
         }
     },

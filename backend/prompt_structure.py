@@ -31,7 +31,7 @@ from typing import Dict, List, Any
 from .thread_specs import format_catalog_inline, thread_size_markdown_table
 
 # Single source of truth for prompt versioning (appears in all system prompts)
-PROMPT_VERSION = "v0.6.11 (2026-04-30) - MANDATORY: face-sketch two-step sequencing (no same-turn create_sketch(face_*)+geometry/extrude); no multi-mutation batching; use generate_question_tree for 2+ design questions; use profile_indices for overlapping shapes; NEVER ask follow-up questions after question tree; ALWAYS use hole tools for holes (never sketch+extrude)"
+PROMPT_VERSION = "v0.6.12 (2026-05-02) - MANDATORY: face-sketch two-step sequencing; no multi-mutation batching including timeline feature suppression; use generate_question_tree for 2+ design questions; use profile_indices for overlapping shapes; ALWAYS use hole tools for holes"
 
 # =============================================================================
 # REFERENCE TABLES (Included in system prompt, referenced by tools)
@@ -277,7 +277,7 @@ CRITICAL RULES:
 9. You will see the result of each operation before deciding the next step
 10. Think step-by-step and work sequentially
    10a. TOPOLOGY SAFETY (MANDATORY): Never batch multiple topology-changing operations in one turn.
-       - Topology-changing operations include: extrude/revolve/loft, hole/thread tools, fillet/chamfer/shell, patterns, delete_feature, jump_to_timeline_position.
+       - Topology-changing operations include: extrude/revolve/loft, hole/thread tools, fillet/chamfer/shell, patterns, suppress_feature, unsuppress_feature, delete_feature.
        - Execute ONE such operation, wait for the refreshed entity context, then choose the next operation.
 11. When creating features (extrude, fillet, chamfer) or sketches, provide descriptive names that reflect the part's purpose (e.g., "Base Plate", "Corner Rounds", "Mounting Holes Sketch") instead of generic names
 12. Coordinate systems - TWO DIFFERENT SYSTEMS (CRITICAL):
@@ -928,12 +928,13 @@ ALWAYS use the appropriate hole tool:
     Otherwise (common for bolt circles around an off-origin shaft), place the instances explicitly (e.g., multiple create_simple_hole calls)."""
     },
     "timeline": {
-        "tools": ["jump_to_timeline_position", "delete_feature", "adjust_feature_parameters"],
+        "tools": ["delete_feature", "adjust_feature_parameters", "suppress_feature", "unsuppress_feature"],
         "description": "Timeline manipulation",
         "documentation": """
-- jump_to_timeline_position: Rewind to specific position and delete operations after it
 - delete_feature: Remove a specific feature by entity_token (from list_features). Use when you need to delete a problematic feature in the middle of the timeline without losing subsequent work. Requires the feature's entity_token from list_features output.
-- adjust_feature_parameters: Narrow safe edit for one feature. Use only when list_features shows editable_parameters for the target. Supported edits: ExtrudeFeature name/distance; HoleFeature name/diameter/depth. Include expected_name or expected_timeline_index when available."""
+- adjust_feature_parameters: Narrow safe edit for one feature. Use only when list_features shows editable_parameters for the target. Supported edits are exactly what list_features advertises for that feature, currently including ExtrudeFeature name/distance; HoleFeature name/diameter/depth; constant-radius FilletFeature radius; equal-distance ChamferFeature chamfer_distance; ShellFeature inside_thickness/outside_thickness when model parameters exist; and selected RectangularPatternFeature/CircularPatternFeature count-spacing-angle parameters when Fusion exposes unambiguous editable model parameters. Include expected_name or expected_timeline_index when available.
+- suppress_feature: Temporarily disable one feature by entity_token without deleting it. Prefer this before delete_feature when the user intent is reversible or ambiguous.
+- unsuppress_feature: Restore one suppressed feature by entity_token. Use list_features first and include expected_name or expected_timeline_index when available."""
     },
     "design_exploration": {
         "tools": ["generate_question_tree", "propose_designs", "output_build_plan"],

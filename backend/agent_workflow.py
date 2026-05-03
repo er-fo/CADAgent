@@ -40,21 +40,43 @@ try:
         markdown_to_html,
         summarize_plan_for_user,
         html_to_plain_text,
+        TOOLS,
     )
     from .websocket_manager import ConnectionManager
     from .prompt_router import route_request, get_routing_summary
-    from .prompt_builder import build_prompt, estimate_token_savings, get_build_summary
+    from .prompt_builder import build_full_prompt, build_prompt, estimate_token_savings, get_build_summary
     from .entity_store import EntityStore
     from .sketch_entity_store import SketchEntityStore
     from .session_logger import initialize_session, _extract_session_context
     from .ir import IRDocument, IRDocumentState, map_tool_call_to_ir, validate_ir_candidate
     from .ir.mapper import UnsupportedToolMappingError
     from .ir.types import (
+        AddArcParams,
         AddCircleParams,
+        AddLineParams,
         AddRectangleParams,
+        ChamferParams,
+        ClearSelectionParams,
+        CounterboreHoleParams,
+        CreateConstructionPlaneParams,
         CreateSketchParams,
+        DeleteFeatureParams,
         ExtrudeParams,
+        ExternalThreadParams,
+        FeatureSuppressionParams,
+        FilletParams,
         IROperation,
+        IROperationEffects,
+        JumpToTimelinePositionParams,
+        ListFeaturesParams,
+        ListSketchProfilesParams,
+        LoftParams,
+        PatternFeatureParams,
+        RevolveParams,
+        SelectEntitiesParams,
+        ShellParams,
+        SimpleHoleParams,
+        TappedHoleParams,
     )
     from .backends.build123d import Build123dTargetExecutor
     from .backends.fusion import FusionTargetExecutor
@@ -77,21 +99,43 @@ except ImportError:  # pragma: no cover - script execution fallback
         markdown_to_html,
         summarize_plan_for_user,
         html_to_plain_text,
+        TOOLS,
     )
     from websocket_manager import ConnectionManager  # type: ignore
     from prompt_router import route_request, get_routing_summary  # type: ignore
-    from prompt_builder import build_prompt, estimate_token_savings, get_build_summary  # type: ignore
+    from prompt_builder import build_full_prompt, build_prompt, estimate_token_savings, get_build_summary  # type: ignore
     from entity_store import EntityStore  # type: ignore
     from sketch_entity_store import SketchEntityStore  # type: ignore
     from session_logger import initialize_session, _extract_session_context  # type: ignore
     from ir import IRDocument, IRDocumentState, map_tool_call_to_ir, validate_ir_candidate  # type: ignore
     from ir.mapper import UnsupportedToolMappingError  # type: ignore
     from ir.types import (  # type: ignore
+        AddArcParams,
         AddCircleParams,
+        AddLineParams,
         AddRectangleParams,
+        ChamferParams,
+        ClearSelectionParams,
+        CounterboreHoleParams,
+        CreateConstructionPlaneParams,
         CreateSketchParams,
+        DeleteFeatureParams,
         ExtrudeParams,
+        ExternalThreadParams,
+        FeatureSuppressionParams,
+        FilletParams,
         IROperation,
+        IROperationEffects,
+        JumpToTimelinePositionParams,
+        ListFeaturesParams,
+        ListSketchProfilesParams,
+        LoftParams,
+        PatternFeatureParams,
+        RevolveParams,
+        SelectEntitiesParams,
+        ShellParams,
+        SimpleHoleParams,
+        TappedHoleParams,
     )
     from backends.build123d import Build123dTargetExecutor  # type: ignore
     from backends.fusion import FusionTargetExecutor  # type: ignore
@@ -174,6 +218,8 @@ FEATURE_OPERATION_TOOLS = {
     "list_features",
     "create_pattern_feature",
     "adjust_feature_parameters",
+    "suppress_feature",
+    "unsuppress_feature",
 }
 GEOMETRY_OPERATION_TOOLS = EDGE_OPERATION_TOOLS | FACE_OPERATION_TOOLS | BODY_OPERATION_TOOLS | FEATURE_OPERATION_TOOLS
 
@@ -197,6 +243,8 @@ GEOMETRY_MODIFYING_TOOLS = {
     "create_external_thread",
     "create_pattern_feature",
     "adjust_feature_parameters",
+    "suppress_feature",
+    "unsuppress_feature",
 }
 
 # Tools that modify the timeline and invalidate existing entity refs.
@@ -204,7 +252,14 @@ GEOMETRY_MODIFYING_TOOLS = {
 TIMELINE_MODIFYING_TOOLS = {
     "jump_to_timeline_position",
     "delete_feature",
+    "suppress_feature",
+    "unsuppress_feature",
+    "set_feature_suppression",
 }
+TIMELINE_SUPPRESSION_TOOLS = {"suppress_feature", "unsuppress_feature"}
+TIMELINE_SUPPRESSION_CAPABILITY = "timeline_feature_suppression"
+TIMELINE_DELETE_TOOLS = {"delete_feature"}
+TIMELINE_DELETE_CAPABILITY = "timeline_feature_delete"
 
 # Tools that can invalidate topology refs and should run one-at-a-time per LLM turn.
 TOPOLOGY_MUTATING_TOOLS = GEOMETRY_MODIFYING_TOOLS | TIMELINE_MODIFYING_TOOLS
@@ -408,6 +463,13 @@ _NO_INTERSECTION_FAILURE_MARKERS = (
     "no_intersection_after_direction_retry",
 )
 
+_SKETCH_REFERENCE_FAILURE_MARKERS = (
+    "is not in the cached sketch snapshot",
+    "referenced sketch",
+    "does not exist yet",
+    "requires at least one committed profile operation",
+)
+
 
 def _normalize_extrude_operation_name(operation_value: Any) -> str:
     """Normalize extrude operation variants for intent comparison."""
@@ -426,6 +488,13 @@ def _is_no_intersection_failure_text(failure_detail: Any) -> bool:
     return any(marker in detail for marker in _NO_INTERSECTION_FAILURE_MARKERS)
 
 
+def _is_sketch_reference_failure_text(failure_detail: Any) -> bool:
+    if not isinstance(failure_detail, str):
+        return False
+    detail = failure_detail.lower()
+    return any(marker in detail for marker in _SKETCH_REFERENCE_FAILURE_MARKERS)
+
+
 def _build_failure_intent_key(tool_name: str, tool_input: Mapping[str, Any], failure_detail: Any) -> str:
     """
     Build a failure-intent key for retry guards.
@@ -436,6 +505,8 @@ def _build_failure_intent_key(tool_name: str, tool_input: Mapping[str, Any], fai
     base_key = _build_tool_intent_key(tool_name, tool_input)
     if tool_name != "extrude_profile":
         return base_key
+    if _is_sketch_reference_failure_text(failure_detail):
+        return "extrude_profile:sketch_reference_resolution"
     if not _is_no_intersection_failure_text(failure_detail):
         return base_key
 
@@ -506,6 +577,104 @@ def _resolve_execution_target(request: Optional[Mapping[str, Any]]) -> str:
     raise UnsupportedExecutionTargetError(
         f"Unsupported execution_target '{raw_target}'. Expected one of: fusion, build123d, studio."
     )
+
+
+def _parse_strict_bool(value: Any, *, default: Optional[bool] = None) -> bool:
+    """Parse booleans without Python's truthy string coercion."""
+    if value is None:
+        if default is not None:
+            return default
+        raise ValueError("Boolean value is required.")
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int) and not isinstance(value, bool):
+        if value in (0, 1):
+            return bool(value)
+        raise ValueError(f"Invalid boolean integer value: {value!r}")
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "1", "yes", "on"}:
+            return True
+        if normalized in {"false", "0", "no", "off"}:
+            return False
+        raise ValueError(f"Invalid boolean string value: {value!r}")
+    raise ValueError(f"Invalid boolean value: {value!r}")
+
+
+def _request_declares_capability(
+    request: Optional[Mapping[str, Any]],
+    capability_name: str,
+    *legacy_aliases: str,
+) -> bool:
+    """Return whether the client request declares a capability flag."""
+    capabilities = (request or {}).get("client_capabilities")
+    if capabilities is None:
+        capabilities = (request or {}).get("capabilities")
+
+    aliases = tuple(alias for alias in legacy_aliases if alias)
+
+    if isinstance(capabilities, Mapping):
+        value = capabilities.get(capability_name)
+        if value is None:
+            for alias in aliases:
+                if alias in capabilities:
+                    value = capabilities.get(alias)
+                    break
+        try:
+            return _parse_strict_bool(value, default=False)
+        except ValueError:
+            return False
+
+    if isinstance(capabilities, (list, tuple, set, frozenset)):
+        normalized = {str(item).strip().lower() for item in capabilities}
+        return capability_name in normalized or any(alias in normalized for alias in aliases)
+
+    return False
+
+
+def _client_supports_timeline_feature_suppression(request: Optional[Mapping[str, Any]]) -> bool:
+    """Return whether the active add-in declared support for suppression tools."""
+    return _request_declares_capability(
+        request,
+        TIMELINE_SUPPRESSION_CAPABILITY,
+        "feature_suppression",
+    )
+
+
+def _filter_tools_for_client_capabilities(
+    tools: Optional[Sequence[Mapping[str, Any]]],
+    request: Optional[Mapping[str, Any]],
+) -> List[Mapping[str, Any]]:
+    """Remove tools unsupported by the connected add-in before LLM planning."""
+    source_tools: Sequence[Mapping[str, Any]] = tools if tools is not None else TOOLS
+    if _client_supports_timeline_feature_suppression(request):
+        return [dict(tool) for tool in source_tools]
+    return [
+        dict(tool)
+        for tool in source_tools
+        if str(tool.get("name") or "") not in TIMELINE_SUPPRESSION_TOOLS
+    ]
+
+
+def _filter_system_prompt_for_client_capabilities(
+    system_prompt: Optional[str],
+    request: Optional[Mapping[str, Any]],
+) -> Optional[str]:
+    """Remove unsupported tool names from prompt text for legacy add-ins."""
+    if not system_prompt or _client_supports_timeline_feature_suppression(request):
+        return system_prompt
+
+    filtered_lines: List[str] = []
+    for line in system_prompt.splitlines():
+        if "- suppress_feature:" in line or "- unsuppress_feature:" in line:
+            continue
+        line = line.replace(", suppress_feature, unsuppress_feature", "")
+        line = line.replace("suppress_feature, unsuppress_feature, ", "")
+        line = line.replace("suppress_feature, unsuppress_feature", "")
+        if "suppress_feature" in line or "unsuppress_feature" in line:
+            continue
+        filtered_lines.append(line)
+    return "\n".join(filtered_lines)
 
 
 def _target_result_mapping(
@@ -908,6 +1077,75 @@ def _get_sketch_entity_store(session_id: str, manager: ConnectionManager) -> Ske
     if session_id not in stores or not isinstance(stores[session_id], SketchEntityStore):
         stores[session_id] = SketchEntityStore()
     return stores[session_id]
+
+
+_SKETCH_ID_INPUT_TOOLS = {
+    "add_rectangle",
+    "add_circle",
+    "add_line",
+    "add_arc",
+    "list_sketch_profiles",
+    "extrude_profile",
+    "revolve_profile",
+}
+
+
+def _canonicalize_sketch_tool_input(
+    session_id: str,
+    manager: ConnectionManager,
+    tool_name: str,
+    tool_input: Mapping[str, Any],
+) -> Dict[str, Any]:
+    """Replace user-visible sketch aliases with the canonical sketch_id used by IR state."""
+    cleaned = dict(tool_input)
+    if tool_name not in _SKETCH_ID_INPUT_TOOLS:
+        return cleaned
+
+    raw_sketch_id = str(cleaned.get("sketch_id") or "").strip()
+    if not raw_sketch_id:
+        return cleaned
+
+    sketch_store = _get_sketch_entity_store(session_id, manager)
+    canonical_sketch_id = sketch_store.resolve_sketch_id(raw_sketch_id)
+    if not canonical_sketch_id or canonical_sketch_id == raw_sketch_id:
+        return cleaned
+
+    cleaned["sketch_id"] = canonical_sketch_id
+
+    raw_profile = cleaned.get("profile")
+    if isinstance(raw_profile, str) and raw_profile.startswith(f"{raw_sketch_id}:"):
+        cleaned["profile"] = f"{canonical_sketch_id}:{raw_profile.split(':', 1)[1]}"
+
+    logger.info(
+        "Session %s canonicalized sketch reference for %s: %s -> %s",
+        session_id,
+        tool_name,
+        raw_sketch_id,
+        canonical_sketch_id,
+    )
+    return cleaned
+
+
+_STOP_CONTROL_REQUESTS = {
+    "stop",
+    "cancel",
+    "abort",
+    "halt",
+    "please stop",
+    "stop please",
+}
+
+
+def _is_stop_control_request(request: Mapping[str, Any]) -> bool:
+    """Detect short control-only stop requests before they enter the LLM loop."""
+    if request.get("image_data") or request.get("attachments") or request.get("normalized_attachments"):
+        return False
+
+    text = str(request.get("user_request") or "").strip().lower()
+    if not text:
+        return False
+    normalized = re.sub(r"[\s.!?]+", " ", text).strip()
+    return normalized in _STOP_CONTROL_REQUESTS
 
 
 def _extract_entity_token(entity: Optional[Mapping[str, Any]]) -> Optional[str]:
@@ -1462,6 +1700,14 @@ def _serialize_ir_operation(operation: IROperation) -> Dict[str, Any]:
         "params": asdict(operation.params),
         "dependencies": list(operation.dependencies or []),
         "metadata": dict(operation.metadata) if operation.metadata else None,
+        "requires": list(operation.requires or []),
+        "effects": asdict(operation.effects) if operation.effects else None,
+        "selectors": [dict(selector) for selector in (operation.selectors or []) if isinstance(selector, Mapping)],
+        "fallback_policy": list(operation.fallback_policy or []),
+        "target_results": [
+            dict(result) for result in (operation.target_results or []) if isinstance(result, Mapping)
+        ],
+        "validation": dict(operation.validation) if operation.validation else None,
     }
 
 
@@ -1482,23 +1728,76 @@ def _deserialize_ir_operation(payload: Mapping[str, Any]) -> IROperation:
     raw_params = payload.get("params")
     params_payload = dict(raw_params) if isinstance(raw_params, Mapping) else {}
 
-    if operation_type == "create_sketch":
+    def _string_list(value: Any) -> List[str]:
+        return [str(item) for item in value] if isinstance(value, list) else []
+
+    def _float_list(value: Any, expected_len: Optional[int] = None) -> List[float]:
+        values = [float(item) for item in value] if isinstance(value, list) else []
+        if expected_len is not None:
+            values = values[:expected_len]
+        return values
+
+    def _optional_int(value: Any) -> Optional[int]:
+        return int(value) if value is not None else None
+
+    def _optional_float(value: Any) -> Optional[float]:
+        return float(value) if value is not None else None
+
+    if operation_type == "create_construction_plane":
+        params = CreateConstructionPlaneParams(
+            plane=str(params_payload.get("plane") or "").strip(),
+            mode=str(params_payload.get("mode") or "datum").strip() or "datum",  # type: ignore[arg-type]
+            description=str(params_payload.get("description") or ""),
+            datum_axis_plane=str(params_payload.get("datum_axis_plane") or "").strip() or None,
+            base_datum_plane=str(params_payload.get("base_datum_plane") or "").strip() or None,
+            offset=_optional_float(params_payload.get("offset")),
+            reference_face=str(params_payload.get("reference_face") or "").strip() or None,
+            reference_edge=str(params_payload.get("reference_edge") or "").strip() or None,
+            angle_degrees=_optional_float(params_payload.get("angle_degrees")),
+            face=str(params_payload.get("face") or "").strip() or None,
+            point=_float_list(params_payload.get("point"), 3) or None,
+        )
+    elif operation_type == "create_sketch":
         params = CreateSketchParams(
             plane=str(params_payload.get("plane") or "XY").strip() or "XY",
             sketch=str(params_payload.get("sketch") or "").strip(),
+            sketch_name=str(params_payload.get("sketch_name") or "").strip() or None,
         )
     elif operation_type == "add_rectangle":
         params = AddRectangleParams(
             sketch=str(params_payload.get("sketch") or "").strip(),
-            center=[float(value) for value in (params_payload.get("center") or [0.0, 0.0])[:2]],
+            center=_float_list(params_payload.get("center"), 2),
             width=float(params_payload.get("width") or 0.0),
             height=float(params_payload.get("height") or 0.0),
+            corner1=_float_list(params_payload.get("corner1"), 2) or None,
+            corner2=_float_list(params_payload.get("corner2"), 2) or None,
+            rectangle_id=str(params_payload.get("rectangle_id") or "").strip() or None,
         )
     elif operation_type == "add_circle":
         params = AddCircleParams(
             sketch=str(params_payload.get("sketch") or "").strip(),
-            center=[float(value) for value in (params_payload.get("center") or [0.0, 0.0])[:2]],
+            center=_float_list(params_payload.get("center"), 2),
             radius=float(params_payload.get("radius") or 0.0),
+            circle_id=str(params_payload.get("circle_id") or "").strip() or None,
+        )
+    elif operation_type == "add_line":
+        params = AddLineParams(
+            sketch=str(params_payload.get("sketch") or "").strip(),
+            start=_float_list(params_payload.get("start"), 2),
+            end=_float_list(params_payload.get("end"), 2),
+            line_id=str(params_payload.get("line_id") or "").strip() or None,
+        )
+    elif operation_type == "add_arc":
+        params = AddArcParams(
+            sketch=str(params_payload.get("sketch") or "").strip(),
+            center=_float_list(params_payload.get("center"), 2),
+            start=_float_list(params_payload.get("start"), 2),
+            end=_float_list(params_payload.get("end"), 2),
+            arc_id=str(params_payload.get("arc_id") or "").strip() or None,
+        )
+    elif operation_type == "list_sketch_profiles":
+        params = ListSketchProfilesParams(
+            sketch=str(params_payload.get("sketch") or "").strip(),
         )
     elif operation_type == "extrude":
         raw_profile_indices = params_payload.get("profile_indices")
@@ -1516,6 +1815,152 @@ def _deserialize_ir_operation(payload: Mapping[str, Any]) -> IROperation:
             sketch=str(raw_sketch).strip() if raw_sketch is not None else None,
             profile_index=profile_index,
             profile_indices=profile_indices,
+            feature_name=str(params_payload.get("feature_name") or "").strip() or None,
+            fallback_policy=_string_list(params_payload.get("fallback_policy")),
+        )
+    elif operation_type == "revolve":
+        params = RevolveParams(
+            profile=str(params_payload.get("profile") or "").strip(),
+            sketch=str(params_payload.get("sketch") or "").strip(),
+            axis=dict(params_payload.get("axis")) if isinstance(params_payload.get("axis"), Mapping) else {},
+            extent=dict(params_payload.get("extent")) if isinstance(params_payload.get("extent"), Mapping) else {},
+            operation=str(params_payload.get("operation") or "new").strip() or "new",  # type: ignore[arg-type]
+            profile_index=int(params_payload.get("profile_index") or 0),
+            is_solid=_parse_strict_bool(params_payload.get("is_solid"), default=True),
+            creation_occurrence=str(params_payload.get("creation_occurrence") or "").strip() or None,
+            feature_name=str(params_payload.get("feature_name") or "").strip() or None,
+        )
+    elif operation_type == "loft":
+        params = LoftParams(
+            profile_ids=_string_list(params_payload.get("profile_ids")),
+            operation=str(params_payload.get("operation") or "new").strip() or "new",  # type: ignore[arg-type]
+            feature_name=str(params_payload.get("feature_name") or "").strip() or None,
+            prefer_solid=_parse_strict_bool(params_payload.get("prefer_solid"), default=True),
+            fallback_policy=_string_list(params_payload.get("fallback_policy")),
+        )
+    elif operation_type == "fillet":
+        params = FilletParams(
+            edge_refs=_string_list(params_payload.get("edge_refs")),
+            radius=float(params_payload.get("radius") or 0.0),
+            include_tangent_edges=_parse_strict_bool(
+                params_payload.get("include_tangent_edges"),
+                default=True,
+            ),
+            feature_name=str(params_payload.get("feature_name") or "").strip() or None,
+        )
+    elif operation_type == "chamfer":
+        params = ChamferParams(
+            edge_refs=_string_list(params_payload.get("edge_refs")),
+            distance=float(params_payload.get("distance") or 0.0),
+            include_tangent_edges=_parse_strict_bool(
+                params_payload.get("include_tangent_edges"),
+                default=True,
+            ),
+            feature_name=str(params_payload.get("feature_name") or "").strip() or None,
+        )
+    elif operation_type == "delete_feature":
+        raw_expected_index = params_payload.get("expected_timeline_index")
+        params = DeleteFeatureParams(
+            feature_ref=str(params_payload.get("feature_ref") or "").strip(),
+            description=str(params_payload.get("description") or ""),
+            expected_name=str(params_payload.get("expected_name") or "").strip() or None,
+            expected_timeline_index=int(raw_expected_index) if raw_expected_index is not None else None,
+        )
+    elif operation_type == "set_feature_suppression":
+        raw_expected_index = params_payload.get("expected_timeline_index")
+        params = FeatureSuppressionParams(
+            feature_ref=str(params_payload.get("feature_ref") or "").strip(),
+            suppress=_parse_strict_bool(params_payload.get("suppress")),
+            description=str(params_payload.get("description") or ""),
+            expected_name=str(params_payload.get("expected_name") or "").strip() or None,
+            expected_timeline_index=int(raw_expected_index) if raw_expected_index is not None else None,
+        )
+    elif operation_type == "shell":
+        raw_face_refs = params_payload.get("face_refs")
+        raw_body_refs = params_payload.get("body_refs")
+        params = ShellParams(
+            mode=str(params_payload.get("mode") or "open").strip() or "open",  # type: ignore[arg-type]
+            face_refs=[str(ref) for ref in raw_face_refs] if isinstance(raw_face_refs, list) else [],
+            body_refs=[str(ref) for ref in raw_body_refs] if isinstance(raw_body_refs, list) else [],
+            inside_thickness=float(params_payload.get("inside_thickness") or 0.0),
+            outside_thickness=float(params_payload.get("outside_thickness") or 0.0),
+            is_tangent_chain=_parse_strict_bool(params_payload.get("is_tangent_chain"), default=True),
+            shell_type=str(params_payload.get("shell_type") or "sharp").strip() or "sharp",  # type: ignore[arg-type]
+            feature_name=str(params_payload.get("feature_name") or "").strip() or None,
+        )
+    elif operation_type == "create_simple_hole":
+        params = SimpleHoleParams(
+            face_ref=str(params_payload.get("face_ref") or "").strip(),
+            center=_float_list(params_payload.get("center"), 3),
+            diameter=float(params_payload.get("diameter") or 0.0),
+            extent_type=str(params_payload.get("extent_type") or "through_all").strip() or "through_all",  # type: ignore[arg-type]
+            depth=_optional_float(params_payload.get("depth")),
+            feature_name=str(params_payload.get("feature_name") or "").strip() or None,
+        )
+    elif operation_type == "create_counterbore_hole":
+        params = CounterboreHoleParams(
+            face_ref=str(params_payload.get("face_ref") or "").strip(),
+            center=_float_list(params_payload.get("center"), 3),
+            hole_diameter=float(params_payload.get("hole_diameter") or 0.0),
+            hole_depth=float(params_payload.get("hole_depth") or 0.0),
+            counterbore_diameter=float(params_payload.get("counterbore_diameter") or 0.0),
+            counterbore_depth=float(params_payload.get("counterbore_depth") or 0.0),
+            feature_name=str(params_payload.get("feature_name") or "").strip() or None,
+        )
+    elif operation_type == "create_tapped_hole":
+        params = TappedHoleParams(
+            face_ref=str(params_payload.get("face_ref") or "").strip(),
+            center=_float_list(params_payload.get("center"), 3),
+            thread_type=str(params_payload.get("thread_type") or "metric").strip() or "metric",  # type: ignore[arg-type]
+            thread_size=str(params_payload.get("thread_size") or "").strip(),
+            thread_depth=float(params_payload.get("thread_depth") or 0.0),
+            pilot_hole_depth=_optional_float(params_payload.get("pilot_hole_depth")),
+            diameter_unit=str(params_payload.get("diameter_unit") or "mm").strip() or "mm",
+            feature_name=str(params_payload.get("feature_name") or "").strip() or None,
+        )
+    elif operation_type == "create_external_thread":
+        params = ExternalThreadParams(
+            face_ref=str(params_payload.get("face_ref") or "").strip(),
+            thread_type=str(params_payload.get("thread_type") or "metric").strip() or "metric",  # type: ignore[arg-type]
+            thread_size=str(params_payload.get("thread_size") or "").strip(),
+            is_full_length=_parse_strict_bool(params_payload.get("is_full_length"), default=True),
+            thread_length=_optional_float(params_payload.get("thread_length")),
+            thread_offset=float(params_payload.get("thread_offset") or 0.0),
+            diameter_unit=str(params_payload.get("diameter_unit") or "mm").strip() or "mm",
+            feature_name=str(params_payload.get("feature_name") or "").strip() or None,
+        )
+    elif operation_type == "pattern_feature":
+        params = PatternFeatureParams(
+            pattern_type=str(params_payload.get("pattern_type") or "rectangular").strip() or "rectangular",  # type: ignore[arg-type]
+            feature_refs=_string_list(params_payload.get("feature_refs")),
+            count_x=_optional_int(params_payload.get("count_x")),
+            spacing_x=_optional_float(params_payload.get("spacing_x")),
+            count_y=_optional_int(params_payload.get("count_y")),
+            spacing_y=_optional_float(params_payload.get("spacing_y")),
+            rotation_count=_optional_int(params_payload.get("rotation_count")),
+            rotation_angle_degrees=_optional_float(params_payload.get("rotation_angle_degrees")),
+            orientation_hint=params_payload.get("orientation_hint"),
+            feature_name=str(params_payload.get("feature_name") or "").strip() or None,
+        )
+    elif operation_type == "list_features":
+        params = ListFeaturesParams(
+            description=str(params_payload.get("description") or ""),
+        )
+    elif operation_type == "jump_to_timeline_position":
+        params = JumpToTimelinePositionParams(
+            target_index=int(params_payload.get("target_index") or 0),
+            reason=str(params_payload.get("reason") or ""),
+            description=str(params_payload.get("description") or ""),
+        )
+    elif operation_type == "select_entities":
+        params = SelectEntitiesParams(
+            kind=str(params_payload.get("kind") or "face").strip() or "face",  # type: ignore[arg-type]
+            refs=_string_list(params_payload.get("refs")),
+            clear_existing=_parse_strict_bool(params_payload.get("clear_existing"), default=True),
+        )
+    elif operation_type == "clear_selection":
+        params = ClearSelectionParams(
+            kind=str(params_payload.get("kind") or "face").strip() or "face",  # type: ignore[arg-type]
         )
     else:
         raise ValueError(f"Unsupported serialized IR operation type: {operation_type}")
@@ -1524,6 +1969,34 @@ def _deserialize_ir_operation(payload: Mapping[str, Any]) -> IROperation:
     dependencies = [str(dep) for dep in raw_dependencies] if isinstance(raw_dependencies, list) else []
     raw_metadata = payload.get("metadata")
     metadata = dict(raw_metadata) if isinstance(raw_metadata, Mapping) else None
+    raw_requires = payload.get("requires")
+    requires = [str(item) for item in raw_requires] if isinstance(raw_requires, list) else []
+    raw_effects = payload.get("effects")
+    effects = IROperationEffects(
+        creates={
+            str(key): [str(item) for item in value]
+            for key, value in dict(raw_effects.get("creates") or {}).items()
+            if isinstance(value, list)
+        } if isinstance(raw_effects, Mapping) else {},
+        modifies={
+            str(key): [str(item) for item in value]
+            for key, value in dict(raw_effects.get("modifies") or {}).items()
+            if isinstance(value, list)
+        } if isinstance(raw_effects, Mapping) else {},
+        invalidates={
+            str(key): [str(item) for item in value]
+            for key, value in dict(raw_effects.get("invalidates") or {}).items()
+            if isinstance(value, list)
+        } if isinstance(raw_effects, Mapping) else {},
+    )
+    raw_selectors = payload.get("selectors")
+    selectors = [dict(item) for item in raw_selectors if isinstance(item, Mapping)] if isinstance(raw_selectors, list) else []
+    raw_fallback_policy = payload.get("fallback_policy")
+    fallback_policy = [str(item) for item in raw_fallback_policy] if isinstance(raw_fallback_policy, list) else []
+    raw_target_results = payload.get("target_results")
+    target_results = [dict(item) for item in raw_target_results if isinstance(item, Mapping)] if isinstance(raw_target_results, list) else []
+    raw_validation = payload.get("validation")
+    validation = dict(raw_validation) if isinstance(raw_validation, Mapping) else {}
 
     return IROperation(
         id=str(payload.get("id") or "").strip(),
@@ -1531,6 +2004,12 @@ def _deserialize_ir_operation(payload: Mapping[str, Any]) -> IROperation:
         params=params,
         dependencies=dependencies,
         metadata=metadata,  # type: ignore[arg-type]
+        requires=requires,
+        effects=effects,
+        selectors=selectors,
+        fallback_policy=fallback_policy,
+        target_results=target_results,
+        validation=validation,
     )
 
 
@@ -2456,13 +2935,25 @@ async def _refresh_and_enrich_after_success(
     prev_signature = store.get_signature()
     full_refresh_start = time.perf_counter()
 
-    fresh_context = await _refresh_entity_context_with_retry(
-        session_id,
-        manager,
-        tool_name,
-        prev_signature=prev_signature,
-        operation_was_noop=operation_was_noop,
-    )
+    try:
+        fresh_context = await _refresh_entity_context_with_retry(
+            session_id,
+            manager,
+            tool_name,
+            prev_signature=prev_signature,
+            operation_was_noop=operation_was_noop,
+        )
+    except EntityRefreshError as exc:
+        if tool_name in TIMELINE_MODIFYING_TOOLS:
+            raise EntityRefreshError(
+                await _describe_timeline_refresh_failure(
+                    session_id,
+                    manager,
+                    tool_name,
+                    str(exc),
+                )
+            ) from exc
+        raise
 
     store_update_start = time.perf_counter()
     if tool_name in TIMELINE_MODIFYING_TOOLS:
@@ -2601,6 +3092,61 @@ async def _request_feature_snapshot(
 
     manager.set_feature_snapshot(session_id, result)
     return result
+
+
+def _timeline_refresh_diagnostic_from_snapshot(snapshot: Optional[Mapping[str, Any]]) -> Optional[str]:
+    """Classify a timeline refresh failure using feature snapshot metadata."""
+    if not isinstance(snapshot, Mapping):
+        return None
+
+    detail = str(snapshot.get("error") or snapshot.get("message") or "").strip()
+    detail_lower = detail.lower()
+    if snapshot.get("design_type") == "DirectModelingDesignType" or "direct modeling" in detail_lower:
+        return "Fusion reports the design is in Direct Modeling mode, so timeline state cannot be refreshed."
+
+    if snapshot.get("success", True):
+        try:
+            timeline_count = int(snapshot.get("timeline_count") or 0)
+        except (TypeError, ValueError):
+            timeline_count = 0
+        if timeline_count == 0:
+            return "Fusion reports the timeline is empty after the operation."
+        return f"Feature snapshot succeeded with timeline_count={timeline_count}; entity refs are likely stale."
+
+    if detail:
+        return f"Feature snapshot failed: {detail}"
+    return None
+
+
+async def _describe_timeline_refresh_failure(
+    session_id: str,
+    manager: ConnectionManager,
+    tool_name: str,
+    base_error: str,
+) -> str:
+    """Augment timeline refresh failures with direct-modeling/empty/stale diagnostics."""
+    cached_snapshot = _manager_get_feature_snapshot(manager, session_id)
+    cached_diagnostic = _timeline_refresh_diagnostic_from_snapshot(cached_snapshot)
+    if cached_diagnostic and "likely stale" not in cached_diagnostic:
+        return f"{base_error} Diagnostic: {cached_diagnostic}"
+
+    refreshed_snapshot = await _request_feature_snapshot(
+        session_id,
+        manager,
+        reason=f"refresh_failure_{tool_name}",
+        max_features=5,
+    )
+    refreshed_diagnostic = _timeline_refresh_diagnostic_from_snapshot(refreshed_snapshot)
+    if refreshed_diagnostic:
+        return f"{base_error} Diagnostic: {refreshed_diagnostic}"
+
+    store_counts = _get_entity_store(session_id, manager).get_entity_counts()
+    return (
+        f"{base_error} Diagnostic: entity refresh failed after a timeline operation and no "
+        f"conclusive feature snapshot was available. Current store counts: "
+        f"bodies={store_counts['body']} faces={store_counts['face']} edges={store_counts['edge']}. "
+        "Fusion state is likely stale."
+    )
 
 
 async def _wait_for_matching_fusion_message_id(
@@ -3387,13 +3933,28 @@ async def handle_execute_request(
     has_attachments = bool(request.get("attachments")) or bool(request.get("normalized_attachments"))
     if not request.get("user_request") and not request.get("image_data") and not has_attachments:
         raise ValueError("Execution request must include 'user_request', 'image_data', or 'attachments'.")
-
-    max_iterations = int(request.get("max_iterations", DEFAULT_MAX_ITERATIONS))
-    model_name = request.get("model_name")
+    if not AUTH_BYPASS and not manager.is_authenticated(session_id):
+        logger.warning("Rejecting execute request for unauthenticated session %s", session_id)
+        await _send_message_safe(manager, session_id, {
+            "type": "authentication_error",
+            "message": "Authenticate first.",
+        })
+        return
 
     # ========== VISION TRANSLATION ==========
     # If image_data is present, translate sketch to text before processing
     image_data = request.get("image_data")
+    if _is_stop_control_request(request):
+        logger.info("Session %s received stop control request; skipping LLM execution.", session_id)
+        await _send_message_safe(manager, session_id, {
+            "type": "cancelled",
+            "message": "Request cancelled by user",
+        })
+        return
+
+    max_iterations = int(request.get("max_iterations", DEFAULT_MAX_ITERATIONS))
+    model_name = request.get("model_name")
+
     if image_data:
         try:
             from .vision_translator import get_vision_translator
@@ -3630,7 +4191,11 @@ async def _execute_workflow_loop(
     except UnsupportedExecutionTargetError as exc:
         await _send_error(manager, session_id, "Invalid execution target", str(exc))
         return
-    fusion_ir_executor = FusionTargetExecutor(manager, timeout_seconds=EXECUTION_TIMEOUT)
+    fusion_ir_executor = FusionTargetExecutor(
+        manager,
+        timeout_seconds=EXECUTION_TIMEOUT,
+        request=request,
+    )
     ir_doc_state = _get_session_ir_document_state(manager, session_id, execution_target)
     # Track all attempted IR operations (success + failure) so dependency mapping
     # can fail closed when an operation chain breaks mid-turn.
@@ -3680,6 +4245,9 @@ async def _execute_workflow_loop(
             # Fall back to default (all tools) if routing fails
             routed_tools = None
             routed_system_prompt = None
+
+    if routed_system_prompt is None or routed_tools is None:
+        routed_system_prompt, routed_tools = build_full_prompt()
 
     # Track consecutive failures for the same intent across iterations.
     consecutive_tool_failures = 0
@@ -3798,6 +4366,9 @@ async def _execute_workflow_loop(
             )
             return
 
+        available_tools = _filter_tools_for_client_capabilities(routed_tools, request)
+        available_system_prompt = _filter_system_prompt_for_client_capabilities(routed_system_prompt, request)
+
         # Build session context for logging
         session_context = None
         if session_path and request:
@@ -3811,8 +4382,8 @@ async def _execute_workflow_loop(
 
             # Get tool names from routed_tools or all tools
             loaded_tools = None
-            if routed_tools:
-                loaded_tools = [tool.get("name") for tool in routed_tools if "name" in tool]
+            if available_tools:
+                loaded_tools = [tool.get("name") for tool in available_tools if "name" in tool]
 
             # Use latest runtime context for logging, falling back to request context.
             entity_context_for_logging = runtime_entity_context or request.get("entity_context") or {}
@@ -3834,8 +4405,8 @@ async def _execute_workflow_loop(
                 iteration=iteration + 1,
                 max_iterations=max_iterations,
                 capture_phase="pre_llm",
-                system_prompt=routed_system_prompt,  # Actual prompt sent to LLM
-                tools=routed_tools,  # Actual tools sent to LLM
+                system_prompt=available_system_prompt,  # Actual prompt sent to LLM
+                tools=available_tools,  # Actual tools sent to LLM
             )
 
         async def _on_reasoning_delta(delta: str) -> None:
@@ -3851,7 +4422,7 @@ async def _execute_workflow_loop(
             )
 
         # Inject reasoning context from prior iterations into system prompt
-        effective_system_prompt = routed_system_prompt
+        effective_system_prompt = available_system_prompt
         reasoning_ctx = manager.get_reasoning_context(session_id)
         if reasoning_ctx and reasoning_ctx.entries:
             reasoning_injection = reasoning_ctx.get_injection_text()
@@ -3881,7 +4452,7 @@ async def _execute_workflow_loop(
         try:
             response = await call_claude_with_tools(
                 effective_messages,
-                tools=routed_tools,  # Use routed tools if available
+                tools=available_tools,
                 system_prompt=effective_system_prompt,  # Use routed prompt with reasoning context
                 model_name=model_name,
                 reasoning_effort=reasoning_effort,
@@ -4084,12 +4655,29 @@ async def _execute_workflow_loop(
                 tool_input = dict(raw_tool_input)
             else:
                 tool_input = {}
+            tool_input = _canonicalize_sketch_tool_input(session_id, manager, tool_name, tool_input)
+            if tool_input != raw_tool_input:
+                tool_call = dict(tool_call)
+                tool_call["input"] = tool_input
 
             description = str(tool_input.get("description", "") or "").strip()
             if not description and assistant_text:
                 description = assistant_text
             tool_intent_key = _build_tool_intent_key(tool_name, tool_input)
             logger.info("Session %s executing tool '%s' (id=%s)", session_id, tool_name, tool_use_id)
+
+            if tool_name in TIMELINE_SUPPRESSION_TOOLS and not _client_supports_timeline_feature_suppression(request):
+                error_text = (
+                    f"Tool '{tool_name}' requires an add-in version with "
+                    f"'{TIMELINE_SUPPRESSION_CAPABILITY}' capability."
+                )
+                await _send_error(manager, session_id, "Unsupported add-in capability", error_text)
+                messages.append(_tool_result_message(tool_use_id, error_text, is_error=True))
+                iteration_had_failure = True
+                if iteration_first_failure_intent is None:
+                    iteration_first_failure_intent = tool_intent_key
+                logger.warning("Session %s rejected unsupported tool '%s'.", session_id, tool_name)
+                continue
 
             defer_text = _maybe_defer_face_sketch_followup(
                 tool_name,
@@ -4294,6 +4882,17 @@ async def _execute_workflow_loop(
                     ).strip()
                     if sketch_fallback and "sketch_id" not in raw_result_payload:
                         raw_result_payload["sketch_id"] = sketch_fallback
+                    if tool_name == "create_sketch" and "sketch_name" not in raw_result_payload:
+                        sketch_name_fallback = str(
+                            (
+                                (executed_input or {}).get("sketch_name")
+                                or (resolved_ir_input or {}).get("sketch_name")
+                                or tool_input.get("sketch_name")
+                                or ""
+                            )
+                        ).strip()
+                        if sketch_name_fallback:
+                            raw_result_payload["sketch_name"] = sketch_name_fallback
                     if plane_fallback and "plane_id_input" not in raw_result_payload:
                         raw_result_payload["plane_id_input"] = plane_fallback
 
@@ -5415,6 +6014,10 @@ async def handle_revert_request(
         success = result.get("success", False)
 
         if success:
+            try:
+                geometry_reverted = _parse_strict_bool(result.get("geometry_reverted"), default=True)
+            except ValueError:
+                geometry_reverted = False
             trimmed_length = manager.trim_conversation_to_index(
                 session_id,
                 conversation_index,
@@ -5422,8 +6025,14 @@ async def handle_revert_request(
             )
             manager.prune_checkpoints_after(session_id, conversation_index)
             manager.prune_operation_checkpoints_after(session_id, conversation_index)
-            await _restore_message_checkpoint_runtime_state(session_id, manager, checkpoint, conversation_index)
-            logger.debug("Restored runtime state after revert for session %s", session_id)
+            if geometry_reverted:
+                await _restore_message_checkpoint_runtime_state(session_id, manager, checkpoint, conversation_index)
+                logger.debug("Restored runtime state after geometry revert for session %s", session_id)
+            else:
+                logger.debug(
+                    "Skipped runtime state restore after chat-only revert for session %s; geometry was unchanged.",
+                    session_id,
+                )
 
             await _send_message_safe(manager, session_id, {
                 "type": "revert_applied",
@@ -5431,17 +6040,27 @@ async def handle_revert_request(
                 "conversation_index": conversation_index,
                 "conversation_length": trimmed_length,
                 "include_message": False,
+                "timeline_reverted": geometry_reverted,
             })
 
-            # Notify user of successful revert
-            success_message = f"Timeline reverted to: \"{message_text}\""
+            if geometry_reverted:
+                log_level = "success"
+                success_message = f"Timeline reverted to: \"{message_text}\""
+            else:
+                log_level = "info"
+                success_message = f"Chat history reverted to: \"{message_text}\"; model geometry was not changed."
             await _send_message_safe(manager, session_id, {
                 "type": "log",
-                "level": "success",
+                "level": log_level,
                 "message": success_message,
                 "scope": "global",
             })
-            logger.info("Session %s: successfully reverted to checkpoint %s", session_id, message_id)
+            logger.info(
+                "Session %s: reverted to checkpoint %s (geometry_reverted=%s)",
+                session_id,
+                message_id,
+                geometry_reverted,
+            )
         else:
             error_detail = result.get("error") or result.get("message") or "Unknown error"
             timeline_unavailable = "Timeline not available" in error_detail
@@ -5454,8 +6073,10 @@ async def handle_revert_request(
                 )
                 manager.prune_checkpoints_after(session_id, conversation_index)
                 manager.prune_operation_checkpoints_after(session_id, conversation_index)
-                await _restore_message_checkpoint_runtime_state(session_id, manager, checkpoint, conversation_index)
-                logger.debug("Restored runtime state after timeline-unavailable revert for session %s", session_id)
+                logger.debug(
+                    "Skipped runtime state restore after timeline-unavailable chat revert for session %s; geometry was unchanged.",
+                    session_id,
+                )
 
                 await _send_message_safe(manager, session_id, {
                     "type": "revert_applied",
@@ -5466,19 +6087,15 @@ async def handle_revert_request(
                     "timeline_reverted": False,
                 })
 
-                warning_message = (
-                    "Timeline could not be rewound because this design does not expose a timeline. "
-                    "Conversation history has been rolled back to keep the agent in sync, "
-                    "but any geometry changes remain in the model."
-                )
+                info_message = f"Chat history reverted to: \"{message_text}\"; model geometry was not changed."
                 await _send_message_safe(manager, session_id, {
                     "type": "log",
-                    "level": "warning",
-                    "message": warning_message,
+                    "level": "info",
+                    "message": info_message,
                     "scope": "global",
                 })
 
-                logger.warning(
+                logger.info(
                     "Session %s: timeline unavailable during revert for checkpoint %s; "
                     "conversation trimmed but geometry unchanged.",
                     session_id,
@@ -5555,6 +6172,22 @@ async def handle_resume_operation_request(
         error_text = f"Failed to restore operation checkpoint: {error_detail}"
         await _send_error(manager, session_id, "Resume failed", error_text)
         logger.error("Session %s: operation resume failed: %s", session_id, error_text)
+        return
+
+    try:
+        geometry_reverted = _parse_strict_bool(result.get("geometry_reverted"), default=True)
+    except ValueError:
+        geometry_reverted = False
+    if not geometry_reverted:
+        message = result.get("message") or (
+            "This design does not expose a Fusion timeline; cannot resume an operation checkpoint without reverting geometry."
+        )
+        await _send_error(manager, session_id, "Resume unavailable", str(message))
+        logger.warning(
+            "Session %s: operation resume skipped for checkpoint %s because geometry was not reverted.",
+            session_id,
+            checkpoint_id,
+        )
         return
 
     manager.clear_entity_store(session_id)
@@ -9218,9 +9851,15 @@ def _register_sketch_plane_metadata(
 ) -> None:
     sketch_store = _get_sketch_entity_store(session_id, manager)
     plane_id_input = str(result.get("plane_id_input") or fallback_plane_id or "").strip()
+    sketch_name = str(result.get("sketch_name") or result.get("name") or "").strip()
+    aliases = [alias for alias in (sketch_name, result.get("display_name")) if isinstance(alias, str) and alias.strip()]
     metadata: Dict[str, Any] = {
         "plane_id_input": plane_id_input,
     }
+    if sketch_name:
+        metadata["sketch_name"] = sketch_name
+    if aliases:
+        metadata["aliases"] = aliases
 
     face_token = _resolve_face_token_for_plane_id(session_id, manager, plane_id_input)
     if not face_token:
@@ -9411,7 +10050,8 @@ def _find_cached_sketch_profile_snapshot(
     sketch_id: str,
 ) -> Tuple[Optional[Dict[str, Any]], bool, List[str]]:
     sketch_store = _get_sketch_entity_store(session_id, manager)
-    metadata = sketch_store.get_sketch_metadata(sketch_id)
+    canonical_sketch_id = sketch_store.resolve_sketch_id(sketch_id) or sketch_id
+    metadata = sketch_store.get_sketch_metadata(canonical_sketch_id)
     if metadata.get("profile_count") is not None or isinstance(metadata.get("profiles"), list):
         return dict(metadata), True, []
 
@@ -9430,8 +10070,29 @@ def _find_cached_sketch_profile_snapshot(
             str(sketch.get("name") or "").strip(),
         ]
         available.extend(name for name in candidate_names if name and name not in available)
-        if sketch_id in candidate_names:
-            return dict(sketch), True, available
+        for candidate_name in candidate_names:
+            if not candidate_name:
+                continue
+            resolved_candidate = sketch_store.resolve_sketch_id(candidate_name)
+            if candidate_name == canonical_sketch_id or resolved_candidate == canonical_sketch_id:
+                sketch_store.register_sketch_alias(canonical_sketch_id, candidate_name)
+                merged = dict(metadata)
+                merged.update(dict(sketch))
+                return merged, True, available
+
+    normalized_target = re.sub(r"[^a-z0-9]", "", str(canonical_sketch_id).lower())
+    if normalized_target:
+        for sketch in sketches:
+            if not isinstance(sketch, Mapping):
+                continue
+            for raw_name in (sketch.get("sketch_id"), sketch.get("id"), sketch.get("name")):
+                candidate_name = str(raw_name or "").strip()
+                normalized_candidate = re.sub(r"[^a-z0-9]", "", candidate_name.lower())
+                if candidate_name and normalized_candidate == normalized_target:
+                    sketch_store.register_sketch_alias(canonical_sketch_id, candidate_name)
+                    merged = dict(metadata)
+                    merged.update(dict(sketch))
+                    return merged, True, available
 
     return None, False, available
 
@@ -9991,12 +10652,32 @@ def _validate_adjust_feature_parameters(tool_input: Mapping[str, Any]) -> Dict[s
         "diameter_unit",
         "depth",
         "depth_unit",
+        "radius",
+        "radius_unit",
+        "chamfer_distance",
+        "chamfer_distance_unit",
+        "inside_thickness",
+        "inside_thickness_unit",
+        "outside_thickness",
+        "outside_thickness_unit",
+        "rectangular_count_one",
+        "rectangular_spacing_one",
+        "rectangular_spacing_one_unit",
+        "rectangular_count_two",
+        "rectangular_spacing_two",
+        "rectangular_spacing_two_unit",
+        "circular_count",
+        "circular_total_angle",
+        "circular_total_angle_unit",
     }
     param_extra = set(parameters.keys()) - allowed_params
     if param_extra:
         raise SelectionToolCallError(
             f"adjust_feature_parameters does not support parameter(s): {sorted(param_extra)}. "
-            "Supported parameters are name, distance, diameter, and depth with optional units."
+            "Supported parameters are name, distance, diameter, depth, radius, chamfer_distance, "
+            "inside_thickness, outside_thickness, rectangular_count_one, rectangular_spacing_one, "
+            "rectangular_count_two, rectangular_spacing_two, circular_count, and circular_total_angle "
+            "with the corresponding optional unit fields."
         )
 
     cleaned_params: Dict[str, Any] = {}
@@ -10006,7 +10687,32 @@ def _validate_adjust_feature_parameters(tool_input: Mapping[str, Any]) -> Dict[s
             raise SelectionToolCallError("'parameters.name' must be non-empty when provided.")
         cleaned_params["name"] = name[:120]
 
-    for numeric_key in ("distance", "diameter", "depth"):
+    length_keys = (
+        "distance",
+        "diameter",
+        "depth",
+        "radius",
+        "chamfer_distance",
+        "inside_thickness",
+        "outside_thickness",
+        "rectangular_spacing_one",
+        "rectangular_spacing_two",
+    )
+    count_keys = ("rectangular_count_one", "rectangular_count_two", "circular_count")
+    angle_keys = ("circular_total_angle",)
+    length_unit_keys = (
+        "distance_unit",
+        "diameter_unit",
+        "depth_unit",
+        "radius_unit",
+        "chamfer_distance_unit",
+        "inside_thickness_unit",
+        "outside_thickness_unit",
+        "rectangular_spacing_one_unit",
+        "rectangular_spacing_two_unit",
+    )
+
+    for numeric_key in length_keys:
         if numeric_key not in parameters:
             continue
         value = parameters.get(numeric_key)
@@ -10014,7 +10720,26 @@ def _validate_adjust_feature_parameters(tool_input: Mapping[str, Any]) -> Dict[s
             raise SelectionToolCallError(f"'parameters.{numeric_key}' must be a positive number.")
         cleaned_params[numeric_key] = float(value)
 
-    for unit_key in ("distance_unit", "diameter_unit", "depth_unit"):
+    for numeric_key in count_keys:
+        if numeric_key not in parameters:
+            continue
+        value = parameters.get(numeric_key)
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(float(value)):
+            raise SelectionToolCallError(f"'parameters.{numeric_key}' must be a positive integer.")
+        value_float = float(value)
+        if value_float <= 0 or not value_float.is_integer():
+            raise SelectionToolCallError(f"'parameters.{numeric_key}' must be a positive integer.")
+        cleaned_params[numeric_key] = int(value_float)
+
+    for numeric_key in angle_keys:
+        if numeric_key not in parameters:
+            continue
+        value = parameters.get(numeric_key)
+        if not isinstance(value, (int, float)) or not math.isfinite(float(value)) or float(value) == 0:
+            raise SelectionToolCallError(f"'parameters.{numeric_key}' must be a finite non-zero number.")
+        cleaned_params[numeric_key] = float(value)
+
+    for unit_key in length_unit_keys:
         if unit_key not in parameters:
             continue
         unit = str(parameters.get(unit_key) or "").strip().lower()
@@ -10022,8 +10747,19 @@ def _validate_adjust_feature_parameters(tool_input: Mapping[str, Any]) -> Dict[s
             raise SelectionToolCallError(f"'parameters.{unit_key}' must be one of ['mm', 'cm', 'm', 'in'].")
         cleaned_params[unit_key] = unit
 
-    if not any(key in cleaned_params for key in ("name", "distance", "diameter", "depth")):
-        raise SelectionToolCallError("Provide at least one editable parameter: name, distance, diameter, or depth.")
+    if "circular_total_angle_unit" in parameters:
+        unit = str(parameters.get("circular_total_angle_unit") or "").strip().lower()
+        if unit not in {"deg", "rad"}:
+            raise SelectionToolCallError("'parameters.circular_total_angle_unit' must be one of ['deg', 'rad'].")
+        cleaned_params["circular_total_angle_unit"] = unit
+
+    if not any(key in cleaned_params for key in {"name", *length_keys, *count_keys, *angle_keys}):
+        raise SelectionToolCallError(
+            "Provide at least one editable parameter: name, distance, diameter, depth, radius, "
+            "chamfer_distance, inside_thickness, outside_thickness, rectangular_count_one, "
+            "rectangular_spacing_one, rectangular_count_two, rectangular_spacing_two, "
+            "circular_count, or circular_total_angle."
+        )
 
     cleaned: Dict[str, Any] = {
         "feature_token": feature_token,
@@ -10036,10 +10772,50 @@ def _validate_adjust_feature_parameters(tool_input: Mapping[str, Any]) -> Dict[s
 
     expected_index = tool_input.get("expected_timeline_index")
     if expected_index is not None:
+        if isinstance(expected_index, bool):
+            raise SelectionToolCallError("'expected_timeline_index' must be an integer when provided.")
         try:
             cleaned["expected_timeline_index"] = int(expected_index)
         except (TypeError, ValueError):
             raise SelectionToolCallError("'expected_timeline_index' must be an integer when provided.")
+        if cleaned["expected_timeline_index"] < 0:
+            raise SelectionToolCallError("'expected_timeline_index' must be >= 0 when provided.")
+
+    return cleaned
+
+
+def _validate_feature_identity_tool_input(tool_name: str, tool_input: Mapping[str, Any]) -> Dict[str, Any]:
+    """Validate feature-token based timeline mutations before sending them to Fusion."""
+    allowed_top_level = {
+        "feature_token",
+        "expected_name",
+        "expected_timeline_index",
+        "description",
+    }
+    extra = set(tool_input.keys()) - allowed_top_level
+    if extra:
+        raise SelectionToolCallError(f"{tool_name} received unexpected parameter(s): {sorted(extra)}")
+
+    feature_token = str(tool_input.get("feature_token") or "").strip()
+    if not feature_token:
+        raise SelectionToolCallError(f"{tool_name} requires a non-empty 'feature_token'.")
+
+    cleaned: Dict[str, Any] = {"feature_token": feature_token}
+
+    expected_name = str(tool_input.get("expected_name") or "").strip()
+    if expected_name:
+        cleaned["expected_name"] = expected_name
+
+    expected_index = tool_input.get("expected_timeline_index")
+    if expected_index is not None:
+        if isinstance(expected_index, bool):
+            raise SelectionToolCallError("'expected_timeline_index' must be an integer when provided.")
+        try:
+            cleaned["expected_timeline_index"] = int(expected_index)
+        except (TypeError, ValueError):
+            raise SelectionToolCallError("'expected_timeline_index' must be an integer when provided.")
+        if cleaned["expected_timeline_index"] < 0:
+            raise SelectionToolCallError("'expected_timeline_index' must be >= 0 when provided.")
 
     return cleaned
 
@@ -10072,6 +10848,14 @@ async def _execute_feature_tool_call(
         cleaned = _validate_adjust_feature_parameters(tool_input)
         payload["feature_token"] = cleaned["feature_token"]
         payload["parameters"] = cleaned["parameters"]
+        if "expected_name" in cleaned:
+            payload["expected_name"] = cleaned["expected_name"]
+        if "expected_timeline_index" in cleaned:
+            payload["expected_timeline_index"] = cleaned["expected_timeline_index"]
+
+    elif tool_name in {"suppress_feature", "unsuppress_feature"}:
+        cleaned = _validate_feature_identity_tool_input(tool_name, tool_input)
+        payload["feature_token"] = cleaned["feature_token"]
         if "expected_name" in cleaned:
             payload["expected_name"] = cleaned["expected_name"]
         if "expected_timeline_index" in cleaned:
@@ -10820,6 +11604,23 @@ async def _execute_feature_tool_call(
                 lines.append(f"timeline_index={timeline_index}")
             if changed:
                 lines.append(f"changed_parameters={changed}")
+        message_text = "\n".join(lines)
+
+    elif tool_name in {"suppress_feature", "unsuppress_feature"}:
+        lines = [message_text]
+        if success:
+            feature_type = result.get("feature_type")
+            feature_name = result.get("feature_name")
+            timeline_index = result.get("timeline_index")
+            is_suppressed = result.get("is_suppressed")
+            if feature_type:
+                lines.append(f"feature_type={feature_type}")
+            if feature_name:
+                lines.append(f"feature_name={feature_name}")
+            if timeline_index is not None:
+                lines.append(f"timeline_index={timeline_index}")
+            if is_suppressed is not None:
+                lines.append(f"is_suppressed={is_suppressed}")
         message_text = "\n".join(lines)
 
     return success, message_text, result

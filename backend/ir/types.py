@@ -51,6 +51,7 @@ IROperationType = Literal[
     "pattern_feature",
     "list_features",
     "delete_feature",
+    "set_feature_suppression",
     "jump_to_timeline_position",
     "select_entities",
     "clear_selection",
@@ -288,6 +289,15 @@ class DeleteFeatureParams:
 
 
 @dataclass(frozen=True)
+class FeatureSuppressionParams:
+    feature_ref: str
+    suppress: bool
+    description: str = ""
+    expected_name: Optional[str] = None
+    expected_timeline_index: Optional[int] = None
+
+
+@dataclass(frozen=True)
 class JumpToTimelinePositionParams:
     target_index: int
     reason: str = ""
@@ -327,6 +337,7 @@ IRParams = Union[
     PatternFeatureParams,
     ListFeaturesParams,
     DeleteFeatureParams,
+    FeatureSuppressionParams,
     JumpToTimelinePositionParams,
     SelectEntitiesParams,
     ClearSelectionParams,

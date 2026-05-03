@@ -24,6 +24,7 @@ from .types import (
     DeleteFeatureParams,
     ExtrudeParams,
     ExternalThreadParams,
+    FeatureSuppressionParams,
     FilletParams,
     IROperation,
     JumpToTimelinePositionParams,
@@ -503,6 +504,27 @@ def validate_operation(operation: IROperation) -> List[str]:
                 and params.expected_timeline_index < 0
             ):
                 errors.append("delete_feature expected_timeline_index must be >= 0")
+        return errors
+
+    if operation.type == "set_feature_suppression":
+        params = operation.params
+        if not isinstance(params, FeatureSuppressionParams):
+            errors.append("set_feature_suppression params must be FeatureSuppressionParams")
+            return errors
+        if not _is_nonempty_string(params.feature_ref):
+            errors.append("set_feature_suppression feature_ref must be provided")
+        if not isinstance(params.suppress, bool):
+            errors.append("set_feature_suppression suppress must be a boolean")
+        if params.expected_timeline_index is not None:
+            if (
+                _check_finite_number(
+                    params.expected_timeline_index,
+                    "set_feature_suppression expected_timeline_index",
+                    errors,
+                )
+                and params.expected_timeline_index < 0
+            ):
+                errors.append("set_feature_suppression expected_timeline_index must be >= 0")
         return errors
 
     if operation.type == "jump_to_timeline_position":

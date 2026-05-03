@@ -18,6 +18,7 @@ from ...ir.types import (
     DeleteFeatureParams,
     ExtrudeParams,
     ExternalThreadParams,
+    FeatureSuppressionParams,
     FilletParams,
     IROperation,
     JumpToTimelinePositionParams,
@@ -297,6 +298,19 @@ def translate_ir_to_fusion_tool_call(operation: IROperation) -> Tuple[str, Dict[
         if params.expected_timeline_index is not None:
             tool_input["expected_timeline_index"] = params.expected_timeline_index
         return "delete_feature", tool_input
+
+    if operation.type == "set_feature_suppression":
+        params = operation.params
+        if not isinstance(params, FeatureSuppressionParams):
+            raise ValueError("set_feature_suppression IR params shape mismatch")
+        tool_input = {
+            "feature_token": params.feature_ref,
+            "description": params.description or ("Suppress feature" if params.suppress else "Unsuppress feature"),
+            "expected_name": params.expected_name or "",
+        }
+        if params.expected_timeline_index is not None:
+            tool_input["expected_timeline_index"] = params.expected_timeline_index
+        return ("suppress_feature" if params.suppress else "unsuppress_feature"), tool_input
 
     if operation.type == "fillet":
         params = operation.params

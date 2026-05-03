@@ -7,6 +7,7 @@ sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[1]
 os.environ.setdefault("OPENAI_API_KEY", "test-key")
 
 from backend import prompt_router
+from backend.llm_client import TOOLS
 from backend.prompt_router import (
     _fallback_routing,
     _extract_conversation_context,
@@ -16,6 +17,7 @@ from backend.prompt_router import (
     get_routing_summary,
     ROUTING_PATTERNS,
 )
+from backend.prompt_structure import CLUSTER_TOOL_MAPPING, get_cluster_tools, get_tool_catalog_text
 
 
 # ------------------------------------------------------------------ #
@@ -51,6 +53,53 @@ def test_fallback_hole_keywords():
     result = _fallback_routing("drill a hole in the top face")
     assert "holes" in result["required"]
     assert "inspection" in result["required"]
+
+
+def test_fallback_casing_with_ventilation_loads_full_enclosure_tools():
+    result = _fallback_routing(
+        "Create a casing for a raspberry pi zero 2w for me. "
+        "Make sure there are ventilation holes in the sides and make it open top entirely."
+    )
+
+    for cluster in ["design_exploration", "sketch_tools", "3d_modeling", "holes", "modification", "inspection"]:
+        assert cluster in result["required"]
+
+
+def test_fallback_delete_feature_loads_timeline_tools():
+    result = _fallback_routing("please delete the feature that created this hole")
+
+    assert "inspection" in result["required"]
+    assert "timeline" in result["required"]
+
+
+def test_fallback_remove_last_extrude_loads_timeline_tools():
+    result = _fallback_routing("remove the last extrude")
+
+    assert "inspection" in result["required"]
+    assert "timeline" in result["required"]
+
+
+def test_fallback_suppress_feature_loads_timeline_tools():
+    result = _fallback_routing("suppress the shell feature")
+
+    assert "inspection" in result["required"]
+    assert "timeline" in result["required"]
+
+
+def test_timeline_cluster_does_not_expose_jump_tool():
+    timeline_tool_names = CLUSTER_TOOL_MAPPING["timeline"]["tools"]
+    loaded_tool_names = [tool["name"] for tool in get_cluster_tools(["timeline"])]
+
+    assert "jump_to_timeline_position" not in timeline_tool_names
+    assert "jump_to_timeline_position" not in loaded_tool_names
+
+
+def test_agent_facing_tool_catalog_and_schemas_do_not_expose_jump_tool():
+    tool_names = [tool["name"] for tool in TOOLS]
+    catalog_text = get_tool_catalog_text()
+
+    assert "jump_to_timeline_position" not in tool_names
+    assert "jump_to_timeline_position" not in catalog_text
 
 
 def test_fallback_thread_keywords():

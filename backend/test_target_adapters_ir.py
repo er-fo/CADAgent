@@ -16,8 +16,10 @@ try:
         AddRectangleParams,
         CreateConstructionPlaneParams,
         CreateSketchParams,
+        DeleteFeatureParams,
         ExtrudeParams,
         ExternalThreadParams,
+        FeatureSuppressionParams,
         FilletParams,
         IRDocument,
         IROperation,
@@ -39,8 +41,10 @@ except ImportError:  # pragma: no cover
         AddRectangleParams,
         CreateConstructionPlaneParams,
         CreateSketchParams,
+        DeleteFeatureParams,
         ExtrudeParams,
         ExternalThreadParams,
+        FeatureSuppressionParams,
         FilletParams,
         IRDocument,
         IROperation,
@@ -169,6 +173,32 @@ def test_fusion_translator_covers_widened_ir_operations():
     assert tool_input["radius"] == 3.0
     assert tool_input["radius_unit"] == "mm"
 
+    suppress = IROperation(
+        id="op_suppress",
+        type="set_feature_suppression",
+        params=FeatureSuppressionParams(
+            feature_ref="feature-token-1",
+            suppress=True,
+            description="Temporarily disable shell",
+            expected_name="Shell1",
+            expected_timeline_index=7,
+        ),
+    )
+    tool_name, tool_input = translate_ir_to_fusion_tool_call(suppress)
+    assert tool_name == "suppress_feature"
+    assert tool_input["feature_token"] == "feature-token-1"
+    assert tool_input["expected_name"] == "Shell1"
+    assert tool_input["expected_timeline_index"] == 7
+
+    unsuppress = IROperation(
+        id="op_unsuppress",
+        type="set_feature_suppression",
+        params=FeatureSuppressionParams(feature_ref="feature-token-1", suppress=False),
+    )
+    tool_name, tool_input = translate_ir_to_fusion_tool_call(unsuppress)
+    assert tool_name == "unsuppress_feature"
+    assert tool_input["feature_token"] == "feature-token-1"
+
 
 class _FusionExecutorManager:
     def __init__(self, store: EntityStore, result: dict):
@@ -215,6 +245,130 @@ def test_fusion_executor_resolves_ir_feature_refs_before_payload_send():
         assert manager.sent_messages[0]["type"] == "feature_operation"
         assert manager.sent_messages[0]["parameters"]["entity_tokens"] == ["edge_token_0"]
         assert "edge_refs" not in manager.sent_messages[0]["parameters"]
+
+    asyncio.run(_run())
+
+
+def test_fusion_executor_sends_suppression_ir_as_feature_payload():
+    async def _run():
+        manager = _FusionExecutorManager(
+            EntityStore(),
+            {"tool_use_id": "toolu_suppress", "success": True, "message": "suppressed"},
+        )
+        executor = FusionTargetExecutor(manager)  # type: ignore[arg-type]
+        result = await executor.execute_operation(
+            "s-fusion-ir",
+            IROperation(
+                id="op_suppress",
+                type="set_feature_suppression",
+                params=FeatureSuppressionParams(
+                    feature_ref="feature-token-1",
+                    suppress=True,
+                    expected_name="Shell1",
+                    expected_timeline_index=7,
+                ),
+            ),
+            tool_use_id="toolu_suppress",
+        )
+
+        assert result.success
+        payload = manager.sent_messages[0]
+        assert payload["type"] == "feature_operation"
+        assert payload["operation"] == "suppress_feature"
+        assert payload["parameters"]["feature_token"] == "feature-token-1"
+        assert payload["parameters"]["expected_name"] == "Shell1"
+        assert payload["parameters"]["expected_timeline_index"] == 7
+
+    asyncio.run(_run())
+
+
+def test_fusion_executor_sends_unsuppression_ir_as_feature_payload():
+    async def _run():
+        manager = _FusionExecutorManager(
+            EntityStore(),
+            {"tool_use_id": "toolu_unsuppress", "success": True, "message": "unsuppressed"},
+        )
+        executor = FusionTargetExecutor(manager)  # type: ignore[arg-type]
+        result = await executor.execute_operation(
+            "s-fusion-ir",
+            IROperation(
+                id="op_unsuppress",
+                type="set_feature_suppression",
+                params=FeatureSuppressionParams(feature_ref="feature-token-1", suppress=False),
+            ),
+            tool_use_id="toolu_unsuppress",
+        )
+
+        assert result.success
+        payload = manager.sent_messages[0]
+        assert payload["type"] == "feature_operation"
+        assert payload["operation"] == "unsuppress_feature"
+        assert payload["parameters"]["feature_token"] == "feature-token-1"
+
+    asyncio.run(_run())
+
+
+def test_fusion_executor_falls_back_to_codegen_delete_without_client_capability():
+    async def _run():
+        manager = _FusionExecutorManager(
+            EntityStore(),
+            {"tool_use_id": "toolu_delete", "success": True, "message": "deleted via codegen"},
+        )
+        executor = FusionTargetExecutor(manager, request={})  # type: ignore[arg-type]
+        result = await executor.execute_operation(
+            "s-fusion-ir",
+            IROperation(
+                id="op_delete",
+                type="delete_feature",
+                params=DeleteFeatureParams(
+                    feature_ref="feature-token-1",
+                    expected_name="Shell1",
+                    expected_timeline_index=7,
+                ),
+            ),
+            tool_use_id="toolu_delete",
+        )
+
+        assert result.success
+        payload = manager.sent_messages[0]
+        assert payload["type"] == "execute_code"
+        assert payload["operation"] == "delete_feature"
+        assert "feature-token-1" in payload["code"]
+
+    asyncio.run(_run())
+
+
+def test_fusion_executor_sends_delete_feature_payload_when_capability_declared():
+    async def _run():
+        manager = _FusionExecutorManager(
+            EntityStore(),
+            {"tool_use_id": "toolu_delete", "success": True, "message": "deleted"},
+        )
+        executor = FusionTargetExecutor(
+            manager,
+            request={"client_capabilities": {"timeline_feature_delete": True}},
+        )  # type: ignore[arg-type]
+        result = await executor.execute_operation(
+            "s-fusion-ir",
+            IROperation(
+                id="op_delete",
+                type="delete_feature",
+                params=DeleteFeatureParams(
+                    feature_ref="feature-token-1",
+                    expected_name="Shell1",
+                    expected_timeline_index=7,
+                ),
+            ),
+            tool_use_id="toolu_delete",
+        )
+
+        assert result.success
+        payload = manager.sent_messages[0]
+        assert payload["type"] == "feature_operation"
+        assert payload["operation"] == "delete_feature"
+        assert payload["parameters"]["feature_token"] == "feature-token-1"
+        assert payload["parameters"]["expected_name"] == "Shell1"
+        assert payload["parameters"]["expected_timeline_index"] == 7
 
     asyncio.run(_run())
 

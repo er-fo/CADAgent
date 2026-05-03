@@ -1,4 +1,5 @@
 import asyncio
+from dataclasses import replace
 import json
 
 import pytest
@@ -255,6 +256,53 @@ async def test_handle_revert_request_restores_ir_state_from_message_checkpoint()
 
 
 @pytest.mark.asyncio
+async def test_handle_revert_request_chat_only_when_timeline_unavailable() -> None:
+    manager = ConnectionManager()
+    session_id = "session-message-revert-chat-only"
+    websocket = FakeWebSocket()
+    manager.active_connections[session_id] = websocket
+    manager.pending_results[session_id] = asyncio.Queue()
+    manager.conversation_history[session_id] = [
+        {"role": "user", "content": "create direct body"},
+        {"role": "assistant", "content": "created direct body"},
+        {"role": "user", "content": "future request"},
+    ]
+
+    checkpoint = {
+        "message_id": "msg_chat_only",
+        "conversation_index": 2,
+        "marker_position": 0,
+        "timeline_count": 0,
+        "message_text": "future request",
+        "feature_snapshot": {"success": True, "timeline_count": 0, "marker_position": 0},
+        "latest_entity_context": {"bodies": [], "faces": [], "edges": []},
+    }
+    manager.save_checkpoint(session_id, checkpoint)
+    manager.set_feature_snapshot(session_id, {"success": True, "timeline_count": 0, "current": "direct-body"})
+    manager.set_latest_entity_context(session_id, {"bodies": [{"name": "current body"}], "faces": [], "edges": []})
+
+    await manager.pending_results[session_id].put({
+        "success": True,
+        "message_id": "msg_chat_only",
+        "geometry_reverted": "false",
+        "message": "Chat history rollback only; this design does not expose a Fusion timeline.",
+    })
+
+    await handle_revert_request(session_id, {"message_id": "msg_chat_only"}, manager)
+
+    assert websocket.sent[0]["type"] == "revert_timeline"
+    revert_applied = next(message for message in websocket.sent if message["type"] == "revert_applied")
+    assert revert_applied["timeline_reverted"] is False
+    log_messages = [message for message in websocket.sent if message.get("type") == "log"]
+    assert log_messages[-1]["level"] == "info"
+    assert log_messages[-1]["message"] == 'Chat history reverted to: "future request"; model geometry was not changed.'
+    assert not any(message.get("type") == "error" for message in websocket.sent)
+    assert len(manager.get_conversation_history(session_id)) == 2
+    assert manager.get_feature_snapshot(session_id) == {"success": True, "timeline_count": 0, "current": "direct-body"}
+    assert manager.get_latest_entity_context(session_id) == {"bodies": [{"name": "current body"}], "faces": [], "edges": []}
+
+
+@pytest.mark.asyncio
 async def test_handle_revert_request_uses_operation_checkpoint_ir_fallback() -> None:
     manager = ConnectionManager()
     session_id = "session-message-revert-legacy"
@@ -315,6 +363,214 @@ def test_prune_operation_checkpoints_after_conversation_index() -> None:
     assert [cp["checkpoint_id"] for cp in manager.get_operation_checkpoints(session_id)] == ["keep"]
 
 
+def test_ir_document_state_round_trips_timeline_feature_suppression() -> None:
+    session_id = "session-ir-suppression"
+    state = IRDocumentState(metadata={"source": "fusion", "session_id": session_id})
+    suppression = map_tool_call_to_ir(
+        {
+            "name": "suppress_feature",
+            "input": {
+                "feature_token": "feature-token-1",
+                "expected_name": "Shell1",
+                "expected_timeline_index": 7,
+            },
+        },
+        state,
+        metadata={"source": "fusion", "session_id": session_id, "request_id": "r1", "iteration": 1},
+    )
+    state.append(suppression)
+
+    restored = _deserialize_ir_document_state(_serialize_ir_document_state(state))
+
+    assert len(restored.operations) == 1
+    restored_op = restored.operations[0]
+    assert restored_op.type == "set_feature_suppression"
+    assert restored_op.params.feature_ref == "feature-token-1"
+    assert restored_op.params.suppress is True
+    assert restored_op.params.expected_name == "Shell1"
+    assert restored_op.params.expected_timeline_index == 7
+    assert restored.metadata["session_id"] == session_id
+
+
+def test_ir_document_state_round_trips_shell_operation() -> None:
+    session_id = "session-ir-shell"
+    state = IRDocumentState(metadata={"source": "fusion", "session_id": session_id})
+    shell = map_tool_call_to_ir(
+        {
+            "name": "create_shell",
+            "input": {
+                "mode": "open",
+                "face_refs": ["face-token-1", "face-token-2"],
+                "inside_thickness": 1.5,
+                "outside_thickness": 0.25,
+                "is_tangent_chain": False,
+                "shell_type": "rounded",
+                "feature_name": "Lightweight shell",
+            },
+        },
+        state,
+        metadata={"source": "fusion", "session_id": session_id, "request_id": "r1", "iteration": 1},
+    )
+    state.append(shell)
+
+    restored = _deserialize_ir_document_state(_serialize_ir_document_state(state))
+
+    assert len(restored.operations) == 1
+    restored_op = restored.operations[0]
+    assert restored_op.type == "shell"
+    assert restored_op.params.mode == "open"
+    assert restored_op.params.face_refs == ["face-token-1", "face-token-2"]
+    assert restored_op.params.body_refs == []
+    assert restored_op.params.inside_thickness == 1.5
+    assert restored_op.params.outside_thickness == 0.25
+    assert restored_op.params.is_tangent_chain is False
+    assert restored_op.params.shell_type == "rounded"
+    assert restored_op.params.feature_name == "Lightweight shell"
+    assert restored.metadata["session_id"] == session_id
+
+
+def test_ir_document_state_round_trips_profile_inspection_results_for_restore_validation() -> None:
+    session_id = "session-ir-profile-results"
+    state = IRDocumentState(metadata={"source": "fusion", "session_id": session_id})
+
+    create_sketch = map_tool_call_to_ir(
+        {"name": "create_sketch", "input": {"plane_id": "XY", "sketch_id": "profile_sketch"}},
+        state,
+        metadata={"source": "fusion", "session_id": session_id, "request_id": "r1", "iteration": 1},
+    )
+    state.append(create_sketch)
+
+    add_circle = map_tool_call_to_ir(
+        {
+            "name": "add_circle",
+            "input": {
+                "sketch_id": "profile_sketch",
+                "center_u": 0.0,
+                "center_v": 0.0,
+                "radius": 1.0,
+            },
+        },
+        state,
+        metadata={"source": "fusion", "session_id": session_id, "request_id": "r1", "iteration": 2},
+    )
+    state.append(add_circle)
+
+    profile_inspection = map_tool_call_to_ir(
+        {"name": "list_sketch_profiles", "input": {"sketch_id": "profile_sketch"}},
+        state,
+        metadata={"source": "fusion", "session_id": session_id, "request_id": "r1", "iteration": 3},
+    )
+    profile_inspection = replace(
+        profile_inspection,
+        target_results=[
+            {
+                "target": "fusion",
+                "success": True,
+                "raw_result": {
+                    "profile_count": 1,
+                    "profiles": [{"index": 0, "label": "profile_0"}],
+                },
+            }
+        ],
+        validation={"restored": True},
+    )
+    state.append(profile_inspection)
+
+    restored = _deserialize_ir_document_state(_serialize_ir_document_state(state))
+
+    restored_inspection = restored.operations[-1]
+    assert restored_inspection.type == "list_sketch_profiles"
+    assert restored_inspection.target_results[0]["raw_result"]["profile_count"] == 1
+    assert restored_inspection.validation == {"restored": True}
+    assert restored_inspection.effects.creates == {"profiles": ["profile_sketch:profiles"]}
+
+    extrude = map_tool_call_to_ir(
+        {
+            "name": "extrude_profile",
+            "input": {
+                "sketch_id": "profile_sketch",
+                "profile_index": 0,
+                "distance": 1.0,
+                "operation": "NewBody",
+            },
+        },
+        restored,
+        metadata={"source": "fusion", "session_id": session_id, "request_id": "r2", "iteration": 1},
+        dependency_operations=restored.operations,
+    )
+    assert validate_ir_candidate(extrude, restored.operations) == []
+
+
+def test_ir_document_state_round_trips_delete_hole_and_list_features_operations() -> None:
+    session_id = "session-ir-delete-hole-list"
+    state = IRDocumentState(metadata={"source": "fusion", "session_id": session_id})
+
+    hole = map_tool_call_to_ir(
+        {
+            "name": "create_simple_hole",
+            "input": {
+                "face_ref": "face-token-1",
+                "center_x": 1.0,
+                "center_y": 2.0,
+                "center_z": 3.0,
+                "diameter": 4.0,
+                "extent_type": "through_all",
+                "feature_name": "Mount hole",
+            },
+        },
+        state,
+        metadata={"source": "fusion", "session_id": session_id, "request_id": "r1", "iteration": 1},
+    )
+    state.append(hole)
+
+    delete_feature = map_tool_call_to_ir(
+        {
+            "name": "delete_feature",
+            "input": {
+                "feature_token": "feature-token-9",
+                "expected_name": "Hole1",
+                "expected_timeline_index": 12,
+            },
+        },
+        state,
+        metadata={"source": "fusion", "session_id": session_id, "request_id": "r1", "iteration": 2},
+    )
+    state.append(delete_feature)
+
+    list_features = map_tool_call_to_ir(
+        {"name": "list_features", "input": {"description": "Refresh features"}},
+        state,
+        metadata={"source": "fusion", "session_id": session_id, "request_id": "r1", "iteration": 3},
+    )
+    state.append(list_features)
+
+    restored = _deserialize_ir_document_state(_serialize_ir_document_state(state))
+
+    restored_hole, restored_delete, restored_list = restored.operations
+    assert restored_hole.type == "create_simple_hole"
+    assert restored_hole.params.feature_name == "Mount hole"
+    assert restored_delete.type == "delete_feature"
+    assert restored_delete.params.expected_name == "Hole1"
+    assert restored_delete.params.expected_timeline_index == 12
+    assert restored_list.type == "list_features"
+    assert restored_list.params.description == "Refresh features"
+
+
+def test_ir_document_state_rejects_malformed_feature_suppression_bool() -> None:
+    with pytest.raises(ValueError, match="Invalid boolean"):
+        _deserialize_ir_document_state(
+            {
+                "operations": [
+                    {
+                        "id": "op_1",
+                        "type": "set_feature_suppression",
+                        "params": {"feature_ref": "feature-token-1", "suppress": "not-a-bool"},
+                    }
+                ]
+            }
+        )
+
+
 @pytest.mark.asyncio
 async def test_handle_resume_operation_request_rewinds_and_restores_backend_state() -> None:
     manager = ConnectionManager()
@@ -364,3 +620,92 @@ async def test_handle_resume_operation_request_rewinds_and_restores_backend_stat
     assert any(message["type"] == "operation_resume_applied" for message in websocket.sent)
     assert manager.get_conversation_history(session_id)[0]["content"] == "make a cube"
     assert [cp["checkpoint_id"] for cp in manager.get_operation_checkpoints(session_id)] == ["opchk_resume"]
+
+
+@pytest.mark.asyncio
+async def test_handle_resume_operation_request_rejects_chat_only_revert() -> None:
+    manager = ConnectionManager()
+    session_id = "session-op-resume-chat-only"
+    websocket = FakeWebSocket()
+    manager.active_connections[session_id] = websocket
+    manager.pending_results[session_id] = asyncio.Queue()
+    manager.conversation_history[session_id] = [
+        {"role": "user", "content": "future request"},
+        {"role": "assistant", "content": "future response"},
+    ]
+
+    checkpoint = {
+        "checkpoint_id": "opchk_chat_only",
+        "tool_name": "extrude_profile",
+        "display_label": "Extrude profile",
+        "marker_position": 0,
+        "timeline_count": 0,
+        "conversation_index": 1,
+        "conversation_snapshot": [{"role": "user", "content": "old request"}],
+        "latest_entity_context": {"bodies": [{"name": "old body"}]},
+        "feature_snapshot": {"success": True, "timeline_count": 0},
+    }
+    manager.save_operation_checkpoint(session_id, checkpoint)
+    manager.set_latest_entity_context(session_id, {"bodies": [{"name": "current body"}]})
+    manager.set_feature_snapshot(session_id, {"success": True, "timeline_count": 0, "current": True})
+
+    await manager.pending_results[session_id].put({
+        "success": True,
+        "message_id": "opchk_chat_only",
+        "geometry_reverted": False,
+        "message": "Chat history rollback only; this design does not expose a Fusion timeline.",
+    })
+
+    await handle_resume_operation_request(
+        session_id,
+        {"checkpoint_id": "opchk_chat_only"},
+        manager,
+    )
+
+    assert websocket.sent[0]["type"] == "revert_timeline"
+    assert not any(message.get("type") == "operation_resume_applied" for message in websocket.sent)
+    assert any(
+        message.get("type") == "error" and message.get("message") == "Resume unavailable"
+        for message in websocket.sent
+    )
+    assert manager.get_conversation_history(session_id)[0]["content"] == "future request"
+    assert manager.get_latest_entity_context(session_id) == {"bodies": [{"name": "current body"}]}
+    assert manager.get_feature_snapshot(session_id) == {"success": True, "timeline_count": 0, "current": True}
+
+
+@pytest.mark.asyncio
+async def test_handle_resume_operation_request_treats_string_false_as_chat_only() -> None:
+    manager = ConnectionManager()
+    session_id = "session-op-resume-string-false"
+    websocket = FakeWebSocket()
+    manager.active_connections[session_id] = websocket
+    manager.pending_results[session_id] = asyncio.Queue()
+    manager.conversation_history[session_id] = [{"role": "user", "content": "future request"}]
+
+    checkpoint = {
+        "checkpoint_id": "opchk_string_false",
+        "tool_name": "extrude_profile",
+        "marker_position": 0,
+        "timeline_count": 0,
+        "conversation_index": 1,
+        "conversation_snapshot": [{"role": "user", "content": "old request"}],
+    }
+    manager.save_operation_checkpoint(session_id, checkpoint)
+
+    await manager.pending_results[session_id].put({
+        "success": True,
+        "message_id": "opchk_string_false",
+        "geometry_reverted": "false",
+    })
+
+    await handle_resume_operation_request(
+        session_id,
+        {"checkpoint_id": "opchk_string_false"},
+        manager,
+    )
+
+    assert not any(message.get("type") == "operation_resume_applied" for message in websocket.sent)
+    assert any(
+        message.get("type") == "error" and message.get("message") == "Resume unavailable"
+        for message in websocket.sent
+    )

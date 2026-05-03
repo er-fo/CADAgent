@@ -62,6 +62,7 @@ class SketchEntityStore:
         self._constraint_counters: Dict[str, Dict[str, int]] = {}
         self._origin_tokens: Dict[str, str] = {}
         self._sketch_metadata: Dict[str, Dict[str, Any]] = {}
+        self._sketch_aliases: Dict[str, str] = {}
 
     def clear(self) -> None:
         self._entities_by_sketch.clear()
@@ -72,6 +73,7 @@ class SketchEntityStore:
         self._constraint_counters.clear()
         self._origin_tokens.clear()
         self._sketch_metadata.clear()
+        self._sketch_aliases.clear()
 
     def register_entity(
         self,
@@ -173,12 +175,65 @@ class SketchEntityStore:
 
     def register_sketch_metadata(self, sketch_id: str, metadata: Dict[str, Any]) -> None:
         """Attach sketch-level metadata (plane/orientation/bounds) to a sketch id."""
-        self._sketch_metadata[sketch_id] = dict(metadata or {})
+        sketch_key = str(sketch_id or "").strip()
+        if not sketch_key:
+            return
+
+        metadata_copy = dict(metadata or {})
+        self._sketch_metadata[sketch_key] = metadata_copy
+
+        aliases = metadata_copy.get("aliases")
+        if isinstance(aliases, (list, tuple, set)):
+            for alias in aliases:
+                self.register_sketch_alias(sketch_key, str(alias or ""))
+
+        for alias_key in ("sketch_name", "name", "display_name"):
+            alias = metadata_copy.get(alias_key)
+            if isinstance(alias, str):
+                self.register_sketch_alias(sketch_key, alias)
 
     def get_sketch_metadata(self, sketch_id: str) -> Dict[str, Any]:
         """Return a copy of sketch-level metadata for the given sketch id."""
-        metadata = self._sketch_metadata.get(sketch_id, {})
+        resolved_sketch_id = self.resolve_sketch_id(sketch_id) or str(sketch_id or "").strip()
+        metadata = self._sketch_metadata.get(resolved_sketch_id, {})
         return dict(metadata)
+
+    def register_sketch_alias(self, sketch_id: str, alias: str) -> None:
+        """Register an alternate user-visible name for a canonical sketch id."""
+        sketch_key = str(sketch_id or "").strip()
+        alias_key = str(alias or "").strip()
+        if not sketch_key or not alias_key or alias_key == sketch_key:
+            return
+        self._sketch_aliases[alias_key] = sketch_key
+
+    def resolve_sketch_id(self, sketch_id_or_alias: str) -> Optional[str]:
+        """Resolve a sketch id or display-name alias to the canonical sketch id."""
+        key = str(sketch_id_or_alias or "").strip()
+        if not key:
+            return None
+        if (
+            key in self._sketch_metadata
+            or key in self._entities_by_sketch
+            or key in self._origin_tokens
+        ):
+            return key
+        if key in self._sketch_aliases:
+            return self._sketch_aliases[key]
+
+        normalized_key = _normalize_ref_key(key)
+        if not normalized_key:
+            return None
+
+        normalized_aliases = _build_normalized_lookup(self._sketch_aliases)
+        if normalized_key in normalized_aliases:
+            return normalized_aliases[normalized_key]
+
+        known_sketches = {
+            sketch_id: sketch_id
+            for sketch_id in set(self._sketch_metadata) | set(self._entities_by_sketch) | set(self._origin_tokens)
+        }
+        normalized_known = _build_normalized_lookup(known_sketches)
+        return normalized_known.get(normalized_key)
 
     def resolve_ref(self, sketch_id: str, ref_id_or_alias: str) -> Optional[str]:
         if ref_id_or_alias.lower() == "origin":

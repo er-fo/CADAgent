@@ -9,13 +9,18 @@ os.environ.setdefault("OPENAI_API_KEY", "test-key")
 
 from backend.agent_workflow import (
     SelectionToolCallError,
+    _build_failure_intent_key,
     _build_tool_intent_key,
+    _canonicalize_sketch_tool_input,
     _execute_feature_tool_call,
     _execute_geometry_tool_call,
     _execute_workflow_loop,
+    _filter_system_prompt_for_client_capabilities,
+    _filter_tools_for_client_capabilities,
     _format_current_ref_table,
     _get_sketch_entity_store,
     handle_execute_request,
+    _is_stop_control_request,
     _preflight_face_sketch_uv_bounds,
     _preflight_extrude_profile_selection,
     _preflight_hole_center_on_face,
@@ -61,6 +66,77 @@ class _RequestManagerStub:
 
     def get_active_build_plan(self, session_id: str):
         return None
+
+    def is_authenticated(self, session_id: str) -> bool:
+        return True
+
+
+def test_stop_control_request_is_not_routed_to_llm():
+    async def _run():
+        manager = _RequestManagerStub(EntityStore())
+
+        await handle_execute_request(
+            "s-stop-control",
+            {"type": "execute_request", "user_request": "stop"},
+            manager,  # type: ignore[arg-type]
+        )
+
+        assert manager.sent_messages == [{"type": "cancelled", "message": "Request cancelled by user"}]
+        assert manager.saved_checkpoints == []
+        assert manager.history == []
+
+    asyncio.run(_run())
+    assert _is_stop_control_request({"user_request": "stop."})
+    assert not _is_stop_control_request({"user_request": "stop", "attachments": [{"name": "part.step"}]})
+
+
+def test_sketch_display_name_alias_canonicalizes_to_ir_sketch_id():
+    async def _setup() -> _ManagerStub:
+        return _ManagerStub(EntityStore())
+
+    manager = asyncio.run(_setup())
+    sketch_store = _get_sketch_entity_store("s-sketch-alias", manager)  # type: ignore[arg-type]
+    sketch_store.register_sketch_metadata(
+        "base_footprint",
+        {"sketch_name": "Base Footprint", "profile_count": 1, "profiles": [{"index": 0}]},
+    )
+
+    cleaned = _canonicalize_sketch_tool_input(
+        "s-sketch-alias",
+        manager,  # type: ignore[arg-type]
+        "extrude_profile",
+        {
+            "sketch_id": "Base Footprint",
+            "profile": "Base Footprint:profile_0",
+            "profile_index": 0,
+            "distance": 0.8,
+            "operation": "NewBody",
+        },
+    )
+
+    assert cleaned["sketch_id"] == "base_footprint"
+    assert cleaned["profile"] == "base_footprint:profile_0"
+    assert _preflight_extrude_profile_selection(
+        "s-sketch-alias",
+        manager,  # type: ignore[arg-type]
+        cleaned,
+    ) is None
+
+
+def test_extrude_sketch_reference_failures_share_retry_intent():
+    first = _build_failure_intent_key(
+        "extrude_profile",
+        {"sketch_id": "base_footprint", "profile_index": 0, "distance": 0.8},
+        "extrude_profile preflight failed: sketch 'base_footprint' is not in the cached sketch snapshot.",
+    )
+    second = _build_failure_intent_key(
+        "extrude_profile",
+        {"sketch_id": "Base Footprint", "profile_index": 0, "distance": 0.8},
+        "IR validation failed: Referenced sketch 'Base Footprint' does not exist yet",
+    )
+
+    assert first == "extrude_profile:sketch_reference_resolution"
+    assert second == first
 
 
 class _ResultQueueManager:
@@ -149,6 +225,96 @@ def _extract_tool_result_texts(messages):
                 if isinstance(text_block, dict) and text_block.get("type") == "text":
                     texts.append(str(text_block.get("text") or ""))
     return texts
+
+
+def test_timeline_suppression_tools_are_capability_gated():
+    tools = [
+        {"name": "list_features"},
+        {"name": "suppress_feature"},
+        {"name": "unsuppress_feature"},
+    ]
+
+    old_client_tools = _filter_tools_for_client_capabilities(tools, {})
+    new_client_tools = _filter_tools_for_client_capabilities(
+        tools,
+        {"client_capabilities": {"timeline_feature_suppression": True}},
+    )
+
+    assert [tool["name"] for tool in old_client_tools] == ["list_features"]
+    assert [tool["name"] for tool in new_client_tools] == ["list_features", "suppress_feature", "unsuppress_feature"]
+
+
+def test_timeline_suppression_capability_string_false_is_not_enabled():
+    tools = [
+        {"name": "list_features"},
+        {"name": "suppress_feature"},
+        {"name": "unsuppress_feature"},
+    ]
+
+    filtered = _filter_tools_for_client_capabilities(
+        tools,
+        {"client_capabilities": {"timeline_feature_suppression": "false"}},
+    )
+
+    assert [tool["name"] for tool in filtered] == ["list_features"]
+
+
+def test_timeline_suppression_prompt_text_is_capability_gated():
+    prompt = "\n".join(
+        [
+            "Topology-changing operations include: patterns, suppress_feature, unsuppress_feature, delete_feature.",
+            "- suppress_feature: Temporarily disable one feature.",
+            "- unsuppress_feature: Restore one suppressed feature.",
+            "- delete_feature: Delete one feature.",
+        ]
+    )
+
+    old_client_prompt = _filter_system_prompt_for_client_capabilities(prompt, {})
+    new_client_prompt = _filter_system_prompt_for_client_capabilities(
+        prompt,
+        {"client_capabilities": {"timeline_feature_suppression": True}},
+    )
+
+    assert "suppress_feature" not in old_client_prompt
+    assert "unsuppress_feature" not in old_client_prompt
+    assert "- delete_feature" in old_client_prompt
+    assert "suppress_feature" in new_client_prompt
+    assert "unsuppress_feature" in new_client_prompt
+
+
+def test_workflow_omits_suppression_tools_and_prompt_for_legacy_client(monkeypatch: pytest.MonkeyPatch):
+    async def _run():
+        manager = _ResultQueueManager(EntityStore(), results=[])
+        captured = {}
+
+        async def fake_call_claude_with_tools(*args, **kwargs):
+            captured["tool_names"] = [tool.get("name") for tool in kwargs.get("tools") or []]
+            captured["system_prompt"] = kwargs.get("system_prompt") or ""
+            return {
+                "stop_reason": "end_turn",
+                "content": [{"type": "text", "text": "I cannot suppress features from this client."}],
+            }
+
+        monkeypatch.setattr("backend.agent_workflow.USE_PROMPT_ROUTING", False)
+        monkeypatch.setattr("backend.agent_workflow.call_claude_with_tools", fake_call_claude_with_tools)
+
+        await _execute_workflow_loop(
+            session_id="s-legacy-prompt-gate",
+            messages=[{"role": "user", "content": [{"type": "text", "text": "Suppress the shell"}]}],
+            max_iterations=1,
+            model_name=None,
+            manager=manager,  # type: ignore[arg-type]
+            last_user_message_sent=None,
+            request={"execution_target": "fusion", "request_id": "legacy-prompt-1"},
+            feature_snapshot=None,
+        )
+
+        assert "suppress_feature" not in captured["tool_names"]
+        assert "unsuppress_feature" not in captured["tool_names"]
+        assert "suppress_feature" not in captured["system_prompt"]
+        assert "unsuppress_feature" not in captured["system_prompt"]
+
+    asyncio.run(_run())
 
 
 def test_end_turn_text_is_terminal_user_response(monkeypatch: pytest.MonkeyPatch):
@@ -1392,6 +1558,232 @@ def test_feature_wait_ignores_mismatched_tool_use_id():
         assert "matched" in message
         assert len(manager.requeued) == 1
         assert manager.requeued[0].get("tool_use_id") == "other"
+
+    asyncio.run(_run())
+
+
+def test_execute_feature_tool_call_sends_suppress_payload_and_formats_result():
+    async def _run():
+        manager = _ResultQueueManager(
+            EntityStore(),
+            results=[
+                {
+                    "tool_use_id": "toolu_suppress",
+                    "success": True,
+                    "message": "Suppressed Shell1",
+                    "feature_type": "ShellFeature",
+                    "feature_name": "Shell1",
+                    "timeline_index": 7,
+                    "is_suppressed": True,
+                },
+            ],
+        )
+
+        success, message, raw = await _execute_feature_tool_call(
+            "s-feature",
+            manager,  # type: ignore[arg-type]
+            "suppress_feature",
+            "toolu_suppress",
+            {
+                "feature_token": "feature-token-1",
+                "expected_name": "Shell1",
+                "expected_timeline_index": 7,
+                "description": "Temporarily disable shell",
+            },
+        )
+
+        sent = manager.sent_messages[0]
+        assert success is True
+        assert sent["type"] == "feature_operation"
+        assert sent["operation"] == "suppress_feature"
+        assert sent["feature_token"] == "feature-token-1"
+        assert sent["expected_name"] == "Shell1"
+        assert sent["expected_timeline_index"] == 7
+        assert "is_suppressed=True" in message
+        assert raw["is_suppressed"] is True
+
+    asyncio.run(_run())
+
+
+def test_execute_feature_tool_call_sends_unsuppress_payload_and_formats_result():
+    async def _run():
+        manager = _ResultQueueManager(
+            EntityStore(),
+            results=[
+                {
+                    "tool_use_id": "toolu_unsuppress",
+                    "success": True,
+                    "message": "Unsuppressed Shell1",
+                    "feature_type": "ShellFeature",
+                    "feature_name": "Shell1",
+                    "timeline_index": 7,
+                    "is_suppressed": False,
+                },
+            ],
+        )
+
+        success, message, raw = await _execute_feature_tool_call(
+            "s-feature",
+            manager,  # type: ignore[arg-type]
+            "unsuppress_feature",
+            "toolu_unsuppress",
+            {
+                "feature_token": "feature-token-1",
+                "expected_name": "Shell1",
+                "expected_timeline_index": 7,
+                "description": "Restore shell",
+            },
+        )
+
+        sent = manager.sent_messages[0]
+        assert success is True
+        assert sent["type"] == "feature_operation"
+        assert sent["operation"] == "unsuppress_feature"
+        assert sent["feature_token"] == "feature-token-1"
+        assert sent["expected_name"] == "Shell1"
+        assert sent["expected_timeline_index"] == 7
+        assert "is_suppressed=False" in message
+        assert raw["is_suppressed"] is False
+
+    asyncio.run(_run())
+
+
+def test_workflow_maps_and_executes_suppress_feature(monkeypatch: pytest.MonkeyPatch):
+    async def _run():
+        manager = _ResultQueueManager(EntityStore(), results=[])
+        llm_calls = {"count": 0}
+        executed = []
+
+        async def fake_call_claude_with_tools(*args, **kwargs):
+            llm_calls["count"] += 1
+            if llm_calls["count"] == 1:
+                return {
+                    "stop_reason": "tool_use",
+                    "content": [
+                        {"type": "text", "text": "Temporarily suppress the shell feature."},
+                        {
+                            "type": "tool_use",
+                            "id": "toolu_suppress",
+                            "name": "suppress_feature",
+                            "input": {
+                                "feature_token": "feature-token-1",
+                                "expected_name": "Shell1",
+                                "expected_timeline_index": 7,
+                                "description": "Temporarily disable shell",
+                            },
+                        },
+                    ],
+                }
+            return {"stop_reason": "end_turn", "content": [{"type": "text", "text": "Done"}]}
+
+        async def fake_execute_feature_tool_call(session_id, manager, tool_name, tool_use_id, tool_input, description=""):
+            executed.append(
+                {
+                    "tool_name": tool_name,
+                    "tool_use_id": tool_use_id,
+                    "tool_input": dict(tool_input),
+                    "description": description,
+                }
+            )
+            return True, "Suppressed Shell1\nis_suppressed=True", {
+                "success": True,
+                "message": "Suppressed Shell1",
+                "is_suppressed": True,
+            }
+
+        async def fake_refresh_after_success(*args, **kwargs):
+            return None
+
+        async def fake_runtime_sync(*args, **kwargs):
+            return None
+
+        monkeypatch.setattr("backend.agent_workflow.USE_PROMPT_ROUTING", False)
+        monkeypatch.setattr("backend.agent_workflow.call_claude_with_tools", fake_call_claude_with_tools)
+        monkeypatch.setattr("backend.agent_workflow._execute_feature_tool_call", fake_execute_feature_tool_call)
+        monkeypatch.setattr("backend.agent_workflow._refresh_and_enrich_after_success", fake_refresh_after_success)
+        monkeypatch.setattr("backend.agent_workflow._ensure_runtime_entity_context_synced", fake_runtime_sync)
+
+        await _execute_workflow_loop(
+            session_id="s-suppress-workflow",
+            messages=[{"role": "user", "content": [{"type": "text", "text": "Suppress the shell"}]}],
+            max_iterations=3,
+            model_name=None,
+            manager=manager,  # type: ignore[arg-type]
+            last_user_message_sent=None,
+            request={
+                "execution_target": "fusion",
+                "request_id": "suppress-1",
+                "client_capabilities": {"timeline_feature_suppression": True},
+            },
+            feature_snapshot=None,
+        )
+
+        assert executed == [
+            {
+                "tool_name": "suppress_feature",
+                "tool_use_id": "toolu_suppress",
+                "tool_input": {
+                    "feature_token": "feature-token-1",
+                    "expected_name": "Shell1",
+                    "expected_timeline_index": 7,
+                    "description": "Temporarily disable shell",
+                },
+                "description": "Temporarily disable shell",
+            }
+        ]
+        assert not any(
+            payload.get("title") == "IR mapping failed"
+            for payload in manager.sent_messages
+            if isinstance(payload, dict)
+        )
+
+    asyncio.run(_run())
+
+
+def test_workflow_rejects_suppress_feature_without_client_capability(monkeypatch: pytest.MonkeyPatch):
+    async def _run():
+        manager = _ResultQueueManager(EntityStore(), results=[])
+        executed = []
+
+        async def fake_call_claude_with_tools(*args, **kwargs):
+            return {
+                "stop_reason": "tool_use",
+                "content": [
+                    {"type": "text", "text": "Temporarily suppress the shell feature."},
+                    {
+                        "type": "tool_use",
+                        "id": "toolu_suppress",
+                        "name": "suppress_feature",
+                        "input": {"feature_token": "feature-token-1"},
+                    },
+                ],
+            }
+
+        async def fake_execute_feature_tool_call(*args, **kwargs):
+            executed.append(args)
+            return True, "Should not execute", {}
+
+        monkeypatch.setattr("backend.agent_workflow.USE_PROMPT_ROUTING", False)
+        monkeypatch.setattr("backend.agent_workflow.call_claude_with_tools", fake_call_claude_with_tools)
+        monkeypatch.setattr("backend.agent_workflow._execute_feature_tool_call", fake_execute_feature_tool_call)
+
+        await _execute_workflow_loop(
+            session_id="s-suppress-legacy-client",
+            messages=[{"role": "user", "content": [{"type": "text", "text": "Suppress the shell"}]}],
+            max_iterations=1,
+            model_name=None,
+            manager=manager,  # type: ignore[arg-type]
+            last_user_message_sent=None,
+            request={"execution_target": "fusion", "request_id": "suppress-old-1"},
+            feature_snapshot=None,
+        )
+
+        assert executed == []
+        assert any(
+            payload.get("message") == "Unsupported add-in capability"
+            for payload in manager.sent_messages
+            if isinstance(payload, dict)
+        )
 
     asyncio.run(_run())
 

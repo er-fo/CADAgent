@@ -19,6 +19,7 @@ from .types import (
     DeleteFeatureParams,
     ExtrudeParams,
     ExternalThreadParams,
+    FeatureSuppressionParams,
     FilletParams,
     IROperationEffects,
     IRMetadata,
@@ -58,6 +59,7 @@ _FEATURE_MUTATION_CAPABILITIES = {
     "create_tapped_hole": ["b_rep_kernel", "parametric_timeline", "hole_feature", "thread_catalog"],
     "create_external_thread": ["b_rep_kernel", "parametric_timeline", "thread_catalog"],
     "pattern_feature": ["b_rep_kernel", "parametric_timeline", "feature_pattern"],
+    "set_feature_suppression": ["parametric_timeline", "feature_lifecycle"],
 }
 
 
@@ -937,6 +939,30 @@ def map_tool_call_to_ir(
             requires=["parametric_timeline", "feature_lifecycle"],
             effects=_effects(
                 modifies={"features": [str(params.get("feature_ref") or params.get("feature_token") or "").strip()]},
+                invalidates={"features": ["downstream"], "faces": ["*"], "edges": ["*"], "bodies": ["topology_generation"]},
+            ),
+        )
+
+    if name in {"suppress_feature", "unsuppress_feature"}:
+        feature_ref = str(params.get("feature_ref") or params.get("feature_token") or "").strip()
+        return IROperation(
+            id=operation_id,
+            type="set_feature_suppression",
+            params=FeatureSuppressionParams(
+                feature_ref=feature_ref,
+                suppress=name == "suppress_feature",
+                description=str(params.get("description") or ""),
+                expected_name=str(params.get("expected_name") or "").strip() or None,
+                expected_timeline_index=_optional_int(
+                    params.get("expected_timeline_index"),
+                    field_name="expected_timeline_index",
+                ),
+            ),
+            dependencies=[],
+            metadata=metadata,
+            requires=_FEATURE_MUTATION_CAPABILITIES["set_feature_suppression"],
+            effects=_effects(
+                modifies={"features": [feature_ref]},
                 invalidates={"features": ["downstream"], "faces": ["*"], "edges": ["*"], "bodies": ["topology_generation"]},
             ),
         )
