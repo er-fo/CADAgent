@@ -15,6 +15,7 @@ import adsk.core
 import adsk.fusion
 
 from . import camera_tools
+from . import import_tools
 from . import plane_manager as plane_manager_module
 
 logger = logging.getLogger(__name__)
@@ -68,6 +69,7 @@ class CodeExecutor:
             "rootComp": root_comp,
             "extrudes": extrudes,
             "camera_tools": camera_tools,
+            "import_tools": import_tools,
             "plane_manager": _plane_manager,
         }
         exec_globals.update(sketch_registry)
