@@ -993,7 +993,7 @@ function validateAttachmentFile(file, pendingAttachmentCount = 0) {
     }
 
     const cadReferenceExtensions = new Set(['.step', '.stp']);
-    const cadReferenceMimeTypes = new Set(['model/step', 'application/step', 'application/x-step', 'application/step+zip']);
+    const cadReferenceMimeTypes = new Set(['model/step', 'application/step', 'application/x-step']);
     if (cadReferenceExtensions.has(extension) || cadReferenceMimeTypes.has(mimeType)) {
         if (file.size > 20 * 1024 * 1024) {
             return { valid: false, error: 'STEP reference too large. Maximum size is 20MB.' };
