@@ -992,9 +992,18 @@ function validateAttachmentFile(file, pendingAttachmentCount = 0) {
         return { valid: true, kind: 'docx', mimeType: docxMimeType };
     }
 
+    const cadReferenceExtensions = new Set(['.step', '.stp']);
+    const cadReferenceMimeTypes = new Set(['model/step', 'application/step', 'application/x-step', 'application/step+zip']);
+    if (cadReferenceExtensions.has(extension) || cadReferenceMimeTypes.has(mimeType)) {
+        if (file.size > 20 * 1024 * 1024) {
+            return { valid: false, error: 'STEP reference too large. Maximum size is 20MB.' };
+        }
+        return { valid: true, kind: 'cad_reference', mimeType: mimeType || 'model/step' };
+    }
+
     return {
         valid: false,
-        error: 'Unsupported file type. Attach PNG/JPG images, PDF, DOCX, TXT, Markdown, CSV, or JSON.'
+        error: 'Unsupported file type. Attach PNG/JPG images, PDF, DOCX, STEP/STP, TXT, Markdown, CSV, or JSON.'
     };
 }
 
@@ -1022,7 +1031,15 @@ function renderAttachmentPreview() {
         } else {
             const icon = document.createElement('span');
             icon.classList.add('attachment-file-icon');
-            icon.textContent = attachment.kind === 'pdf' ? 'PDF' : (attachment.kind === 'docx' ? 'DOC' : 'TXT');
+            if (attachment.kind === 'pdf') {
+                icon.textContent = 'PDF';
+            } else if (attachment.kind === 'docx') {
+                icon.textContent = 'DOC';
+            } else if (attachment.kind === 'cad_reference') {
+                icon.textContent = 'STEP';
+            } else {
+                icon.textContent = 'TXT';
+            }
             item.appendChild(icon);
         }
 
