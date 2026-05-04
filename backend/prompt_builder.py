@@ -76,6 +76,13 @@ def build_prompt(
         if not (c in seen or seen.add(c))
     ]
 
+    unknown_clusters = [c for c in clusters_to_include if c not in CLUSTER_TOOL_MAPPING]
+    if unknown_clusters:
+        logger.warning(
+            "Ignoring unknown prompt cluster ids: %s. Routing should normalize these before prompt build.",
+            unknown_clusters,
+        )
+
     logger.info(f"Building prompt with {len(clusters_to_include)} clusters")
 
     # Build system prompt

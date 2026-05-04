@@ -115,6 +115,83 @@ ROUTER_TEMPERATURE = 0.0  # Deterministic routing
 _BEDROCK_ROUTER_PREFIXES = ("minimax.",)
 ROUTER_PARSE_RETRY_LIMIT = 1
 
+CLUSTER_ALIASES = {
+    "2d": "sketch_tools",
+    "2d_sketch": "sketch_tools",
+    "2d_sketching": "sketch_tools",
+    "3d": "3d_modeling",
+    "3d_model": "3d_modeling",
+    "3d_modeling_tools": "3d_modeling",
+    "3d_tools": "3d_modeling",
+    "additive_modeling": "3d_modeling",
+    "cad_modeling": "3d_modeling",
+    "chamfer": "modification",
+    "chamfers": "modification",
+    "construction_planes": "construction",
+    "edge_modification": "modification",
+    "edge_modifications": "modification",
+    "extrude": "3d_modeling",
+    "extrusion": "3d_modeling",
+    "extrusions": "3d_modeling",
+    "feature_modification": "modification",
+    "feature_modifications": "modification",
+    "fillet": "modification",
+    "fillets": "modification",
+    "hole": "holes",
+    "hole_creation": "holes",
+    "hole_tools": "holes",
+    "holes_creation": "holes",
+    "inspection_tools": "inspection",
+    "modeling": "3d_modeling",
+    "modifications": "modification",
+    "pattern": "patterns",
+    "patterning": "patterns",
+    "selection_tools": "selection",
+    "sketch": "sketch_tools",
+    "sketching": "sketch_tools",
+    "sketch_geometry": "sketch_tools",
+    "sketching_tools": "sketch_tools",
+    "thread": "threading",
+    "threads": "threading",
+    "timeline_tools": "timeline",
+}
+
+OPERATION_CLUSTER_REQUIREMENTS = {
+    "add_arc": ["sketch_tools"],
+    "add_circle": ["sketch_tools"],
+    "add_line": ["sketch_tools"],
+    "add_rectangle": ["sketch_tools"],
+    "adjust_feature_parameters": ["inspection", "timeline"],
+    "apply_chamfer": ["inspection", "selection", "modification"],
+    "apply_fillet": ["inspection", "selection", "modification"],
+    "clear_body_selection": ["selection"],
+    "clear_edge_selection": ["selection"],
+    "clear_face_selection": ["selection"],
+    "create_construction_plane": ["construction"],
+    "create_counterbore_hole": ["inspection", "holes"],
+    "create_external_thread": ["inspection", "threading"],
+    "create_loft": ["sketch_tools", "3d_modeling"],
+    "create_pattern_feature": ["inspection", "patterns"],
+    "create_shell": ["inspection", "selection", "modification"],
+    "create_simple_hole": ["inspection", "holes"],
+    "create_sketch": ["sketch_tools"],
+    "create_tapped_hole": ["inspection", "holes", "threading"],
+    "delete_feature": ["inspection", "timeline"],
+    "extrude_profile": ["sketch_tools", "3d_modeling"],
+    "generate_question_tree": ["design_exploration"],
+    "jump_to_timeline_position": ["inspection", "timeline"],
+    "list_features": ["inspection"],
+    "list_sketch_profiles": ["sketch_tools"],
+    "output_build_plan": ["design_exploration"],
+    "propose_designs": ["design_exploration"],
+    "revolve_profile": ["sketch_tools", "3d_modeling"],
+    "select_bodies": ["selection"],
+    "select_edges": ["selection"],
+    "select_faces": ["selection"],
+    "suppress_feature": ["inspection", "timeline"],
+    "unsuppress_feature": ["inspection", "timeline"],
+}
+
 
 def _router_uses_bedrock() -> bool:
     """Return True when the configured router model should use Bedrock."""
@@ -532,6 +609,162 @@ def _normalize_cluster_list(value: Any) -> List[str]:
         return output
 
     return []
+
+
+def _canonicalize_cluster_id(cluster_id: str) -> Optional[str]:
+    """Return a known cluster id after normalizing common router aliases."""
+    if not isinstance(cluster_id, str):
+        return None
+
+    normalized = cluster_id.strip().lower().replace("-", "_").replace(" ", "_")
+    normalized = re.sub(r"_+", "_", normalized).strip("_")
+    if not normalized:
+        return None
+
+    if normalized in CLUSTER_TOOL_MAPPING or normalized == "core":
+        return normalized
+    return CLUSTER_ALIASES.get(normalized)
+
+
+def _canonicalize_cluster_list(cluster_ids: List[str]) -> Tuple[List[str], List[str], Dict[str, str]]:
+    """
+    Normalize a cluster list to known ids.
+
+    Returns (known_clusters, unknown_clusters, alias_map).
+    """
+    known: List[str] = []
+    unknown: List[str] = []
+    aliases: Dict[str, str] = {}
+    seen_known = set()
+    seen_unknown = set()
+
+    for raw in cluster_ids:
+        raw_text = str(raw).strip()
+        canonical = _canonicalize_cluster_id(raw_text)
+        if canonical:
+            if canonical not in seen_known:
+                known.append(canonical)
+                seen_known.add(canonical)
+            if raw_text and raw_text != canonical:
+                aliases[raw_text] = canonical
+        elif raw_text and raw_text not in seen_unknown:
+            unknown.append(raw_text)
+            seen_unknown.add(raw_text)
+
+    return known, unknown, aliases
+
+
+def _extract_build_plan_operations(build_plan: Optional[Dict[str, Any]]) -> List[Tuple[str, str]]:
+    """Return operation/description pairs from an active build plan."""
+    if not build_plan or not build_plan.get("steps"):
+        return []
+
+    operations: List[Tuple[str, str]] = []
+    for step in build_plan.get("steps", []) or []:
+        if not isinstance(step, dict):
+            continue
+        operation = str(step.get("operation") or "").strip()
+        description = str(step.get("description") or "").strip()
+        operations.append((operation, description))
+    return operations
+
+
+def _clusters_required_by_build_plan(build_plan: Optional[Dict[str, Any]]) -> List[str]:
+    """Deterministically derive required clusters from concrete build-plan operations."""
+    required: List[str] = []
+    seen = set()
+
+    def add(cluster_id: str) -> None:
+        if cluster_id and cluster_id not in seen:
+            required.append(cluster_id)
+            seen.add(cluster_id)
+
+    for operation, description in _extract_build_plan_operations(build_plan):
+        op_key = operation.strip().lower()
+        op_key = op_key.replace("-", "_").replace(" ", "_")
+        for cluster_id in OPERATION_CLUSTER_REQUIREMENTS.get(op_key, []):
+            add(cluster_id)
+
+        text = f"{operation} {description}".lower()
+        if any(keyword in text for keyword in ("hole", "counterbore", "countersink", "mounting", "screw", "bolt", "standoff")):
+            add("inspection")
+            add("holes")
+        if any(keyword in text for keyword in ("thread", "tapped", "m3", "m4", "m5", "m6", "m8", "m10")):
+            add("inspection")
+            add("threading")
+        if any(keyword in text for keyword in ("fillet", "chamfer", "softened edge", "rounded edge", "shell")):
+            add("inspection")
+            add("selection")
+            add("modification")
+        if any(keyword in text for keyword in ("pattern", "array", "repeat")):
+            add("inspection")
+            add("patterns")
+
+    return required
+
+
+def _repair_routing_clusters(
+    routing_result: Dict[str, Any],
+    user_request: str,
+    build_plan: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Normalize router output and fail closed when unknown clusters appear."""
+    required, unknown_required, required_aliases = _canonicalize_cluster_list(
+        _normalize_cluster_list(routing_result.get("required"))
+    )
+    optional, unknown_optional, optional_aliases = _canonicalize_cluster_list(
+        _normalize_cluster_list(routing_result.get("optional"))
+    )
+
+    build_plan_required = _clusters_required_by_build_plan(build_plan)
+    for cluster_id in build_plan_required:
+        if cluster_id not in required:
+            required.append(cluster_id)
+
+    if unknown_required or unknown_optional:
+        logger.warning(
+            "Prompt router returned unknown clusters | required=%s optional=%s",
+            unknown_required,
+            unknown_optional,
+        )
+        fallback = _fallback_routing(user_request, "unknown_router_clusters")
+        fallback_required, _, _ = _canonicalize_cluster_list(
+            _normalize_cluster_list(fallback.get("required"))
+        )
+        fallback_optional, _, _ = _canonicalize_cluster_list(
+            _normalize_cluster_list(fallback.get("optional"))
+        )
+        for cluster_id in fallback_required:
+            if cluster_id not in required:
+                required.append(cluster_id)
+        for cluster_id in fallback_optional:
+            if cluster_id not in optional:
+                optional.append(cluster_id)
+
+    if "core" not in required:
+        required.insert(0, "core")
+
+    required = list(dict.fromkeys(required))
+    optional = [cluster_id for cluster_id in dict.fromkeys(optional) if cluster_id not in required]
+
+    routing_result["required"] = required
+    routing_result["optional"] = optional
+
+    alias_map = {**required_aliases, **optional_aliases}
+    if alias_map:
+        routing_result["cluster_aliases_applied"] = alias_map
+        logger.info("Prompt router normalized cluster aliases: %s", alias_map)
+
+    if unknown_required or unknown_optional:
+        routing_result["unknown_clusters"] = {
+            "required": unknown_required,
+            "optional": unknown_optional,
+        }
+
+    if build_plan_required:
+        routing_result["build_plan_required_clusters"] = build_plan_required
+
+    return routing_result
 
 
 def _known_router_cluster_ids() -> List[str]:
@@ -1185,11 +1418,7 @@ async def route_request(
         if "reasoning" not in routing_result:
             routing_result["reasoning"] = "No reasoning provided"
 
-        if "core" not in routing_result["required"]:
-            routing_result["required"].insert(0, "core")
-
-        routing_result["required"] = list(dict.fromkeys(routing_result["required"]))
-        routing_result["optional"] = list(dict.fromkeys(routing_result["optional"]))
+        routing_result = _repair_routing_clusters(routing_result, user_request, build_plan)
 
         total_clusters = len(routing_result["required"]) + len(routing_result["optional"])
         if total_clusters <= 4:

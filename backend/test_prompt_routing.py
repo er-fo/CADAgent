@@ -12,11 +12,13 @@ from backend.prompt_router import (
     _fallback_routing,
     _extract_conversation_context,
     _extract_operations_from_build_plan,
+    _clusters_required_by_build_plan,
     _build_routing_client,
     _extract_routing_response_text,
     get_routing_summary,
     ROUTING_PATTERNS,
 )
+from backend.prompt_builder import build_prompt
 from backend.prompt_structure import CLUSTER_TOOL_MAPPING, get_cluster_tools, get_tool_catalog_text
 
 
@@ -501,6 +503,115 @@ def test_route_request_coerces_required_clusters_alias(monkeypatch):
     assert "fallback" not in result
 
 
+def test_route_request_normalizes_router_cluster_aliases(monkeypatch):
+    class Message:
+        content = (
+            '{"required": ["core", "hole_creation", "extrusion", "fillets"], '
+            '"optional": ["selection_tools", "export_tools"], '
+            '"reasoning": "alias_clusters"}'
+        )
+        reasoning_content = None
+        reasoning = None
+        tool_calls = None
+
+    class Choice:
+        message = Message()
+        text = None
+
+    class Response:
+        choices = [Choice()]
+        output_text = None
+
+    class FakeCompletions:
+        async def create(self, **kwargs):  # noqa: ARG002
+            return Response()
+
+    class FakeChat:
+        completions = FakeCompletions()
+
+    class FakeClient:
+        chat = FakeChat()
+
+    monkeypatch.setattr(prompt_router, "_build_routing_client", lambda api_keys=None: FakeClient())  # noqa: ARG005
+
+    import asyncio
+
+    result = asyncio.run(prompt_router.route_request("desk bracket with screw holes and softened edges"))
+
+    assert "holes" in result["required"]
+    assert "3d_modeling" in result["required"]
+    assert "modification" in result["required"]
+    assert "selection" in result["required"] or "selection" in result["optional"]
+    assert "hole_creation" not in result["required"]
+    assert "extrusion" not in result["required"]
+    assert "fillets" not in result["required"]
+    assert result["cluster_aliases_applied"]["hole_creation"] == "holes"
+    assert result["unknown_clusters"]["optional"] == ["export_tools"]
+
+
+def test_route_request_build_plan_forces_required_tool_clusters(monkeypatch):
+    class Message:
+        content = (
+            '{"required": ["core", "sketch_tools", "3d_modeling", "hole_creation"], '
+            '"optional": ["parametric_constraints", "measurements", "export_tools"], '
+            '"reasoning": "build_plan_aliases"}'
+        )
+        reasoning_content = None
+        reasoning = None
+        tool_calls = None
+
+    class Choice:
+        message = Message()
+        text = None
+
+    class Response:
+        choices = [Choice()]
+        output_text = None
+
+    class FakeCompletions:
+        async def create(self, **kwargs):  # noqa: ARG002
+            return Response()
+
+    class FakeChat:
+        completions = FakeCompletions()
+
+    class FakeClient:
+        chat = FakeChat()
+
+    build_plan = {
+        "design_name": "Solid Wall Bracket",
+        "steps": [
+            {"operation": "create_sketch", "description": "Create base sketch"},
+            {"operation": "extrude_profile", "description": "Extrude bracket body"},
+            {"operation": "create_tapped_hole", "description": "Create M3 module screw holes"},
+            {"operation": "apply_fillet", "description": "Soften external edges"},
+        ],
+    }
+
+    monkeypatch.setattr(prompt_router, "_build_routing_client", lambda api_keys=None: FakeClient())  # noqa: ARG005
+
+    import asyncio
+
+    result = asyncio.run(
+        prompt_router.route_request(
+            "Build plan: Solid Wall Bracket with operations including create_tapped_hole",
+            build_plan=build_plan,
+        )
+    )
+    _system_prompt, tools = build_prompt(result)
+    tool_names = [tool["name"] for tool in tools]
+
+    for cluster in ["sketch_tools", "3d_modeling", "inspection", "holes", "threading", "selection", "modification"]:
+        assert cluster in result["required"]
+    assert "hole_creation" not in result["required"]
+    assert "parametric_constraints" not in result["optional"]
+    assert "create_tapped_hole" in tool_names
+    assert "create_simple_hole" in tool_names
+    assert "apply_fillet" in tool_names
+    assert "list_features" in tool_names
+    assert "select_edges" in tool_names
+
+
 def test_route_request_falls_back_on_truncated_json_and_marks_reason(monkeypatch, caplog):
     class Message:
         content = "{\"required\":"
@@ -622,6 +733,23 @@ def test_build_plan_with_operations():
     assert "create_sketch" in result
     assert "extrude_profile" in result
     assert "2 steps" in result
+
+
+def test_build_plan_cluster_derivation_covers_holes_and_edge_finishing():
+    plan = {
+        "design_name": "Bracket",
+        "steps": [
+            {"operation": "create_sketch", "description": "Base profile"},
+            {"operation": "extrude_profile", "description": "Main body"},
+            {"operation": "create_tapped_hole", "description": "M3 screw mounting"},
+            {"operation": "apply_chamfer", "description": "Softened edges"},
+        ],
+    }
+
+    clusters = _clusters_required_by_build_plan(plan)
+
+    for cluster in ["sketch_tools", "3d_modeling", "inspection", "holes", "threading", "selection", "modification"]:
+        assert cluster in clusters
 
 
 def test_build_plan_description_only():
