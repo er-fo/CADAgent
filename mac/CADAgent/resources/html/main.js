@@ -94,7 +94,8 @@ let state = {
     loginStage: 'cta',
     testingMode: false,
     testingEmail: '',
-    attachments: []  // [{id, name, kind, mime_type, size, data, format}]
+    attachments: [],  // [{id, name, kind, mime_type, size, data, format}]
+    pendingAttachmentReads: 0
 };
 
 let otpFocused = false;
@@ -529,7 +530,7 @@ function setupEventListeners() {
         if (!state.processing) {
             // Allow sending if there's text OR attachments
             const hasContent = elements.cadRequest.value.trim() || hasAttachments();
-            elements.executeBtn.disabled = !hasContent || !state.connected;
+            elements.executeBtn.disabled = !hasContent || !state.connected || state.pendingAttachmentReads > 0;
         }
     });
 
@@ -801,6 +802,12 @@ function handleExecute() {
         return;
     }
 
+    if (state.pendingAttachmentReads > 0) {
+        addLog('warning', 'Wait for attached files to finish loading before sending.', { scope: 'global' });
+        updateExecuteButtonState();
+        return;
+    }
+
     const selectedProvider = getProviderForModel(state.selectedModel);
     if (!isProviderConfigured(selectedProvider)) {
         addLog('error', buildMissingApiKeyMessage(selectedProvider), { scope: 'global' });
@@ -908,34 +915,42 @@ function handleImageSelected(event) {
         pendingAttachmentCount += 1;
 
         const reader = new FileReader();
+        state.pendingAttachmentReads += 1;
+        updateExecuteButtonState();
         reader.onload = (e) => {
-            const dataUrl = String(e.target.result || '');
-            const base64 = dataUrl.includes(',') ? dataUrl.split(',')[1] : '';
-            if (!base64) {
-                addLog('error', `Failed to read ${file.name}`, { scope: 'global' });
-                return;
-            }
+            try {
+                const dataUrl = String(e.target.result || '');
+                const base64 = dataUrl.includes(',') ? dataUrl.split(',')[1] : '';
+                if (!base64) {
+                    addLog('error', `Failed to read ${file.name}`, { scope: 'global' });
+                    return;
+                }
 
-            const attachment = {
-                id: generateId('att'),
-                name: file.name,
-                kind: validation.kind,
-                mime_type: file.type || validation.mimeType,
-                size: file.size,
-                data: base64
-            };
-            if (validation.kind === 'image') {
-                attachment.format = validation.format;
-            }
+                const attachment = {
+                    id: generateId('att'),
+                    name: file.name,
+                    kind: validation.kind,
+                    mime_type: file.type || validation.mimeType,
+                    size: file.size,
+                    data: base64
+                };
+                if (validation.kind === 'image') {
+                    attachment.format = validation.format;
+                }
 
-            state.attachments.push(attachment);
-            renderAttachmentPreview();
-            updateExecuteButtonState();
-            addLog('success', `Attached: ${file.name}`, { scope: 'global' });
+                state.attachments.push(attachment);
+                renderAttachmentPreview();
+                addLog('success', `Attached: ${file.name}`, { scope: 'global' });
+            } finally {
+                state.pendingAttachmentReads = Math.max(0, state.pendingAttachmentReads - 1);
+                updateExecuteButtonState();
+            }
         };
 
         reader.onerror = () => {
             addLog('error', `Failed to read ${file.name}`, { scope: 'global' });
+            state.pendingAttachmentReads = Math.max(0, state.pendingAttachmentReads - 1);
+            updateExecuteButtonState();
         };
 
         reader.readAsDataURL(file);
@@ -1125,7 +1140,7 @@ function updateExecuteButtonState() {
         elements.executeBtn.setAttribute('aria-label', 'Send');
         const connected = isDocConnected();
         const hasContent = elements.cadRequest.value.trim() || hasAttachments();
-        elements.executeBtn.disabled = !connected || !hasContent;
+        elements.executeBtn.disabled = !connected || !hasContent || state.pendingAttachmentReads > 0;
         sendIconUse.setAttribute('href', '#icon-send');
     }
 
