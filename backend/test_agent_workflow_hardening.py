@@ -19,7 +19,9 @@ from backend.agent_workflow import (
     _filter_tools_for_client_capabilities,
     _format_current_ref_table,
     _get_sketch_entity_store,
+    _refresh_and_enrich_after_success,
     handle_execute_request,
+    EntityRefreshError,
     _is_stop_control_request,
     _preflight_face_sketch_uv_bounds,
     _preflight_extrude_profile_selection,
@@ -147,6 +149,7 @@ class _ResultQueueManager:
         self.requeued = []
         self.history = []
         self.latest_entity_context = None
+        self.feature_snapshot = None
         self._reasoning_context = type(
             "_ReasoningContext",
             (),
@@ -168,6 +171,15 @@ class _ResultQueueManager:
 
     def clear_latest_entity_context(self, session_id: str):
         self.latest_entity_context = None
+
+    def get_feature_snapshot(self, session_id: str):
+        return self.feature_snapshot
+
+    def set_feature_snapshot(self, session_id: str, snapshot):
+        self.feature_snapshot = dict(snapshot)
+
+    def clear_feature_snapshot(self, session_id: str):
+        self.feature_snapshot = None
 
     async def send_message(self, session_id: str, payload):
         self.sent_messages.append(payload)
@@ -259,12 +271,34 @@ def test_timeline_suppression_capability_string_false_is_not_enabled():
     assert [tool["name"] for tool in filtered] == ["list_features"]
 
 
+def test_parameter_edit_tool_is_capability_gated():
+    tools = [
+        {"name": "list_features"},
+        {"name": "adjust_feature_parameters"},
+    ]
+
+    old_client_tools = _filter_tools_for_client_capabilities(tools, {})
+    alias_client_tools = _filter_tools_for_client_capabilities(
+        tools,
+        {"client_capabilities": {"feature_parameter_edit": True, "parameter_edit": True}},
+    )
+    new_client_tools = _filter_tools_for_client_capabilities(
+        tools,
+        {"client_capabilities": {"timeline_feature_parameter_edit": True}},
+    )
+
+    assert [tool["name"] for tool in old_client_tools] == ["list_features"]
+    assert [tool["name"] for tool in alias_client_tools] == ["list_features"]
+    assert [tool["name"] for tool in new_client_tools] == ["list_features", "adjust_feature_parameters"]
+
+
 def test_timeline_suppression_prompt_text_is_capability_gated():
     prompt = "\n".join(
         [
-            "Topology-changing operations include: patterns, suppress_feature, unsuppress_feature, delete_feature.",
+            "Topology-changing operations include: patterns, suppress_feature, unsuppress_feature, adjust_feature_parameters, delete_feature.",
             "- suppress_feature: Temporarily disable one feature.",
             "- unsuppress_feature: Restore one suppressed feature.",
+            "- adjust_feature_parameters: Edit one feature parameter.",
             "- delete_feature: Delete one feature.",
         ]
     )
@@ -272,14 +306,21 @@ def test_timeline_suppression_prompt_text_is_capability_gated():
     old_client_prompt = _filter_system_prompt_for_client_capabilities(prompt, {})
     new_client_prompt = _filter_system_prompt_for_client_capabilities(
         prompt,
-        {"client_capabilities": {"timeline_feature_suppression": True}},
+        {
+            "client_capabilities": {
+                "timeline_feature_suppression": True,
+                "timeline_feature_parameter_edit": True,
+            }
+        },
     )
 
     assert "suppress_feature" not in old_client_prompt
     assert "unsuppress_feature" not in old_client_prompt
+    assert "adjust_feature_parameters" not in old_client_prompt
     assert "- delete_feature" in old_client_prompt
     assert "suppress_feature" in new_client_prompt
     assert "unsuppress_feature" in new_client_prompt
+    assert "adjust_feature_parameters" in new_client_prompt
 
 
 def test_workflow_omits_suppression_tools_and_prompt_for_legacy_client(monkeypatch: pytest.MonkeyPatch):
@@ -311,8 +352,10 @@ def test_workflow_omits_suppression_tools_and_prompt_for_legacy_client(monkeypat
 
         assert "suppress_feature" not in captured["tool_names"]
         assert "unsuppress_feature" not in captured["tool_names"]
+        assert "adjust_feature_parameters" not in captured["tool_names"]
         assert "suppress_feature" not in captured["system_prompt"]
         assert "unsuppress_feature" not in captured["system_prompt"]
+        assert "adjust_feature_parameters" not in captured["system_prompt"]
 
     asyncio.run(_run())
 
@@ -1648,6 +1691,66 @@ def test_execute_feature_tool_call_sends_unsuppress_payload_and_formats_result()
     asyncio.run(_run())
 
 
+def test_execute_feature_tool_call_sends_parameter_edit_payload_without_nested_identity():
+    async def _run():
+        manager = _ResultQueueManager(
+            EntityStore(),
+            results=[
+                {
+                    "tool_use_id": "toolu_param",
+                    "success": True,
+                    "message": "Changed Extrude1",
+                    "changed_parameters": ["distance"],
+                },
+            ],
+        )
+
+        success, _message, _raw = await _execute_feature_tool_call(
+            "s-feature",
+            manager,  # type: ignore[arg-type]
+            "adjust_feature_parameters",
+            "toolu_param",
+            {
+                "feature_token": "feature-token-3",
+                "parameters": {"distance": 12.5, "distance_unit": "mm"},
+                "expected_name": "Extrude1",
+                "expected_timeline_index": 3,
+            },
+        )
+
+        sent = manager.sent_messages[0]
+        assert success is True
+        assert sent["type"] == "feature_operation"
+        assert sent["operation"] == "adjust_feature_parameters"
+        assert sent["feature_token"] == "feature-token-3"
+        assert sent["expected_name"] == "Extrude1"
+        assert sent["expected_timeline_index"] == 3
+        assert sent["parameters"] == {"distance": 12.5, "distance_unit": "mm"}
+
+    asyncio.run(_run())
+
+
+def test_execute_feature_tool_call_rejects_name_only_parameter_edit():
+    async def _run():
+        manager = _ResultQueueManager(EntityStore(), results=[])
+
+        with pytest.raises(SelectionToolCallError, match="at least one geometry parameter"):
+            await _execute_feature_tool_call(
+                "s-feature",
+                manager,  # type: ignore[arg-type]
+                "adjust_feature_parameters",
+                "toolu_param",
+                {
+                    "feature_token": "feature-token-3",
+                    "parameters": {"name": "Base Extrude"},
+                },
+            )
+
+        assert manager.sent_messages == []
+
+    asyncio.run(_run())
+
+
 def test_workflow_maps_and_executes_suppress_feature(monkeypatch: pytest.MonkeyPatch):
     async def _run():
         manager = _ResultQueueManager(EntityStore(), results=[])
@@ -1784,6 +1887,192 @@ def test_workflow_rejects_suppress_feature_without_client_capability(monkeypatch
             for payload in manager.sent_messages
             if isinstance(payload, dict)
         )
+
+    asyncio.run(_run())
+
+
+def test_workflow_maps_and_executes_adjust_feature_parameters(monkeypatch: pytest.MonkeyPatch):
+    async def _run():
+        manager = _ResultQueueManager(EntityStore(), results=[])
+        executed = []
+        refreshed = []
+
+        async def fake_call_claude_with_tools(*args, **kwargs):
+            return {
+                "stop_reason": "tool_use",
+                "content": [
+                    {"type": "text", "text": "Increase the extrude distance."},
+                    {
+                        "type": "tool_use",
+                        "id": "toolu_param",
+                        "name": "adjust_feature_parameters",
+                        "input": {
+                            "feature_token": "feature-token-3",
+                            "parameters": {"distance": 12.5, "distance_unit": "mm"},
+                            "expected_name": "Extrude1",
+                            "expected_timeline_index": 3,
+                            "description": "Increase extrude distance",
+                        },
+                    },
+                ],
+            }
+
+        async def fake_execute_feature_tool_call(session_id, manager, tool_name, tool_use_id, tool_input, description=""):
+            executed.append(
+                {
+                    "tool_name": tool_name,
+                    "tool_use_id": tool_use_id,
+                    "tool_input": dict(tool_input),
+                    "description": description,
+                }
+            )
+            return True, "Changed Extrude1\nchanged_parameters=['distance']", {
+                "success": True,
+                "message": "Changed Extrude1",
+                "changed_parameters": ["distance"],
+            }
+
+        async def fake_refresh_after_success(*args, **kwargs):
+            refreshed.append(args[2])
+            return None
+
+        async def fake_runtime_sync(*args, **kwargs):
+            return None
+
+        monkeypatch.setattr("backend.agent_workflow.USE_PROMPT_ROUTING", False)
+        monkeypatch.setattr("backend.agent_workflow.call_claude_with_tools", fake_call_claude_with_tools)
+        monkeypatch.setattr("backend.agent_workflow._execute_feature_tool_call", fake_execute_feature_tool_call)
+        monkeypatch.setattr("backend.agent_workflow._refresh_and_enrich_after_success", fake_refresh_after_success)
+        monkeypatch.setattr("backend.agent_workflow._ensure_runtime_entity_context_synced", fake_runtime_sync)
+
+        await _execute_workflow_loop(
+            session_id="s-param-workflow",
+            messages=[{"role": "user", "content": [{"type": "text", "text": "Increase the extrude distance"}]}],
+            max_iterations=1,
+            model_name=None,
+            manager=manager,  # type: ignore[arg-type]
+            last_user_message_sent=None,
+            request={
+                "execution_target": "fusion",
+                "request_id": "param-1",
+                "client_capabilities": {"timeline_feature_parameter_edit": True},
+            },
+            feature_snapshot=None,
+        )
+
+        assert executed == [
+            {
+                "tool_name": "adjust_feature_parameters",
+                "tool_use_id": "toolu_param",
+                "tool_input": {
+                    "feature_token": "feature-token-3",
+                    "parameters": {"distance": 12.5, "distance_unit": "mm"},
+                    "expected_name": "Extrude1",
+                    "expected_timeline_index": 3,
+                    "description": "Increase extrude distance",
+                },
+                "description": "Increase extrude distance",
+            }
+        ]
+        assert not any(
+            payload.get("title") == "IR mapping failed"
+            for payload in manager.sent_messages
+            if isinstance(payload, dict)
+        )
+        assert refreshed == ["adjust_feature_parameters"]
+        committed = [
+            payload
+            for payload in manager.sent_messages
+            if isinstance(payload, dict) and payload.get("type") == "ir_operation_committed"
+        ]
+        assert committed[-1]["operation"]["type"] == "adjust_feature_parameters"
+        assert committed[-1]["operation"]["params"]["feature_ref"] == "feature-token-3"
+
+    asyncio.run(_run())
+
+
+def test_workflow_rejects_adjust_feature_parameters_without_client_capability(monkeypatch: pytest.MonkeyPatch):
+    async def _run():
+        manager = _ResultQueueManager(EntityStore(), results=[])
+        executed = []
+
+        async def fake_call_claude_with_tools(*args, **kwargs):
+            return {
+                "stop_reason": "tool_use",
+                "content": [
+                    {"type": "text", "text": "Change the feature distance."},
+                    {
+                        "type": "tool_use",
+                        "id": "toolu_param",
+                        "name": "adjust_feature_parameters",
+                        "input": {"feature_token": "feature-token-3", "parameters": {"distance": 12.5}},
+                    },
+                ],
+            }
+
+        async def fake_execute_feature_tool_call(*args, **kwargs):
+            executed.append(args)
+            return True, "Should not execute", {}
+
+        monkeypatch.setattr("backend.agent_workflow.USE_PROMPT_ROUTING", False)
+        monkeypatch.setattr("backend.agent_workflow.call_claude_with_tools", fake_call_claude_with_tools)
+        monkeypatch.setattr("backend.agent_workflow._execute_feature_tool_call", fake_execute_feature_tool_call)
+
+        await _execute_workflow_loop(
+            session_id="s-param-legacy-client",
+            messages=[{"role": "user", "content": [{"type": "text", "text": "Change the feature distance"}]}],
+            max_iterations=1,
+            model_name=None,
+            manager=manager,  # type: ignore[arg-type]
+            last_user_message_sent=None,
+            request={"execution_target": "fusion", "request_id": "param-old-1"},
+            feature_snapshot=None,
+        )
+
+        assert executed == []
+        assert any(
+            payload.get("message") == "Unsupported add-in capability"
+            and "timeline_feature_parameter_edit" in str(payload.get("details") or payload.get("error") or "")
+            for payload in manager.sent_messages
+            if isinstance(payload, dict)
+        )
+
+    asyncio.run(_run())
+
+
+def test_timeline_refresh_failure_clears_stale_runtime_context(monkeypatch: pytest.MonkeyPatch):
+    async def _run():
+        store = EntityStore()
+        await store.register_entities("face", [{"entity_token": "face_token_0", "area": 10.0}])
+        manager = _ResultQueueManager(store, results=[])
+        manager.set_latest_entity_context("s-refresh-fail", {"faces": [{"entity_token": "face_token_0"}]})
+        manager.set_feature_snapshot("s-refresh-fail", {"success": True, "timeline_count": 1})
+        messages = [{"role": "user", "content": []}]
+
+        async def fake_refresh_entity_context_with_retry(*args, **kwargs):
+            raise EntityRefreshError("runtime context refresh failed")
+
+        async def fake_request_feature_snapshot(*args, **kwargs):
+            return {"type": "feature_snapshot", "success": True, "timeline_count": 1}
+
+        monkeypatch.setattr(
+            "backend.agent_workflow._refresh_entity_context_with_retry",
+            fake_refresh_entity_context_with_retry,
+        )
+        monkeypatch.setattr("backend.agent_workflow._request_feature_snapshot", fake_request_feature_snapshot)
+
+        with pytest.raises(EntityRefreshError, match="likely stale"):
+            await _refresh_and_enrich_after_success(
+                "s-refresh-fail",
+                manager,  # type: ignore[arg-type]
+                "adjust_feature_parameters",
+                {"success": True},
+                messages,
+            )
+
+        assert store.get_entity_counts() == {"body": 0, "face": 0, "edge": 0, "vertex": 0}
+        assert manager.latest_entity_context is None
+        assert manager.feature_snapshot is None
 
     asyncio.run(_run())
 

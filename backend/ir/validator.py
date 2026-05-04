@@ -24,6 +24,7 @@ from .types import (
     DeleteFeatureParams,
     ExtrudeParams,
     ExternalThreadParams,
+    FeatureParameterEditParams,
     FeatureSuppressionParams,
     FilletParams,
     IROperation,
@@ -41,6 +42,29 @@ from .types import (
 
 _DATUM_PLANES = {"XY", "XZ", "YZ"}
 _FACE_ALIAS_PATTERN = re.compile(r"^face_\d+$")
+_FEATURE_PARAMETER_LENGTH_KEYS = {
+    "distance",
+    "diameter",
+    "depth",
+    "radius",
+    "chamfer_distance",
+    "inside_thickness",
+    "outside_thickness",
+    "rectangular_spacing_one",
+    "rectangular_spacing_two",
+}
+_FEATURE_PARAMETER_COUNT_KEYS = {
+    "rectangular_count_one",
+    "rectangular_count_two",
+    "circular_count",
+}
+_FEATURE_PARAMETER_ANGLE_KEYS = {"circular_total_angle"}
+_FEATURE_PARAMETER_ALLOWED_KEYS = (
+    {"name"}
+    | _FEATURE_PARAMETER_LENGTH_KEYS
+    | _FEATURE_PARAMETER_COUNT_KEYS
+    | _FEATURE_PARAMETER_ANGLE_KEYS
+)
 
 
 def _is_nonempty_string(value: object) -> bool:
@@ -504,6 +528,52 @@ def validate_operation(operation: IROperation) -> List[str]:
                 and params.expected_timeline_index < 0
             ):
                 errors.append("delete_feature expected_timeline_index must be >= 0")
+        return errors
+
+    if operation.type == "adjust_feature_parameters":
+        params = operation.params
+        if not isinstance(params, FeatureParameterEditParams):
+            errors.append("adjust_feature_parameters params must be FeatureParameterEditParams")
+            return errors
+        if not _is_nonempty_string(params.feature_ref):
+            errors.append("adjust_feature_parameters feature_ref must be provided")
+        if not isinstance(params.parameters, Mapping) or not params.parameters:
+            errors.append("adjust_feature_parameters parameters must be a non-empty mapping")
+            return errors
+        extra = set(params.parameters.keys()) - _FEATURE_PARAMETER_ALLOWED_KEYS
+        if extra:
+            errors.append(f"adjust_feature_parameters unsupported parameter(s): {sorted(extra)}")
+        if "name" in params.parameters and not _is_nonempty_string(params.parameters.get("name")):
+            errors.append("adjust_feature_parameters name must be non-empty")
+        if set(params.parameters.keys()) == {"name"}:
+            errors.append("adjust_feature_parameters requires at least one geometry parameter with name")
+        for key in _FEATURE_PARAMETER_LENGTH_KEYS:
+            if key in params.parameters:
+                _positive(params.parameters[key], f"adjust_feature_parameters {key}", errors)
+        for key in _FEATURE_PARAMETER_COUNT_KEYS:
+            if key not in params.parameters:
+                continue
+            if _check_finite_number(params.parameters[key], f"adjust_feature_parameters {key}", errors):
+                numeric_value = float(params.parameters[key])
+                if numeric_value <= 0 or not numeric_value.is_integer():
+                    errors.append(f"adjust_feature_parameters {key} must be a positive integer")
+        for key in _FEATURE_PARAMETER_ANGLE_KEYS:
+            if key in params.parameters and _check_finite_number(
+                params.parameters[key],
+                f"adjust_feature_parameters {key}",
+                errors,
+            ) and float(params.parameters[key]) == 0:
+                errors.append(f"adjust_feature_parameters {key} must be non-zero")
+        if params.expected_timeline_index is not None:
+            if (
+                _check_finite_number(
+                    params.expected_timeline_index,
+                    "adjust_feature_parameters expected_timeline_index",
+                    errors,
+                )
+                and params.expected_timeline_index < 0
+            ):
+                errors.append("adjust_feature_parameters expected_timeline_index must be >= 0")
         return errors
 
     if operation.type == "set_feature_suppression":

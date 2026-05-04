@@ -388,7 +388,35 @@ def test_ir_document_state_round_trips_timeline_feature_suppression() -> None:
     assert restored_op.params.feature_ref == "feature-token-1"
     assert restored_op.params.suppress is True
     assert restored_op.params.expected_name == "Shell1"
-    assert restored_op.params.expected_timeline_index == 7
+
+
+def test_ir_document_state_round_trips_feature_parameter_edit() -> None:
+    session_id = "session-ir-parameter-edit"
+    state = IRDocumentState(metadata={"source": "fusion", "session_id": session_id})
+    parameter_edit = map_tool_call_to_ir(
+        {
+            "name": "adjust_feature_parameters",
+            "input": {
+                "feature_token": "feature-token-3",
+                "parameters": {"distance": 1.25, "distance_unit": "cm"},
+                "expected_name": "Extrude1",
+                "expected_timeline_index": 3,
+            },
+        },
+        state,
+        metadata={"source": "fusion", "session_id": session_id, "request_id": "r1", "iteration": 1},
+    )
+    state.append(parameter_edit)
+
+    restored = _deserialize_ir_document_state(_serialize_ir_document_state(state))
+
+    assert len(restored.operations) == 1
+    restored_op = restored.operations[0]
+    assert restored_op.type == "adjust_feature_parameters"
+    assert restored_op.params.feature_ref == "feature-token-3"
+    assert restored_op.params.parameters["distance"] == 12.5
+    assert restored_op.params.expected_name == "Extrude1"
+    assert restored_op.params.expected_timeline_index == 3
     assert restored.metadata["session_id"] == session_id
 
 

@@ -19,6 +19,7 @@ try:
         DeleteFeatureParams,
         ExtrudeParams,
         ExternalThreadParams,
+        FeatureParameterEditParams,
         FeatureSuppressionParams,
         FilletParams,
         IRDocument,
@@ -44,6 +45,7 @@ except ImportError:  # pragma: no cover
         DeleteFeatureParams,
         ExtrudeParams,
         ExternalThreadParams,
+        FeatureParameterEditParams,
         FeatureSuppressionParams,
         FilletParams,
         IRDocument,
@@ -199,6 +201,40 @@ def test_fusion_translator_covers_widened_ir_operations():
     assert tool_name == "unsuppress_feature"
     assert tool_input["feature_token"] == "feature-token-1"
 
+    parameter_edit = IROperation(
+        id="op_parameter_edit",
+        type="adjust_feature_parameters",
+        params=FeatureParameterEditParams(
+            feature_ref="feature-token-3",
+            parameters={"distance": 12.5, "circular_total_angle": 180.0},
+            description="Change extrude distance",
+            expected_name="Extrude1",
+            expected_timeline_index=3,
+        ),
+    )
+    tool_name, tool_input = translate_ir_to_fusion_tool_call(parameter_edit)
+    assert tool_name == "adjust_feature_parameters"
+    assert tool_input["feature_token"] == "feature-token-3"
+    assert tool_input["parameters"]["distance"] == 12.5
+    assert tool_input["parameters"]["distance_unit"] == "mm"
+    assert tool_input["parameters"]["circular_total_angle_unit"] == "deg"
+    assert tool_input["expected_name"] == "Extrude1"
+    assert tool_input["expected_timeline_index"] == 3
+
+
+def test_fusion_translator_rejects_name_only_parameter_edit_ir():
+    parameter_edit = IROperation(
+        id="op_parameter_rename",
+        type="adjust_feature_parameters",
+        params=FeatureParameterEditParams(
+            feature_ref="feature-token-3",
+            parameters={"name": "Base Extrude"},
+        ),
+    )
+
+    with pytest.raises(ValueError, match="at least one geometry parameter"):
+        translate_ir_to_fusion_tool_call(parameter_edit)
+
 
 class _FusionExecutorManager:
     def __init__(self, store: EntityStore, result: dict):
@@ -304,6 +340,98 @@ def test_fusion_executor_sends_unsuppression_ir_as_feature_payload():
         assert payload["type"] == "feature_operation"
         assert payload["operation"] == "unsuppress_feature"
         assert payload["parameters"]["feature_token"] == "feature-token-1"
+
+    asyncio.run(_run())
+
+
+def test_fusion_executor_sends_parameter_edit_ir_as_structured_feature_payload():
+    async def _run():
+        manager = _FusionExecutorManager(
+            EntityStore(),
+            {"tool_use_id": "toolu_param", "success": True, "message": "parameters changed"},
+        )
+        executor = FusionTargetExecutor(
+            manager,
+            request={"client_capabilities": {"timeline_feature_parameter_edit": True}},
+        )  # type: ignore[arg-type]
+        result = await executor.execute_operation(
+            "s-fusion-ir",
+            IROperation(
+                id="op_parameter_edit",
+                type="adjust_feature_parameters",
+                params=FeatureParameterEditParams(
+                    feature_ref="feature-token-3",
+                    parameters={"distance": 12.5},
+                    expected_name="Extrude1",
+                    expected_timeline_index=3,
+                ),
+            ),
+            tool_use_id="toolu_param",
+        )
+
+        assert result.success
+        payload = manager.sent_messages[0]
+        assert payload["type"] == "feature_operation"
+        assert payload["operation"] == "adjust_feature_parameters"
+        assert payload["feature_token"] == "feature-token-3"
+        assert payload["parameters"] == {
+            "distance": 12.5,
+            "distance_unit": "mm",
+        }
+        assert "parameters" not in payload["parameters"]
+        assert payload["expected_name"] == "Extrude1"
+        assert payload["expected_timeline_index"] == 3
+
+    asyncio.run(_run())
+
+
+def test_fusion_executor_rejects_parameter_edit_without_client_capability():
+    async def _run():
+        manager = _FusionExecutorManager(EntityStore(), {})
+        executor = FusionTargetExecutor(manager, request={})  # type: ignore[arg-type]
+        result = await executor.execute_operation(
+            "s-fusion-ir",
+            IROperation(
+                id="op_parameter_edit",
+                type="adjust_feature_parameters",
+                params=FeatureParameterEditParams(
+                    feature_ref="feature-token-3",
+                    parameters={"distance": 12.5},
+                ),
+            ),
+            tool_use_id="toolu_param",
+        )
+
+        assert not result.success
+        assert "timeline_feature_parameter_edit" in result.message
+        assert manager.sent_messages == []
+
+    asyncio.run(_run())
+
+
+def test_fusion_executor_rejects_parameter_edit_capability_aliases():
+    async def _run():
+        manager = _FusionExecutorManager(EntityStore(), {})
+        executor = FusionTargetExecutor(
+            manager,
+            request={"client_capabilities": {"feature_parameter_edit": True, "parameter_edit": True}},
+        )  # type: ignore[arg-type]
+        result = await executor.execute_operation(
+            "s-fusion-ir",
+            IROperation(
+                id="op_parameter_edit",
+                type="adjust_feature_parameters",
+                params=FeatureParameterEditParams(
+                    feature_ref="feature-token-3",
+                    parameters={"distance": 12.5},
+                ),
+            ),
+            tool_use_id="toolu_param",
+        )
+
+        assert not result.success
+        assert "timeline_feature_parameter_edit" in result.message
+        assert manager.sent_messages == []
 
     asyncio.run(_run())
 

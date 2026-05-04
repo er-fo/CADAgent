@@ -9,6 +9,7 @@ try:
         AddLineParams,
         ExtrudeParams,
         ExternalThreadParams,
+        FeatureParameterEditParams,
         FeatureSuppressionParams,
         IROperation,
         PatternFeatureParams,
@@ -23,6 +24,7 @@ except ImportError:  # pragma: no cover
         AddLineParams,
         ExtrudeParams,
         ExternalThreadParams,
+        FeatureParameterEditParams,
         FeatureSuppressionParams,
         IROperation,
         PatternFeatureParams,
@@ -277,6 +279,81 @@ def test_feature_suppression_ir_rejects_empty_ref_and_bad_expected_index():
     )
 
     assert "set_feature_suppression expected_timeline_index must be >= 0" in validate_operation(negative_index)
+
+
+def test_mapper_converts_adjust_feature_parameters_to_shared_ir():
+    state = IRDocumentState()
+
+    op = map_tool_call_to_ir(
+        {
+            "name": "adjust_feature_parameters",
+            "input": {
+                "feature_token": "feature-token-3",
+                "parameters": {
+                    "distance": 1.25,
+                    "distance_unit": "cm",
+                    "radius": 2,
+                    "radius_unit": "mm",
+                    "circular_total_angle": 3.141592653589793,
+                    "circular_total_angle_unit": "rad",
+                    "rectangular_count_one": 4,
+                },
+                "expected_name": "Extrude1",
+                "expected_timeline_index": 3,
+                "description": "Change extrude distance",
+            },
+        },
+        state,
+    )
+
+    assert op.type == "adjust_feature_parameters"
+    assert isinstance(op.params, FeatureParameterEditParams)
+    assert op.params.feature_ref == "feature-token-3"
+    assert op.params.parameters["distance"] == 12.5
+    assert op.params.parameters["radius"] == 2.0
+    assert op.params.parameters["circular_total_angle"] == 180.0
+    assert op.params.parameters["rectangular_count_one"] == 4
+    assert op.params.expected_name == "Extrude1"
+    assert op.params.expected_timeline_index == 3
+    assert op.requires == ["parametric_timeline", "feature_lifecycle", "feature_parameter_edit"]
+    assert validate_operation(op) == []
+
+
+def test_adjust_feature_parameters_ir_rejects_invalid_parameters():
+    state = IRDocumentState()
+
+    missing_params = map_tool_call_to_ir(
+        {"name": "adjust_feature_parameters", "input": {"feature_token": "feature-token-1"}},
+        state,
+    )
+    assert "adjust_feature_parameters parameters must be a non-empty mapping" in validate_operation(missing_params)
+
+    zero_distance = map_tool_call_to_ir(
+        {
+            "name": "adjust_feature_parameters",
+            "input": {"feature_token": "feature-token-1", "parameters": {"distance": 0}},
+        },
+        state,
+    )
+    assert "adjust_feature_parameters distance must be > 0" in validate_operation(zero_distance)
+
+    with pytest.raises(UnsupportedToolMappingError, match="does not support"):
+        map_tool_call_to_ir(
+            {
+                "name": "adjust_feature_parameters",
+                "input": {"feature_token": "feature-token-1", "parameters": {"script": "danger"}},
+            },
+            state,
+        )
+
+    with pytest.raises(UnsupportedToolMappingError, match="at least one geometry parameter"):
+        map_tool_call_to_ir(
+            {
+                "name": "adjust_feature_parameters",
+                "input": {"feature_token": "feature-token-1", "parameters": {"name": "Base Extrude"}},
+            },
+            state,
+        )
 
 
 def test_mapper_preserves_non_datum_create_sketch_planes_for_fusion():

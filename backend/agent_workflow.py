@@ -63,6 +63,7 @@ try:
         DeleteFeatureParams,
         ExtrudeParams,
         ExternalThreadParams,
+        FeatureParameterEditParams,
         FeatureSuppressionParams,
         FilletParams,
         IROperation,
@@ -122,6 +123,7 @@ except ImportError:  # pragma: no cover - script execution fallback
         DeleteFeatureParams,
         ExtrudeParams,
         ExternalThreadParams,
+        FeatureParameterEditParams,
         FeatureSuppressionParams,
         FilletParams,
         IROperation,
@@ -252,12 +254,15 @@ GEOMETRY_MODIFYING_TOOLS = {
 TIMELINE_MODIFYING_TOOLS = {
     "jump_to_timeline_position",
     "delete_feature",
+    "adjust_feature_parameters",
     "suppress_feature",
     "unsuppress_feature",
     "set_feature_suppression",
 }
 TIMELINE_SUPPRESSION_TOOLS = {"suppress_feature", "unsuppress_feature"}
 TIMELINE_SUPPRESSION_CAPABILITY = "timeline_feature_suppression"
+TIMELINE_PARAMETER_EDIT_TOOLS = {"adjust_feature_parameters"}
+TIMELINE_PARAMETER_EDIT_CAPABILITY = "timeline_feature_parameter_edit"
 TIMELINE_DELETE_TOOLS = {"delete_feature"}
 TIMELINE_DELETE_CAPABILITY = "timeline_feature_delete"
 
@@ -641,18 +646,36 @@ def _client_supports_timeline_feature_suppression(request: Optional[Mapping[str,
     )
 
 
+def _client_supports_timeline_parameter_edit(request: Optional[Mapping[str, Any]]) -> bool:
+    """Return whether the active add-in declared support for feature parameter edits."""
+    return _request_declares_capability(
+        request,
+        TIMELINE_PARAMETER_EDIT_CAPABILITY,
+    )
+
+
+def _unsupported_timeline_tools_for_client(request: Optional[Mapping[str, Any]]) -> set[str]:
+    unsupported: set[str] = set()
+    if not _client_supports_timeline_feature_suppression(request):
+        unsupported.update(TIMELINE_SUPPRESSION_TOOLS)
+    if not _client_supports_timeline_parameter_edit(request):
+        unsupported.update(TIMELINE_PARAMETER_EDIT_TOOLS)
+    return unsupported
+
+
 def _filter_tools_for_client_capabilities(
     tools: Optional[Sequence[Mapping[str, Any]]],
     request: Optional[Mapping[str, Any]],
 ) -> List[Mapping[str, Any]]:
     """Remove tools unsupported by the connected add-in before LLM planning."""
     source_tools: Sequence[Mapping[str, Any]] = tools if tools is not None else TOOLS
-    if _client_supports_timeline_feature_suppression(request):
+    unsupported_tools = _unsupported_timeline_tools_for_client(request)
+    if not unsupported_tools:
         return [dict(tool) for tool in source_tools]
     return [
         dict(tool)
         for tool in source_tools
-        if str(tool.get("name") or "") not in TIMELINE_SUPPRESSION_TOOLS
+        if str(tool.get("name") or "") not in unsupported_tools
     ]
 
 
@@ -661,17 +684,13 @@ def _filter_system_prompt_for_client_capabilities(
     request: Optional[Mapping[str, Any]],
 ) -> Optional[str]:
     """Remove unsupported tool names from prompt text for legacy add-ins."""
-    if not system_prompt or _client_supports_timeline_feature_suppression(request):
+    unsupported_tools = _unsupported_timeline_tools_for_client(request)
+    if not system_prompt or not unsupported_tools:
         return system_prompt
 
     filtered_lines: List[str] = []
     for line in system_prompt.splitlines():
-        if "- suppress_feature:" in line or "- unsuppress_feature:" in line:
-            continue
-        line = line.replace(", suppress_feature, unsuppress_feature", "")
-        line = line.replace("suppress_feature, unsuppress_feature, ", "")
-        line = line.replace("suppress_feature, unsuppress_feature", "")
-        if "suppress_feature" in line or "unsuppress_feature" in line:
+        if any(tool_name in line for tool_name in unsupported_tools):
             continue
         filtered_lines.append(line)
     return "\n".join(filtered_lines)
@@ -1866,6 +1885,16 @@ def _deserialize_ir_operation(payload: Mapping[str, Any]) -> IROperation:
             expected_name=str(params_payload.get("expected_name") or "").strip() or None,
             expected_timeline_index=int(raw_expected_index) if raw_expected_index is not None else None,
         )
+    elif operation_type == "adjust_feature_parameters":
+        raw_expected_index = params_payload.get("expected_timeline_index")
+        raw_parameters = params_payload.get("parameters")
+        params = FeatureParameterEditParams(
+            feature_ref=str(params_payload.get("feature_ref") or "").strip(),
+            parameters=dict(raw_parameters) if isinstance(raw_parameters, Mapping) else {},
+            description=str(params_payload.get("description") or ""),
+            expected_name=str(params_payload.get("expected_name") or "").strip() or None,
+            expected_timeline_index=int(raw_expected_index) if raw_expected_index is not None else None,
+        )
     elif operation_type == "set_feature_suppression":
         raw_expected_index = params_payload.get("expected_timeline_index")
         params = FeatureSuppressionParams(
@@ -2584,6 +2613,21 @@ def _manager_clear_latest_entity_context(manager: Any, session_id: str) -> None:
         clearer(session_id)
 
 
+def _clear_stale_runtime_context_after_timeline_failure(
+    session_id: str,
+    manager: Any,
+    store: EntityStore,
+    tool_name: str,
+) -> None:
+    """Clear active runtime refs when a timeline mutation succeeded but refresh did not."""
+    try:
+        store.clear()
+    except Exception as exc:
+        logger.warning("Failed to clear entity store after %s refresh failure: %s", tool_name, exc)
+    _manager_clear_latest_entity_context(manager, session_id)
+    _manager_clear_feature_snapshot(manager, session_id)
+
+
 async def _refresh_entity_context_with_retry(
     session_id: str,
     manager: ConnectionManager,
@@ -2945,13 +2989,20 @@ async def _refresh_and_enrich_after_success(
         )
     except EntityRefreshError as exc:
         if tool_name in TIMELINE_MODIFYING_TOOLS:
+            diagnostic = await _describe_timeline_refresh_failure(
+                session_id,
+                manager,
+                tool_name,
+                str(exc),
+            )
+            _clear_stale_runtime_context_after_timeline_failure(
+                session_id,
+                manager,
+                store,
+                tool_name,
+            )
             raise EntityRefreshError(
-                await _describe_timeline_refresh_failure(
-                    session_id,
-                    manager,
-                    tool_name,
-                    str(exc),
-                )
+                diagnostic
             ) from exc
         raise
 
@@ -4670,6 +4721,19 @@ async def _execute_workflow_loop(
                 error_text = (
                     f"Tool '{tool_name}' requires an add-in version with "
                     f"'{TIMELINE_SUPPRESSION_CAPABILITY}' capability."
+                )
+                await _send_error(manager, session_id, "Unsupported add-in capability", error_text)
+                messages.append(_tool_result_message(tool_use_id, error_text, is_error=True))
+                iteration_had_failure = True
+                if iteration_first_failure_intent is None:
+                    iteration_first_failure_intent = tool_intent_key
+                logger.warning("Session %s rejected unsupported tool '%s'.", session_id, tool_name)
+                continue
+
+            if tool_name in TIMELINE_PARAMETER_EDIT_TOOLS and not _client_supports_timeline_parameter_edit(request):
+                error_text = (
+                    f"Tool '{tool_name}' requires an add-in version with "
+                    f"'{TIMELINE_PARAMETER_EDIT_CAPABILITY}' capability."
                 )
                 await _send_error(manager, session_id, "Unsupported add-in capability", error_text)
                 messages.append(_tool_result_message(tool_use_id, error_text, is_error=True))
@@ -10753,12 +10817,11 @@ def _validate_adjust_feature_parameters(tool_input: Mapping[str, Any]) -> Dict[s
             raise SelectionToolCallError("'parameters.circular_total_angle_unit' must be one of ['deg', 'rad'].")
         cleaned_params["circular_total_angle_unit"] = unit
 
-    if not any(key in cleaned_params for key in {"name", *length_keys, *count_keys, *angle_keys}):
+    if not any(key in cleaned_params for key in {*length_keys, *count_keys, *angle_keys}):
         raise SelectionToolCallError(
-            "Provide at least one editable parameter: name, distance, diameter, depth, radius, "
-            "chamfer_distance, inside_thickness, outside_thickness, rectangular_count_one, "
-            "rectangular_spacing_one, rectangular_count_two, rectangular_spacing_two, "
-            "circular_count, or circular_total_angle."
+            "Provide at least one geometry parameter with name edits: distance, diameter, depth, radius, "
+            "chamfer_distance, inside_thickness, outside_thickness, rectangular_count_one, rectangular_spacing_one, "
+            "rectangular_count_two, rectangular_spacing_two, circular_count, or circular_total_angle."
         )
 
     cleaned: Dict[str, Any] = {
@@ -11415,7 +11478,8 @@ async def _execute_feature_tool_call(
 
     # Mirror resolved/validated values into the nested parameters dict so the
     # Fusion add-in consumes the canonical values (entity tokens, numeric types).
-    _sync_payload_parameters(payload)
+    if tool_name != "adjust_feature_parameters":
+        _sync_payload_parameters(payload)
 
     await _send_message_safe(manager, session_id, payload)
 

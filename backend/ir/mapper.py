@@ -19,6 +19,7 @@ from .types import (
     DeleteFeatureParams,
     ExtrudeParams,
     ExternalThreadParams,
+    FeatureParameterEditParams,
     FeatureSuppressionParams,
     FilletParams,
     IROperationEffects,
@@ -59,8 +60,86 @@ _FEATURE_MUTATION_CAPABILITIES = {
     "create_tapped_hole": ["b_rep_kernel", "parametric_timeline", "hole_feature", "thread_catalog"],
     "create_external_thread": ["b_rep_kernel", "parametric_timeline", "thread_catalog"],
     "pattern_feature": ["b_rep_kernel", "parametric_timeline", "feature_pattern"],
+    "adjust_feature_parameters": ["parametric_timeline", "feature_lifecycle", "feature_parameter_edit"],
     "set_feature_suppression": ["parametric_timeline", "feature_lifecycle"],
 }
+
+_FEATURE_PARAMETER_LENGTH_KEYS = {
+    "distance",
+    "diameter",
+    "depth",
+    "radius",
+    "chamfer_distance",
+    "inside_thickness",
+    "outside_thickness",
+    "rectangular_spacing_one",
+    "rectangular_spacing_two",
+}
+_FEATURE_PARAMETER_COUNT_KEYS = {
+    "rectangular_count_one",
+    "rectangular_count_two",
+    "circular_count",
+}
+_FEATURE_PARAMETER_ANGLE_KEYS = {"circular_total_angle"}
+_FEATURE_PARAMETER_ALLOWED_KEYS = (
+    {"name"}
+    | _FEATURE_PARAMETER_LENGTH_KEYS
+    | {f"{key}_unit" for key in _FEATURE_PARAMETER_LENGTH_KEYS}
+    | _FEATURE_PARAMETER_COUNT_KEYS
+    | _FEATURE_PARAMETER_ANGLE_KEYS
+    | {"circular_total_angle_unit"}
+)
+_FEATURE_PARAMETER_LENGTH_UNITS = {"mm", "cm", "m", "in"}
+
+
+def _normalize_feature_parameter_edit(raw_parameters: Any) -> Dict[str, Any]:
+    if not isinstance(raw_parameters, Mapping):
+        return {}
+
+    extra = set(raw_parameters.keys()) - _FEATURE_PARAMETER_ALLOWED_KEYS
+    if extra:
+        raise UnsupportedToolMappingError(
+            f"adjust_feature_parameters does not support parameter(s): {sorted(extra)}."
+        )
+
+    normalized: Dict[str, Any] = {}
+
+    if "name" in raw_parameters:
+        name = str(raw_parameters.get("name") or "").strip()
+        if not name:
+            raise UnsupportedToolMappingError("'parameters.name' must be non-empty when provided.")
+        normalized["name"] = name[:120]
+
+    for key in _FEATURE_PARAMETER_LENGTH_KEYS:
+        if key not in raw_parameters:
+            continue
+        unit = str(raw_parameters.get(f"{key}_unit") or "mm").strip().lower()
+        if unit not in _FEATURE_PARAMETER_LENGTH_UNITS:
+            raise UnsupportedToolMappingError(
+                f"'parameters.{key}_unit' must be one of ['mm', 'cm', 'm', 'in']."
+            )
+        normalized[key] = _length_to_mm(raw_parameters.get(key), field_name=f"parameters.{key}", unit=unit)
+
+    for key in _FEATURE_PARAMETER_COUNT_KEYS:
+        if key not in raw_parameters:
+            continue
+        normalized[key] = _to_int(raw_parameters.get(key), field_name=f"parameters.{key}")
+
+    for key in _FEATURE_PARAMETER_ANGLE_KEYS:
+        if key not in raw_parameters:
+            continue
+        angle = _to_float(raw_parameters.get(key), field_name=f"parameters.{key}")
+        unit = str(raw_parameters.get(f"{key}_unit") or "deg").strip().lower()
+        if unit not in {"deg", "rad"}:
+            raise UnsupportedToolMappingError("'parameters.circular_total_angle_unit' must be one of ['deg', 'rad'].")
+        normalized[key] = math.degrees(angle) if unit == "rad" else angle
+
+    if set(normalized.keys()) == {"name"}:
+        raise UnsupportedToolMappingError(
+            "adjust_feature_parameters requires at least one geometry parameter with 'parameters.name'."
+        )
+
+    return normalized
 
 
 def _to_float(value: Any, *, field_name: str) -> float:
@@ -939,6 +1018,31 @@ def map_tool_call_to_ir(
             requires=["parametric_timeline", "feature_lifecycle"],
             effects=_effects(
                 modifies={"features": [str(params.get("feature_ref") or params.get("feature_token") or "").strip()]},
+                invalidates={"features": ["downstream"], "faces": ["*"], "edges": ["*"], "bodies": ["topology_generation"]},
+            ),
+        )
+
+    if name == "adjust_feature_parameters":
+        feature_ref = str(params.get("feature_ref") or params.get("feature_token") or "").strip()
+        normalized_parameters = _normalize_feature_parameter_edit(params.get("parameters"))
+        return IROperation(
+            id=operation_id,
+            type="adjust_feature_parameters",
+            params=FeatureParameterEditParams(
+                feature_ref=feature_ref,
+                parameters=normalized_parameters,
+                description=str(params.get("description") or ""),
+                expected_name=str(params.get("expected_name") or "").strip() or None,
+                expected_timeline_index=_optional_int(
+                    params.get("expected_timeline_index"),
+                    field_name="expected_timeline_index",
+                ),
+            ),
+            dependencies=[],
+            metadata=metadata,
+            requires=_FEATURE_MUTATION_CAPABILITIES["adjust_feature_parameters"],
+            effects=_effects(
+                modifies={"features": [feature_ref]},
                 invalidates={"features": ["downstream"], "faces": ["*"], "edges": ["*"], "bodies": ["topology_generation"]},
             ),
         )

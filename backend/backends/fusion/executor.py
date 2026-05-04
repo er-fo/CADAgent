@@ -27,7 +27,9 @@ _FEATURE_PAYLOAD_TOOLS = {
     "unsuppress_feature",
 }
 _DELETE_FEATURE_TOOL = "delete_feature"
+_PARAMETER_EDIT_TOOL = "adjust_feature_parameters"
 _TIMELINE_DELETE_CAPABILITY = "timeline_feature_delete"
+_TIMELINE_PARAMETER_EDIT_CAPABILITY = "timeline_feature_parameter_edit"
 _SELECTION_PAYLOAD_TYPES = {
     "select_edges": "edge_operation",
     "clear_edge_selection": "edge_operation",
@@ -116,6 +118,11 @@ class FusionTargetExecutor:
                 self._request,
                 _TIMELINE_DELETE_CAPABILITY,
                 "feature_delete",
+            )
+        if tool_name == _PARAMETER_EDIT_TOOL:
+            return _request_declares_capability(
+                self._request,
+                _TIMELINE_PARAMETER_EDIT_CAPABILITY,
             )
         return tool_name in _FEATURE_PAYLOAD_TOOLS
 
@@ -430,6 +437,17 @@ class FusionTargetExecutor:
                 raw_result=raw_result,
             )
 
+        if tool_name == _PARAMETER_EDIT_TOOL and not self._should_send_feature_payload(tool_name):
+            return TargetExecutionResult(
+                success=False,
+                target=self.target_name,
+                message=(
+                    f"Fusion target requires client capability "
+                    f"'{_TIMELINE_PARAMETER_EDIT_CAPABILITY}' for '{tool_name}'."
+                ),
+                data={"tool_name": tool_name, "tool_input": tool_input},
+            )
+
         if self._should_send_feature_payload(tool_name) or tool_name in _SELECTION_PAYLOAD_TYPES:
             try:
                 payload_parameters = self._prepare_payload_parameters(session_id, tool_name, tool_input)
@@ -442,13 +460,35 @@ class FusionTargetExecutor:
                 )
 
             payload_type = "feature_operation" if self._should_send_feature_payload(tool_name) else _SELECTION_PAYLOAD_TYPES[tool_name]
-            payload = {
-                "type": payload_type,
-                "operation": tool_name,
-                "tool_use_id": tool_use_id,
-                "description": description or tool_input.get("description", ""),
-                "parameters": payload_parameters,
-            }
+            if tool_name == _PARAMETER_EDIT_TOOL:
+                editable_parameters = payload_parameters.get("parameters")
+                if not isinstance(editable_parameters, Mapping) or not editable_parameters:
+                    return TargetExecutionResult(
+                        success=False,
+                        target=self.target_name,
+                        message="Fusion IR parameter edit requires a non-empty nested 'parameters' object.",
+                        data={"tool_name": tool_name, "tool_input": tool_input},
+                    )
+                payload = {
+                    "type": payload_type,
+                    "operation": tool_name,
+                    "tool_use_id": tool_use_id,
+                    "description": description or tool_input.get("description", ""),
+                    "feature_token": payload_parameters.get("feature_token"),
+                    "parameters": dict(editable_parameters),
+                }
+                if str(payload_parameters.get("expected_name") or "").strip():
+                    payload["expected_name"] = payload_parameters["expected_name"]
+                if payload_parameters.get("expected_timeline_index") is not None:
+                    payload["expected_timeline_index"] = payload_parameters["expected_timeline_index"]
+            else:
+                payload = {
+                    "type": payload_type,
+                    "operation": tool_name,
+                    "tool_use_id": tool_use_id,
+                    "description": description or tool_input.get("description", ""),
+                    "parameters": payload_parameters,
+                }
             await self._manager.send_message(session_id, payload)
             try:
                 raw_result = await self._wait_for_matching_tool_result(session_id, tool_use_id)

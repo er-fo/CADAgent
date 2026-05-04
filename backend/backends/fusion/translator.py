@@ -18,6 +18,7 @@ from ...ir.types import (
     DeleteFeatureParams,
     ExtrudeParams,
     ExternalThreadParams,
+    FeatureParameterEditParams,
     FeatureSuppressionParams,
     FilletParams,
     IROperation,
@@ -41,6 +42,31 @@ _OPERATION_TO_FUSION = {
     "intersect": "Intersect",
 }
 _FACE_ALIAS_PATTERN = re.compile(r"^face_\d+$")
+_FEATURE_PARAMETER_LENGTH_KEYS = {
+    "distance",
+    "diameter",
+    "depth",
+    "radius",
+    "chamfer_distance",
+    "inside_thickness",
+    "outside_thickness",
+    "rectangular_spacing_one",
+    "rectangular_spacing_two",
+}
+
+
+def _fusion_feature_parameter_payload(parameters: Dict[str, Any]) -> Dict[str, Any]:
+    if set(parameters.keys()) == {"name"}:
+        raise ValueError("adjust_feature_parameters requires at least one geometry parameter with feature renames.")
+
+    payload: Dict[str, Any] = {}
+    for key, value in parameters.items():
+        payload[key] = value
+        if key in _FEATURE_PARAMETER_LENGTH_KEYS:
+            payload[f"{key}_unit"] = "mm"
+        elif key == "circular_total_angle":
+            payload["circular_total_angle_unit"] = "deg"
+    return payload
 
 
 def _mm_to_cm(value: float) -> float:
@@ -298,6 +324,20 @@ def translate_ir_to_fusion_tool_call(operation: IROperation) -> Tuple[str, Dict[
         if params.expected_timeline_index is not None:
             tool_input["expected_timeline_index"] = params.expected_timeline_index
         return "delete_feature", tool_input
+
+    if operation.type == "adjust_feature_parameters":
+        params = operation.params
+        if not isinstance(params, FeatureParameterEditParams):
+            raise ValueError("adjust_feature_parameters IR params shape mismatch")
+        tool_input = {
+            "feature_token": params.feature_ref,
+            "parameters": _fusion_feature_parameter_payload(dict(params.parameters)),
+            "description": params.description or "Adjust feature parameters",
+            "expected_name": params.expected_name or "",
+        }
+        if params.expected_timeline_index is not None:
+            tool_input["expected_timeline_index"] = params.expected_timeline_index
+        return "adjust_feature_parameters", tool_input
 
     if operation.type == "set_feature_suppression":
         params = operation.params
