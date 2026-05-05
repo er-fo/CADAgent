@@ -12,7 +12,7 @@ Resolved or materially improved:
 - Fusion-facing centimeter inputs are normalized into canonical IR millimeters, and the Fusion adapter converts canonical millimeters back to centimeters at execution boundaries.
 - Extrude `Intersect` is now accepted consistently by the Fusion code generator and tool schema.
 - Normal workflow execution now records and validates IR for feature and selection tools, while preserving the existing Fusion reference-resolution guardrails.
-- build123d/studio now fails explicitly for unsupported advanced operations instead of falling through into Fusion websocket execution.
+- build123d/studio now translates portable construction-plane datum/offset cases, solid revolve, and solid loft, and fails explicitly for unsupported advanced operations instead of falling through into Fusion websocket execution.
 - Committed IR state is now session-scoped rather than request-local, so follow-up requests can validate against prior successful operations and continue monotonic operation IDs.
 - Closed line/arc loops now require `list_sketch_profiles` confirmation before extrusion; the prompt no longer claims an inferred profile index that the validator cannot prove.
 - Direct Fusion IR execution preserves custom construction-plane identifiers such as `plane_0` while still failing closed on unresolved face aliases.
@@ -21,22 +21,22 @@ Resolved or materially improved:
 
 Remaining important gaps:
 
-- build123d directly supports the sketch/extrude subset, including ordered closed line/arc profiles and profile-inspection guards; advanced solid/feature operations are represented in IR but not translated into build123d geometry yet.
+- build123d directly supports the sketch/extrude subset, portable datum/offset construction planes, construction-axis solid revolve, solid loft, ordered closed line/arc profiles, and profile-inspection guards. Selector-dependent feature operations are represented in IR but not translated into build123d geometry yet.
 - Topology refs are represented and invalidated at a coarse level; durable semantic re-selection is still limited.
 - Fusion result topology is captured through target results/runtime refresh, but a fully populated persistent IR entity registry remains future work.
 - Direct Fusion IR execution for feature refs requires already-resolved tokens or an entity store; workflow execution remains the preferred path for ref-heavy feature operations.
 
 Phase 3/4/5 review note (2026-05-05):
 
-- Contract coverage in `backend/test_ir_parity_contract.py` and workflow/validator coverage in `backend/test_ir_mapper_validator.py` plus `backend/test_ir_workflow_routing.py` currently verify that phase-3 solid tools still fail closed for build123d, while phase-4/5 selector and lifecycle semantics are modeled for IR/Fusion but remain intentionally unsupported for build123d replay.
+- Contract coverage in `backend/test_ir_parity_contract.py` and workflow/validator coverage in `backend/test_ir_mapper_validator.py` plus `backend/test_ir_workflow_routing.py` verifies the supported portable Phase 3 build123d subset while preserving explicit unsupported/fusion-only behavior for Phase 4/5 selector and lifecycle semantics.
 
 ### Current Post-Widening Matrix
 
 | Area | Current IR Status | Fusion Adapter | build123d Adapter |
 | --- | --- | --- | --- |
-| Construction planes | Modeled with datum, offset, angle-to-edge, and face-normal params | Translates to existing Fusion codegen and resolves entity refs | Explicitly unsupported |
+| Construction planes | Modeled with datum, offset, angle-to-edge, and face-normal params | Translates to existing Fusion codegen and resolves entity refs | Datum and offset_from_datum supported; face/edge-relative modes fail closed pending portable selectors |
 | Sketch primitives | Sketches, rectangles, circles, lines, arcs, and profile queries are modeled | Translates to Fusion codegen with canonical mm-to-cm conversion | Rectangles/circles supported; ordered closed line/arc profiles emit `BuildLine`/`make_face`; extrudes materialize deterministic build123d sketches |
-| Solid features | Extrude, revolve, loft, fillet, chamfer, shell, holes, threads, patterns modeled | Translates to Fusion codegen or feature payloads | Explicitly unsupported outside the sketch/extrude subset |
+| Solid features | Extrude, revolve, loft, fillet, chamfer, shell, holes, threads, patterns modeled | Translates to Fusion codegen or feature payloads | Extrude, portable solid revolve, and portable solid loft supported; selector-dependent features remain explicitly unsupported |
 | Selection and timeline | Selection, feature listing, delete, and jump operations modeled | Routed to Fusion payload/codegen paths | Explicitly unsupported |
 | Units | IR is canonical millimeters | Converts to Fusion centimeters at the boundary | Consumes millimeters |
 | Results and refs | Operations can carry target execution results, effects, selectors, and invalidation metadata | Runtime refresh remains the source of detailed topology refs | Persistent IR entity registry remains future work |

@@ -25,6 +25,7 @@ try:
         FilletParams,
         IRDocument,
         IROperation,
+        LoftParams,
         PatternFeatureParams,
         RevolveParams,
         SelectEntitiesParams,
@@ -52,6 +53,7 @@ except ImportError:  # pragma: no cover
         FilletParams,
         IRDocument,
         IROperation,
+        LoftParams,
         PatternFeatureParams,
         RevolveParams,
         SelectEntitiesParams,
@@ -875,6 +877,162 @@ def test_build123d_translator_rejects_unsupported_extrude_operation():
         translate_ir_document_to_build123d(document)
 
 
+def test_build123d_translator_supports_portable_construction_planes():
+    document = IRDocument(
+        version="1.0",
+        units="mm",
+        operations=[
+            IROperation(
+                id="op_plane",
+                type="create_construction_plane",
+                params=CreateConstructionPlaneParams(
+                    plane="offset_plane",
+                    mode="offset_from_datum",
+                    base_datum_plane="XY",
+                    offset=15.0,
+                ),
+            ),
+            IROperation(
+                id="op_sketch",
+                type="create_sketch",
+                params=CreateSketchParams(plane="offset_plane", sketch="sketch_offset"),
+            ),
+        ],
+        metadata={"source": "test"},
+    )
+
+    program = translate_ir_document_to_build123d(document)
+
+    assert "_construction_planes['offset_plane'] = Plane.XY.offset(15.0)" in program.code
+    assert "_sketch_planes['sketch_offset'] = _construction_planes['offset_plane']" in program.code
+
+
+def test_build123d_translator_rejects_nonportable_construction_plane_modes():
+    document = IRDocument(
+        version="1.0",
+        units="mm",
+        operations=[
+            IROperation(
+                id="op_plane",
+                type="create_construction_plane",
+                params=CreateConstructionPlaneParams(
+                    plane="face_plane",
+                    mode="face_normal",
+                    face="face_0",
+                ),
+            )
+        ],
+        metadata={"source": "test"},
+    )
+
+    with pytest.raises(ValueError, match="datum and offset_from_datum"):
+        translate_ir_document_to_build123d(document)
+
+
+def test_build123d_translator_supports_revolve_and_loft_code_generation():
+    document = IRDocument(
+        version="1.0",
+        units="mm",
+        operations=[
+            IROperation(
+                id="op_revolve_sketch",
+                type="create_sketch",
+                params=CreateSketchParams(plane="XZ", sketch="revolve_sketch"),
+            ),
+            IROperation(
+                id="op_revolve_rect",
+                type="add_rectangle",
+                params=AddRectangleParams(sketch="revolve_sketch", center=[20.0, 0.0], width=10.0, height=8.0),
+            ),
+            IROperation(
+                id="op_revolve",
+                type="revolve",
+                params=RevolveParams(
+                    profile="revolve_sketch:profile_0",
+                    sketch="revolve_sketch",
+                    axis={"type": "construction", "axis": "z"},
+                    extent={"mode": "angle", "angle_degrees": 180.0},
+                ),
+            ),
+            IROperation(
+                id="op_loft_plane",
+                type="create_construction_plane",
+                params=CreateConstructionPlaneParams(
+                    plane="loft_top",
+                    mode="offset_from_datum",
+                    base_datum_plane="XY",
+                    offset=20.0,
+                ),
+            ),
+            IROperation(
+                id="op_loft_sketch_0",
+                type="create_sketch",
+                params=CreateSketchParams(plane="XY", sketch="loft_bottom"),
+            ),
+            IROperation(
+                id="op_loft_rect_0",
+                type="add_rectangle",
+                params=AddRectangleParams(sketch="loft_bottom", center=[0.0, 0.0], width=10.0, height=10.0),
+            ),
+            IROperation(
+                id="op_loft_sketch_1",
+                type="create_sketch",
+                params=CreateSketchParams(plane="loft_top", sketch="loft_top_sketch"),
+            ),
+            IROperation(
+                id="op_loft_rect_1",
+                type="add_rectangle",
+                params=AddRectangleParams(sketch="loft_top_sketch", center=[0.0, 0.0], width=20.0, height=20.0),
+            ),
+            IROperation(
+                id="op_loft",
+                type="loft",
+                params=LoftParams(profile_ids=["loft_bottom", "loft_top_sketch"]),
+            ),
+        ],
+        metadata={"source": "test"},
+    )
+
+    program = translate_ir_document_to_build123d(document)
+
+    assert "revolve(axis=Axis.Z, revolution_arc=180.0, mode=Mode.ADD)" in program.code
+    assert "loft(mode=Mode.ADD)" in program.code
+    assert "from build123d import Axis" in program.code
+
+
+def test_build123d_translator_rejects_nonportable_revolve_axis():
+    document = IRDocument(
+        version="1.0",
+        units="mm",
+        operations=[
+            IROperation(
+                id="op_sketch",
+                type="create_sketch",
+                params=CreateSketchParams(plane="XZ", sketch="sketch_0"),
+            ),
+            IROperation(
+                id="op_rect",
+                type="add_rectangle",
+                params=AddRectangleParams(sketch="sketch_0", center=[20.0, 0.0], width=10.0, height=8.0),
+            ),
+            IROperation(
+                id="op_revolve",
+                type="revolve",
+                params=RevolveParams(
+                    profile="sketch_0:profile_0",
+                    sketch="sketch_0",
+                    axis={"type": "edge", "edge_token": "edge_0"},
+                    extent={"mode": "full"},
+                ),
+            ),
+        ],
+        metadata={"source": "test"},
+    )
+
+    with pytest.raises(ValueError, match="construction axes"):
+        translate_ir_document_to_build123d(document)
+
+
 def test_build123d_translator_supports_line_and_arc_sketch_primitives():
     document = IRDocument(
         version="1.0",
@@ -1106,6 +1264,81 @@ def _build_line_arc_profile_document() -> IRDocument:
     )
 
 
+def _build_revolve_document() -> IRDocument:
+    return IRDocument(
+        version="1.0",
+        units="mm",
+        operations=[
+            IROperation(
+                id="op_1",
+                type="create_sketch",
+                params=CreateSketchParams(plane="XZ", sketch="sketch_0"),
+            ),
+            IROperation(
+                id="op_2",
+                type="add_rectangle",
+                params=AddRectangleParams(sketch="sketch_0", center=[20.0, 0.0], width=10.0, height=20.0),
+            ),
+            IROperation(
+                id="op_3",
+                type="revolve",
+                params=RevolveParams(
+                    profile="sketch_0:profile_0",
+                    sketch="sketch_0",
+                    axis={"type": "construction", "axis": "z"},
+                    extent={"mode": "full"},
+                ),
+            ),
+        ],
+        metadata={"source": "test"},
+    )
+
+
+def _build_loft_document() -> IRDocument:
+    return IRDocument(
+        version="1.0",
+        units="mm",
+        operations=[
+            IROperation(
+                id="op_1",
+                type="create_sketch",
+                params=CreateSketchParams(plane="XY", sketch="bottom"),
+            ),
+            IROperation(
+                id="op_2",
+                type="add_rectangle",
+                params=AddRectangleParams(sketch="bottom", center=[0.0, 0.0], width=10.0, height=10.0),
+            ),
+            IROperation(
+                id="op_3",
+                type="create_construction_plane",
+                params=CreateConstructionPlaneParams(
+                    plane="top_plane",
+                    mode="offset_from_datum",
+                    base_datum_plane="XY",
+                    offset=20.0,
+                ),
+            ),
+            IROperation(
+                id="op_4",
+                type="create_sketch",
+                params=CreateSketchParams(plane="top_plane", sketch="top"),
+            ),
+            IROperation(
+                id="op_5",
+                type="add_rectangle",
+                params=AddRectangleParams(sketch="top", center=[0.0, 0.0], width=20.0, height=20.0),
+            ),
+            IROperation(
+                id="op_6",
+                type="loft",
+                params=LoftParams(profile_ids=["bottom", "top"]),
+            ),
+        ],
+        metadata={"source": "test"},
+    )
+
+
 @pytest.mark.skipif(not HAS_BUILD123D, reason="build123d is required for real-geometry adapter tests")
 def test_build123d_executor_creates_real_cube_and_exports_step(tmp_path: Path):
     executor = Build123dTargetExecutor()
@@ -1150,6 +1383,29 @@ def test_build123d_executor_extrudes_closed_line_arc_profile():
     expected_volume = 0.5 * 3.141592653589793 * 10.0 * 10.0 * 5.0
     assert abs(entities["volume_mm3"] - expected_volume) < 5.0
     assert entities["faces"] == 4
+
+
+@pytest.mark.skipif(not HAS_BUILD123D, reason="build123d is required for real-geometry adapter tests")
+def test_build123d_executor_revolves_profile():
+    executor = Build123dTargetExecutor()
+    result = asyncio.run(executor.execute_document("s_revolve", _build_revolve_document(), request_id="revolve"))
+
+    assert result.success, result.message
+    entities = result.data["entities"]
+    expected_volume = 2.0 * 3.141592653589793 * 20.0 * 10.0 * 20.0
+    assert abs(entities["volume_mm3"] - expected_volume) < 25.0
+    assert entities["faces"] == 4
+
+
+@pytest.mark.skipif(not HAS_BUILD123D, reason="build123d is required for real-geometry adapter tests")
+def test_build123d_executor_lofts_between_offset_profiles():
+    executor = Build123dTargetExecutor()
+    result = asyncio.run(executor.execute_document("s_loft", _build_loft_document(), request_id="loft"))
+
+    assert result.success, result.message
+    entities = result.data["entities"]
+    assert abs(entities["volume_mm3"] - 4666.666666666667) < 5.0
+    assert entities["faces"] == 6
 
 
 @pytest.mark.skipif(not HAS_BUILD123D, reason="build123d is required for real-geometry adapter tests")

@@ -131,13 +131,13 @@ def test_parity_contract_rows_are_complete(tool_name, capability):
             {"name": "revolve_profile", "input": {"sketch_id": "s0", "profile_index": 0, "axis": {"type": "construction", "axis": "z"}, "extent": {"mode": "full"}, "operation": "NewBody"}},
             "revolve",
             "revolve_profile",
-            False,
+            True,
         ),
         (
             {"name": "create_loft", "input": {"profile_ids": ["s0", "s1"], "operation": "NewBody"}},
             "loft",
             "create_loft",
-            False,
+            True,
         ),
         (
             {"name": "apply_fillet", "input": {"edge_refs": ["edge_0"], "radius": 2, "radius_unit": "mm"}},
@@ -263,7 +263,7 @@ def test_parity_contract_rows_are_complete(tool_name, capability):
             {"name": "create_construction_plane", "input": {"plane_id": "p0", "mode": "offset_from_datum", "base_datum_plane": "XY", "offset_cm": 1}},
             "create_construction_plane",
             "create_construction_plane",
-            False,
+            True,
         ),
     ],
 )
@@ -294,6 +294,44 @@ def test_golden_tool_call_maps_validates_and_preserves_fusion_translation(
                 id="op_rect",
                 type="add_rectangle",
                 params=AddRectangleParams(sketch="s0", center=[0.0, 0.0], width=10.0, height=10.0),
+            ),
+            operation,
+        ]
+    elif expected_ir == "revolve":
+        operations = [
+            IROperation(
+                id="op_sketch",
+                type="create_sketch",
+                params=CreateSketchParams(plane="XZ", sketch="s0"),
+            ),
+            IROperation(
+                id="op_rect",
+                type="add_rectangle",
+                params=AddRectangleParams(sketch="s0", center=[20.0, 0.0], width=10.0, height=10.0),
+            ),
+            operation,
+        ]
+    elif expected_ir == "loft":
+        operations = [
+            IROperation(
+                id="op_sketch_0",
+                type="create_sketch",
+                params=CreateSketchParams(plane="XY", sketch="s0"),
+            ),
+            IROperation(
+                id="op_rect_0",
+                type="add_rectangle",
+                params=AddRectangleParams(sketch="s0", center=[0.0, 0.0], width=10.0, height=10.0),
+            ),
+            IROperation(
+                id="op_sketch_1",
+                type="create_sketch",
+                params=CreateSketchParams(plane="XY", sketch="s1"),
+            ),
+            IROperation(
+                id="op_rect_1",
+                type="add_rectangle",
+                params=AddRectangleParams(sketch="s1", center=[0.0, 0.0], width=20.0, height=20.0),
             ),
             operation,
         ]

@@ -12,10 +12,13 @@ from ...ir.types import (
     AddCircleParams,
     AddLineParams,
     AddRectangleParams,
+    CreateConstructionPlaneParams,
     CreateSketchParams,
     ExtrudeParams,
     IRDocument,
     ListSketchProfilesParams,
+    LoftParams,
+    RevolveParams,
 )
 
 
@@ -43,7 +46,7 @@ class _SketchState:
     operations: List[Tuple[str, object]]
 
 
-def _plane_expr(plane: str) -> str:
+def _datum_plane_expr(plane: str) -> str:
     plane_expr = {
         "XY": "Plane.XY",
         "XZ": "Plane.XZ",
@@ -52,6 +55,31 @@ def _plane_expr(plane: str) -> str:
     if plane_expr is None:
         raise ValueError(f"Unsupported sketch plane for build123d translator: {plane}")
     return plane_expr
+
+
+def _plane_expr(plane: str, construction_planes: Dict[str, str]) -> str:
+    if plane in construction_planes:
+        return f"_construction_planes[{plane!r}]"
+    return _datum_plane_expr(plane)
+
+
+def _construction_plane_expr(params: CreateConstructionPlaneParams) -> str:
+    if params.mode == "datum":
+        datum_plane = params.datum_axis_plane or params.base_datum_plane or params.plane
+        return _datum_plane_expr(str(datum_plane).strip().upper())
+
+    if params.mode == "offset_from_datum":
+        if params.base_datum_plane is None:
+            raise ValueError("create_construction_plane offset_from_datum requires base_datum_plane")
+        if params.offset is None:
+            raise ValueError("create_construction_plane offset_from_datum requires offset")
+        return f"{_datum_plane_expr(params.base_datum_plane)}.offset({params.offset})"
+
+    raise Build123dCapabilityError(
+        "create_construction_plane",
+        "build123d construction planes currently support only portable datum and offset_from_datum modes; "
+        f"{params.mode} depends on target face/edge topology selectors.",
+    )
 
 
 def _mode_expr(operation: str) -> str:
@@ -64,6 +92,39 @@ def _mode_expr(operation: str) -> str:
     if mode_expr is None:
         raise ValueError(f"Unsupported extrude operation for build123d translator: {operation}")
     return mode_expr
+
+
+def _axis_expr(axis: Dict[str, object]) -> str:
+    axis_type = str(axis.get("type") or "").strip().lower()
+    if axis_type == "construction":
+        axis_name = str(axis.get("axis") or "").strip().lower()
+        axis_expr = {"x": "Axis.X", "y": "Axis.Y", "z": "Axis.Z"}.get(axis_name)
+        if axis_expr is None:
+            raise ValueError(f"Unsupported build123d construction revolve axis: {axis_name}")
+        return axis_expr
+
+    raise Build123dCapabilityError(
+        "revolve",
+        "build123d revolve currently supports only portable construction axes; "
+        f"axis type {axis_type or '<missing>'} requires non-portable selector resolution.",
+    )
+
+
+def _revolution_arc(extent: Dict[str, object]) -> float:
+    mode = str(extent.get("mode") or "full").strip().lower()
+    if mode == "full":
+        return 360.0
+    if mode == "angle":
+        angle = extent.get("angle_degrees")
+        if angle is None:
+            raise ValueError("revolve extent mode angle requires angle_degrees")
+        return float(angle)
+
+    raise Build123dCapabilityError(
+        "revolve",
+        "build123d revolve currently supports only full and angle extents; "
+        f"extent mode {mode or '<missing>'} requires non-portable target entity semantics.",
+    )
 
 
 def _point_expr(point: Sequence[float]) -> str:
@@ -218,21 +279,37 @@ def translate_ir_document_to_build123d(document: IRDocument) -> Build123dProgram
     lets line/arc loops become one build123d face instead of isolated curves.
     """
     lines: List[str] = [
-        "from build123d import BuildLine, BuildPart, BuildSketch, CenterArc, Circle, Line, Locations, Mode, Plane, Rectangle, extrude, make_face",
+        "from build123d import Axis, BuildLine, BuildPart, BuildSketch, CenterArc, Circle, Line, Locations, Mode, Plane, Rectangle, extrude, loft, make_face, revolve",
         "",
+        "_construction_planes = {}",
         "_sketch_planes = {}",
         "_last_sketch_for_profile = {}",
         "",
         "with BuildPart() as _part:",
     ]
     sketches: Dict[str, _SketchState] = {}
+    construction_planes: Dict[str, str] = {}
 
     for op in document.operations:
+        if op.type == "create_construction_plane":
+            params = op.params
+            if not isinstance(params, CreateConstructionPlaneParams):
+                raise ValueError("create_construction_plane IR params shape mismatch")
+            plane_expr = _construction_plane_expr(params)
+            construction_planes[params.plane] = plane_expr
+            lines.extend(
+                [
+                    f"    # {op.id}: create_construction_plane",
+                    f"    _construction_planes[{params.plane!r}] = {plane_expr}",
+                ]
+            )
+            continue
+
         if op.type == "create_sketch":
             params = op.params
             if not isinstance(params, CreateSketchParams):
                 raise ValueError("create_sketch IR params shape mismatch")
-            plane_expr = _plane_expr(params.plane)
+            plane_expr = _plane_expr(params.plane, construction_planes)
             sketches[params.sketch] = _SketchState(operations=[])
             lines.extend(
                 [
@@ -320,6 +397,57 @@ def translate_ir_document_to_build123d(document: IRDocument) -> Build123dProgram
             _append_sketch_plane_guard(lines, sketch_id, "extrude")
             _append_sketch_build(lines, sketch_id, sketch_state)
             lines.append(f"    extrude(amount={signed_distance}, mode={_mode_expr(params.operation)})")
+            continue
+
+        if op.type == "revolve":
+            params = op.params
+            if not isinstance(params, RevolveParams):
+                raise ValueError("revolve IR params shape mismatch")
+            if not params.is_solid:
+                raise Build123dCapabilityError(
+                    "revolve",
+                    "build123d translator supports solid revolve output only; surface revolve remains non-portable.",
+                )
+            sketch_id = params.sketch.strip()
+            if not sketch_id and ":" in params.profile:
+                sketch_id = params.profile.split(":", 1)[0].strip()
+            sketch_state = sketches.get(sketch_id)
+            if sketch_state is None:
+                raise ValueError(f"Sketch '{sketch_id}' has no build123d sketch state for revolve.")
+            lines.extend(
+                [
+                    f"    # {op.id}: revolve",
+                ]
+            )
+            _append_sketch_plane_guard(lines, sketch_id, "revolve")
+            _append_sketch_build(lines, sketch_id, sketch_state)
+            lines.append(
+                f"    revolve(axis={_axis_expr(params.axis)}, revolution_arc={_revolution_arc(params.extent)}, mode={_mode_expr(params.operation)})"
+            )
+            continue
+
+        if op.type == "loft":
+            params = op.params
+            if not isinstance(params, LoftParams):
+                raise ValueError("loft IR params shape mismatch")
+            if not params.prefer_solid:
+                raise Build123dCapabilityError(
+                    "loft",
+                    "build123d translator supports solid loft output only; surface loft remains non-portable.",
+                )
+            lines.extend(
+                [
+                    f"    # {op.id}: loft",
+                ]
+            )
+            for profile_id in params.profile_ids:
+                sketch_id = profile_id.split(":", 1)[0].strip()
+                sketch_state = sketches.get(sketch_id)
+                if sketch_state is None:
+                    raise ValueError(f"Sketch '{sketch_id}' has no build123d sketch state for loft.")
+                _append_sketch_plane_guard(lines, sketch_id, "loft")
+                _append_sketch_build(lines, sketch_id, sketch_state)
+            lines.append(f"    loft(mode={_mode_expr(params.operation)})")
             continue
 
         if op.type == "list_sketch_profiles":

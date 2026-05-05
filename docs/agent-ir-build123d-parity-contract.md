@@ -28,13 +28,17 @@ The agent input → IR path already models the broad Fusion CAD tool surface, bu
 - `add_arc`
 - `list_sketch_profiles`
 - `extrude_profile`
+- portable `create_construction_plane` datum/offset modes
+- portable solid `revolve_profile` using construction axes and full/angle extents
+- portable solid `create_loft` across ordered sketch/profile sections
 
 ## Phase 3/4/5 Review Status
 
 ### Phase 3: build123d solid feature parity
 
-- The parity contract and golden tests confirm that only sketch/profile extrusion is currently translated into build123d code.
-- `revolve_profile` and `create_loft` map into shared IR and preserve Fusion translation, but the build123d adapter rejects them with typed capability errors instead of falling through.
+- The parity contract and golden tests now cover portable construction planes, solid revolve, and solid loft in the build123d translator.
+- `revolve_profile` supports construction-axis full/angle solid revolves. Non-portable edge/face axes and to-entity extents still fail closed with typed capability errors.
+- `create_loft` supports ordered solid loft sections that can be rebuilt from sketch/profile refs. Surface loft policy and guide/rail semantics remain outside the current portable contract.
 - `apply_fillet`, `apply_chamfer`, `create_shell`, `create_simple_hole`, `create_counterbore_hole`, `create_tapped_hole`, and `create_external_thread` remain intentionally unsupported for build123d because they still depend on portable selector/replay semantics.
 
 ### Phase 4: entity registry and selectors
@@ -56,7 +60,7 @@ The agent input → IR path already models the broad Fusion CAD tool surface, bu
 
 ## Remaining Work
 
-- Implement build123d translation for portable solid feature operations beyond sketch/profile extrusion.
+- Implement build123d translation for remaining selector-dependent solid operations beyond construction planes, extrude, revolve, and loft.
 - Add durable topology selectors for edge/face/body-dependent operations.
 - Define replay/revision semantics for Fusion timeline and feature lifecycle operations.
 

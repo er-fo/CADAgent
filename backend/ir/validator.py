@@ -81,6 +81,16 @@ def _sketch_ids_from_committed(operations: Sequence[IROperation]) -> set[str]:
     return sketches
 
 
+def _construction_plane_ids_from_committed(operations: Sequence[IROperation]) -> set[str]:
+    planes: set[str] = set()
+    for op in operations:
+        if op.type != "create_construction_plane":
+            continue
+        if isinstance(op.params, CreateConstructionPlaneParams) and _is_nonempty_string(op.params.plane):
+            planes.add(op.params.plane.strip())
+    return planes
+
+
 def _has_committed_profile_for_sketch(
     operations: Sequence[IROperation],
     sketch_id: str,
@@ -191,8 +201,11 @@ def validate_operation(operation: IROperation) -> List[str]:
             errors.append("create_sketch plane must be provided")
             return errors
         source = str((operation.metadata or {}).get("source") or "").strip().lower()
-        if source == "studio" and str(params.plane).strip().upper() not in _DATUM_PLANES:
-            errors.append("create_sketch plane for studio target must be one of XY/XZ/YZ")
+        if source == "studio" and _FACE_ALIAS_PATTERN.match(str(params.plane).strip()):
+            errors.append(
+                "create_sketch plane for studio target must be a datum plane (XY/XZ/YZ) "
+                "or committed construction plane ID; alias refs like face_N are not allowed"
+            )
         if source == "fusion" and _FACE_ALIAS_PATTERN.match(str(params.plane).strip()):
             errors.append(
                 "create_sketch plane for fusion target must be a datum plane (XY/XZ/YZ), "
@@ -641,12 +654,21 @@ def validate_ir_candidate(
     errors = validate_operation(operation)
     committed_ids = {op.id for op in committed_operations}
     committed_sketches = _sketch_ids_from_committed(committed_operations)
+    committed_planes = _construction_plane_ids_from_committed(committed_operations)
 
     missing_dependencies = [dep for dep in operation.dependencies if dep not in committed_ids]
     if missing_dependencies:
         errors.append(
             "Operation depends on uncommitted operation(s): " + ", ".join(missing_dependencies)
         )
+
+    if operation.type == "create_sketch" and isinstance(operation.params, CreateSketchParams):
+        plane = operation.params.plane.strip()
+        source = str((operation.metadata or {}).get("source") or "").strip().lower()
+        if source == "studio" and plane.upper() not in _DATUM_PLANES and plane not in committed_planes:
+            errors.append(
+                f"create_sketch plane '{plane}' is not a committed construction plane for studio target"
+            )
 
     if operation.type in {"add_rectangle", "add_circle", "add_line", "add_arc", "list_sketch_profiles"}:
         sketch = getattr(operation.params, "sketch", "")

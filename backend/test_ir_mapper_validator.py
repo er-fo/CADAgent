@@ -389,7 +389,44 @@ def test_mapper_preserves_studio_non_datum_create_sketch_plane_for_validation():
     assert op.params.plane == "face_0"
     errors = validate_operation(op)
     assert errors
-    assert any("create_sketch plane for studio target must be one of XY/XZ/YZ" in error for error in errors)
+    assert any("alias refs like face_N are not allowed" in error for error in errors)
+
+
+def test_validator_allows_studio_sketch_on_committed_construction_plane():
+    state = IRDocumentState()
+    plane_op = map_tool_call_to_ir(
+        {
+            "name": "create_construction_plane",
+            "input": {
+                "plane_id": "offset_plane",
+                "mode": "offset_from_datum",
+                "base_datum_plane": "XY",
+                "offset_cm": 1,
+            },
+        },
+        state,
+        metadata={"source": "studio"},
+    )
+    sketch_op = map_tool_call_to_ir(
+        {"name": "create_sketch", "input": {"plane_id": "offset_plane", "sketch_id": "studio_sketch"}},
+        state,
+        metadata={"source": "studio"},
+    )
+
+    assert not validate_ir_candidate(plane_op, [])
+    assert not validate_ir_candidate(sketch_op, [plane_op])
+
+
+def test_validator_rejects_studio_sketch_on_missing_construction_plane():
+    state = IRDocumentState()
+    sketch_op = map_tool_call_to_ir(
+        {"name": "create_sketch", "input": {"plane_id": "missing_plane", "sketch_id": "studio_sketch"}},
+        state,
+        metadata={"source": "studio"},
+    )
+
+    errors = validate_ir_candidate(sketch_op, [])
+    assert any("not a committed construction plane" in error for error in errors)
 
 
 def test_mapper_populates_dependencies_for_sketch_flow():
