@@ -1,4 +1,4 @@
-"""Phase 0/1 parity contract tests for agent input → IR → target adapters."""
+"""IR parity contract tests for agent input → IR → Fusion/build123d adapters."""
 
 from __future__ import annotations
 
