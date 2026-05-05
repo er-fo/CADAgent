@@ -26,6 +26,10 @@ Remaining important gaps:
 - Fusion result topology is captured through target results/runtime refresh, but a fully populated persistent IR entity registry remains future work.
 - Direct Fusion IR execution for feature refs requires already-resolved tokens or an entity store; workflow execution remains the preferred path for ref-heavy feature operations.
 
+Phase 3/4/5 review note (2026-05-05):
+
+- Contract coverage in `backend/test_ir_parity_contract.py` and workflow/validator coverage in `backend/test_ir_mapper_validator.py` plus `backend/test_ir_workflow_routing.py` currently verify that phase-3 solid tools still fail closed for build123d, while phase-4/5 selector and lifecycle semantics are modeled for IR/Fusion but remain intentionally unsupported for build123d replay.
+
 ### Current Post-Widening Matrix
 
 | Area | Current IR Status | Fusion Adapter | build123d Adapter |
