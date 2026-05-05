@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import List
 
+from ...ir.capabilities import get_build123d_capability_for_ir_operation
 from ...ir.types import (
     AddCircleParams,
     AddRectangleParams,
@@ -18,6 +19,17 @@ from ...ir.types import (
 @dataclass(frozen=True)
 class Build123dProgram:
     code: str
+
+
+class Build123dCapabilityError(ValueError):
+    """Raised when the build123d target lacks a contracted IR capability."""
+
+    def __init__(self, operation_type: str, reason: str):
+        self.operation_type = operation_type
+        self.reason = reason
+        super().__init__(
+            f"Unsupported IR operation for build123d translator: {operation_type}. {reason}"
+        )
 
 
 def _plane_expr(plane: str) -> str:
@@ -134,10 +146,8 @@ def translate_ir_document_to_build123d(document: IRDocument) -> Build123dProgram
             )
             continue
 
-        raise ValueError(
-            f"Unsupported IR operation for build123d translator: {op.type}. "
-            "This operation requires a target capability that the build123d adapter has not implemented directly."
-        )
+        capability = get_build123d_capability_for_ir_operation(op.type)
+        raise Build123dCapabilityError(op.type, capability.build123d_reason)
 
     lines.extend(
         [
