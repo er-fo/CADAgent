@@ -601,6 +601,118 @@ def test_mapper_covers_revolve_loft_and_feature_operations():
     assert hole.params.depth == 12.0
 
 
+def test_mapper_captures_phase_4_selector_metadata():
+    state = IRDocumentState()
+
+    fillet = map_tool_call_to_ir(
+        {
+            "name": "apply_fillet",
+            "input": {
+                "edge_refs": ["edge_0", "edge_1"],
+                "radius": 2.0,
+                "radius_unit": "mm",
+                "include_tangent_edges": False,
+            },
+        },
+        state,
+    )
+    shell = map_tool_call_to_ir(
+        {
+            "name": "create_shell",
+            "input": {
+                "mode": "open",
+                "face_refs": ["face_0"],
+                "inside_thickness": 1.5,
+                "is_tangent_chain": False,
+            },
+        },
+        state,
+    )
+    select_faces = map_tool_call_to_ir(
+        {
+            "name": "select_faces",
+            "input": {"face_refs": ["face_0", "face_1"], "clear_existing": False},
+        },
+        state,
+    )
+    clear_faces = map_tool_call_to_ir(
+        {"name": "clear_face_selection", "input": {}},
+        state,
+    )
+
+    assert fillet.selectors == [{"kind": "edge", "refs": ["edge_0", "edge_1"], "tangent_chain": False}]
+    assert shell.selectors == [{"kind": "face", "refs": ["face_0"]}]
+    assert select_faces.type == "select_entities"
+    assert select_faces.params.kind == "face"
+    assert select_faces.params.refs == ["face_0", "face_1"]
+    assert select_faces.params.clear_existing is False
+    assert select_faces.selectors == [{"kind": "face", "refs": ["face_0", "face_1"]}]
+    assert clear_faces.type == "clear_selection"
+    assert clear_faces.effects.invalidates == {"selection": ["face"]}
+
+
+def test_mapper_captures_phase_5_invalidation_semantics():
+    state = IRDocumentState()
+
+    delete_feature = map_tool_call_to_ir(
+        {
+            "name": "delete_feature",
+            "input": {
+                "feature_token": "feature-token-1",
+                "expected_name": "Shell1",
+                "expected_timeline_index": 8,
+            },
+        },
+        state,
+    )
+    parameter_edit = map_tool_call_to_ir(
+        {
+            "name": "adjust_feature_parameters",
+            "input": {
+                "feature_token": "feature-token-2",
+                "parameters": {"distance": 5.0},
+                "expected_name": "Extrude1",
+            },
+        },
+        state,
+    )
+    suppress_feature = map_tool_call_to_ir(
+        {
+            "name": "suppress_feature",
+            "input": {"feature_token": "feature-token-3"},
+        },
+        state,
+    )
+    jump = map_tool_call_to_ir(
+        {
+            "name": "jump_to_timeline_position",
+            "input": {"target_index": 4, "reason": "rollback failed branch"},
+        },
+        state,
+    )
+
+    for operation, feature_ref in (
+        (delete_feature, "feature-token-1"),
+        (parameter_edit, "feature-token-2"),
+        (suppress_feature, "feature-token-3"),
+    ):
+        assert operation.effects.modifies == {"features": [feature_ref]}
+        assert operation.effects.invalidates == {
+            "features": ["downstream"],
+            "faces": ["*"],
+            "edges": ["*"],
+            "bodies": ["topology_generation"],
+        }
+
+    assert jump.requires == ["parametric_timeline", "document_revision"]
+    assert jump.effects.invalidates == {
+        "operations": ["after_marker"],
+        "features": ["after_marker"],
+        "faces": ["*"],
+        "edges": ["*"],
+    }
+
+
 def test_validator_rejects_invalid_widened_operations():
     state = IRDocumentState()
     bad_shell = map_tool_call_to_ir(
