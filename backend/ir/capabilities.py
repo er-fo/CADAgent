@@ -172,8 +172,8 @@ CAD_TOOL_CAPABILITIES: Dict[str, ToolCapability] = {
         tool_name="create_pattern_feature",
         ir_operation="pattern_feature",
         category="pattern_feature",
-        build123d_status="unsupported",
-        build123d_reason="Feature patterns need portable feature refs and pattern replay before build123d translation.",
+        build123d_status="supported",
+        build123d_reason="Replays explicit committed simple-hole, counterbore-hole, and tapped-hole seed refs for rectangular global-axis and circular global-origin-Z patterns; other seed or axis forms fail closed.",
     ),
     "select_edges": ToolCapability(
         tool_name="select_edges",

@@ -19,7 +19,7 @@ try:
     )
     from .ir.document import IRDocumentState
     from .ir.mapper import map_tool_call_to_ir
-    from .ir.types import AddRectangleParams, CreateSketchParams, ExtrudeParams, IRDocument, IROperation
+    from .ir.types import AddRectangleParams, CreateSketchParams, ExtrudeParams, IRDocument, IROperation, SimpleHoleParams
     from .ir.validator import validate_operation
 except ImportError:  # pragma: no cover
     from backend.backend.backends.build123d.translator import Build123dCapabilityError, translate_ir_document_to_build123d
@@ -32,7 +32,7 @@ except ImportError:  # pragma: no cover
     )
     from backend.backend.ir.document import IRDocumentState
     from backend.backend.ir.mapper import map_tool_call_to_ir
-    from backend.backend.ir.types import AddRectangleParams, CreateSketchParams, ExtrudeParams, IRDocument, IROperation
+    from backend.backend.ir.types import AddRectangleParams, CreateSketchParams, ExtrudeParams, IRDocument, IROperation, SimpleHoleParams
     from backend.backend.ir.validator import validate_operation
 
 
@@ -182,10 +182,10 @@ def test_parity_contract_rows_are_complete(tool_name, capability):
             True,
         ),
         (
-            {"name": "create_pattern_feature", "input": {"pattern_type": "rectangular", "feature_refs": ["feature_0"], "count_x": 2, "spacing_x_cm": 1}},
+            {"name": "create_pattern_feature", "input": {"pattern_type": "rectangular", "feature_refs": ["op_seed:simple_hole"], "count_x": 2, "spacing_x_cm": 1}},
             "pattern_feature",
             "create_pattern_feature",
-            False,
+            True,
         ),
         (
             {"name": "list_features", "input": {}},
@@ -343,6 +343,7 @@ def test_golden_tool_call_maps_validates_and_preserves_fusion_translation(
         "create_counterbore_hole",
         "create_tapped_hole",
         "create_external_thread",
+        "pattern_feature",
     }:
         operations = [
             IROperation(
@@ -369,6 +370,20 @@ def test_golden_tool_call_maps_validates_and_preserves_fusion_translation(
             ),
             operation,
         ]
+        if expected_ir == "pattern_feature":
+            operations.insert(
+                -1,
+                IROperation(
+                    id="op_seed",
+                    type="create_simple_hole",
+                    params=SimpleHoleParams(
+                        face_ref="face_5",
+                        center=[-2.0, 0.0, 10.0],
+                        diameter=1.0,
+                        extent_type="through_all",
+                    ),
+                ),
+            )
     document = IRDocument(version="1.0", units="mm", operations=operations, metadata={"source": "test"})
     if build123d_supported:
         program = translate_ir_document_to_build123d(document)
@@ -384,7 +399,7 @@ def test_golden_tool_call_maps_validates_and_preserves_fusion_translation(
 def test_build123d_capability_errors_are_precise_for_unsupported_ir():
     state = IRDocumentState()
     operation = map_tool_call_to_ir(
-        {"name": "create_pattern_feature", "input": {"pattern_type": "rectangular", "feature_refs": ["feature_0"], "count_x": 2}},
+        {"name": "delete_feature", "input": {"feature_token": "feature_token_0", "expected_name": "Extrude1"}},
         state,
     )
     document = IRDocument(version="1.0", units="mm", operations=[operation], metadata={"source": "test"})
@@ -392,6 +407,6 @@ def test_build123d_capability_errors_are_precise_for_unsupported_ir():
     with pytest.raises(Build123dCapabilityError) as exc_info:
         translate_ir_document_to_build123d(document)
 
-    assert exc_info.value.operation_type == "pattern_feature"
-    assert "Feature patterns need portable feature refs" in exc_info.value.reason
-    assert "Unsupported IR operation for build123d translator: pattern_feature" in str(exc_info.value)
+    assert exc_info.value.operation_type == "delete_feature"
+    assert "revision/replay semantics" in exc_info.value.reason
+    assert "Unsupported IR operation for build123d translator: delete_feature" in str(exc_info.value)

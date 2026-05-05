@@ -36,6 +36,7 @@ The agent input → IR path already models the broad Fusion CAD tool surface, bu
 - selector-resolved `create_simple_hole` and `create_counterbore_hole`
 - selector-resolved `create_tapped_hole` as pilot geometry plus thread metadata
 - selector-resolved `create_external_thread` as thread metadata
+- `create_pattern_feature` for explicit committed simple-hole, counterbore-hole, and tapped-hole seed refs
 
 ## Phase 3/4/5 Review Status
 
@@ -56,6 +57,8 @@ The agent input → IR path already models the broad Fusion CAD tool surface, bu
 
 ### Phase 5: feature lifecycle and timeline semantics
 
+- `create_pattern_feature` now replays explicit committed hole-like seed features for rectangular global-axis and circular global-origin-Z patterns.
+- Pattern refs such as `auto_last`, raw Fusion feature tokens, non-hole seeds, oriented axes, and target-derived seed selection remain non-portable and fail closed instead of pretending to be replayable build123d state.
 - `list_features`, `delete_feature`, `adjust_feature_parameters`, `suppress_feature`, `unsuppress_feature`, and `jump_to_timeline_position` are all modeled in shared IR and validated for Fusion execution.
 - Those lifecycle/timeline operations remain intentionally unsupported for build123d replay until document revision/truncation semantics and feature-registry replay exist on the build123d side.
 - The review confirmed that current workflow tests preserve the existing Fusion behavior while build123d fails closed with explicit capability reasons.
@@ -67,7 +70,7 @@ The agent input → IR path already models the broad Fusion CAD tool surface, bu
 
 ## Remaining Work
 
-- Implement build123d translation for feature patterns.
+- Widen build123d feature-pattern replay beyond explicit committed hole-like seed refs.
 - Define replay/revision semantics for Fusion timeline and feature lifecycle operations.
 
 ## Breaking Changes

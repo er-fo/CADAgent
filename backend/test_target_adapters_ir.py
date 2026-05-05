@@ -6,7 +6,7 @@ import pytest
 
 try:
     from .backends.build123d import Build123dTargetExecutor
-    from .backends.build123d.translator import translate_ir_document_to_build123d
+    from .backends.build123d.translator import Build123dCapabilityError, translate_ir_document_to_build123d
     from .backends.fusion.executor import FusionTargetExecutor
     from .backends.fusion.translator import translate_ir_to_fusion_tool_call
     from .entity_store import EntityStore
@@ -37,7 +37,7 @@ try:
     )
 except ImportError:  # pragma: no cover
     from backend.backend.backends.build123d import Build123dTargetExecutor
-    from backend.backend.backends.build123d.translator import translate_ir_document_to_build123d
+    from backend.backend.backends.build123d.translator import Build123dCapabilityError, translate_ir_document_to_build123d
     from backend.backend.backends.fusion.executor import FusionTargetExecutor
     from backend.backend.backends.fusion.translator import translate_ir_to_fusion_tool_call
     from backend.backend.entity_store import EntityStore
@@ -764,6 +764,51 @@ def test_fusion_executor_fails_closed_for_pattern_auto_last_without_workflow_pre
     asyncio.run(_run())
 
 
+def test_build123d_translator_rejects_pattern_auto_last_seed():
+    document = _build_cube_document()
+    pattern_document = IRDocument(
+        version=document.version,
+        units=document.units,
+        operations=[
+            *document.operations,
+            IROperation(
+                id="op_pattern",
+                type="pattern_feature",
+                params=PatternFeatureParams(pattern_type="rectangular", feature_refs=["auto_last"], count_x=2, spacing_x=10.0),
+            ),
+        ],
+        metadata=document.metadata,
+    )
+
+    with pytest.raises(Build123dCapabilityError, match="auto_last"):
+        translate_ir_document_to_build123d(pattern_document)
+
+
+def test_build123d_translator_rejects_pattern_non_replayable_seed():
+    document = _build_cube_document()
+    pattern_document = IRDocument(
+        version=document.version,
+        units=document.units,
+        operations=[
+            *document.operations,
+            IROperation(
+                id="op_pattern",
+                type="pattern_feature",
+                params=PatternFeatureParams(
+                    pattern_type="rectangular",
+                    feature_refs=["feature_0"],
+                    count_x=2,
+                    spacing_x=10.0,
+                ),
+            ),
+        ],
+        metadata=document.metadata,
+    )
+
+    with pytest.raises(Build123dCapabilityError, match="not a committed replayable feature"):
+        translate_ir_document_to_build123d(pattern_document)
+
+
 def test_fusion_translator_rejects_unsupported_extrude_operation():
     operation = IROperation(
         id="op_bad_op",
@@ -1418,6 +1463,38 @@ def _build_cube_with_simple_hole_document() -> IRDocument:
     )
 
 
+def _build_cube_with_simple_hole_pattern_document() -> IRDocument:
+    document = _build_cube_document()
+    return IRDocument(
+        version=document.version,
+        units=document.units,
+        operations=[
+            *document.operations,
+            IROperation(
+                id="op_4",
+                type="create_simple_hole",
+                params=SimpleHoleParams(
+                    face_ref="face_5",
+                    center=[-10.0, 0.0, 50.0],
+                    diameter=6.0,
+                    extent_type="through_all",
+                ),
+            ),
+            IROperation(
+                id="op_5",
+                type="pattern_feature",
+                params=PatternFeatureParams(
+                    pattern_type="rectangular",
+                    feature_refs=["op_4:simple_hole"],
+                    count_x=3,
+                    spacing_x=10.0,
+                ),
+            ),
+        ],
+        metadata=document.metadata,
+    )
+
+
 def _build_cube_with_counterbore_document() -> IRDocument:
     document = _build_cube_document()
     return IRDocument(
@@ -1605,6 +1682,25 @@ def test_build123d_executor_supports_selector_dependent_features(document_factor
     entities = result.data["entities"]
     assert entities["volume_mm3"] > 0
     assert entities["volume_mm3"] < 125000.0
+    assert entities["faces"] > 0
+    assert entities["edges"] > 0
+
+
+@pytest.mark.skipif(not HAS_BUILD123D, reason="build123d is required for real-geometry adapter tests")
+def test_build123d_executor_replays_rectangular_simple_hole_pattern():
+    executor = Build123dTargetExecutor()
+    result = asyncio.run(
+        executor.execute_document(
+            "s_hole_pattern",
+            _build_cube_with_simple_hole_pattern_document(),
+            request_id="hole-pattern",
+        )
+    )
+
+    assert result.success, result.message
+    entities = result.data["entities"]
+    single_hole_volume = 3.141592653589793 * 3.0 * 3.0 * 50.0
+    assert entities["volume_mm3"] < 125000.0 - (single_hole_volume * 2.5)
     assert entities["faces"] > 0
     assert entities["edges"] > 0
 

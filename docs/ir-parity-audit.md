@@ -28,7 +28,7 @@ Remaining important gaps:
 
 Phase 3/4/5 review note (2026-05-05):
 
-- Contract coverage in `backend/test_ir_parity_contract.py` and workflow/validator coverage in `backend/test_ir_mapper_validator.py` plus `backend/test_ir_workflow_routing.py` verifies the supported portable build123d subset while preserving explicit unsupported/fusion-only behavior for feature pattern and lifecycle/timeline semantics.
+- Contract coverage in `backend/test_ir_parity_contract.py` and workflow/validator coverage in `backend/test_ir_mapper_validator.py` plus `backend/test_ir_workflow_routing.py` verifies the supported portable build123d subset while preserving explicit unsupported/fusion-only behavior for non-portable pattern seeds and lifecycle/timeline semantics.
 
 ### Current Post-Widening Matrix
 
@@ -36,7 +36,7 @@ Phase 3/4/5 review note (2026-05-05):
 | --- | --- | --- | --- |
 | Construction planes | Modeled with datum, offset, angle-to-edge, and face-normal params | Translates to existing Fusion codegen and resolves entity refs | Datum and offset_from_datum supported; face/edge-relative modes fail closed pending portable selectors |
 | Sketch primitives | Sketches, rectangles, circles, lines, arcs, and profile queries are modeled | Translates to Fusion codegen with canonical mm-to-cm conversion | Rectangles/circles supported; ordered closed line/arc profiles emit `BuildLine`/`make_face`; extrudes materialize deterministic build123d sketches |
-| Solid features | Extrude, revolve, loft, fillet, chamfer, shell, holes, threads, patterns modeled | Translates to Fusion codegen or feature payloads | Extrude, portable solid revolve/loft, selector-resolved fillet/chamfer/shell/holes, and thread metadata supported; feature patterns remain explicitly unsupported |
+| Solid features | Extrude, revolve, loft, fillet, chamfer, shell, holes, threads, patterns modeled | Translates to Fusion codegen or feature payloads | Extrude, portable solid revolve/loft, selector-resolved fillet/chamfer/shell/holes, thread metadata, and replayable hole-like feature patterns supported; non-hole pattern seeds fail closed |
 | Selection and timeline | Selection, feature listing, delete, and jump operations modeled | Routed to Fusion payload/codegen paths | Explicitly unsupported |
 | Units | IR is canonical millimeters | Converts to Fusion centimeters at the boundary | Consumes millimeters |
 | Results and refs | Operations can carry target execution results, effects, selectors, registry refs, and invalidation metadata | Runtime refresh remains the source of detailed topology refs | build123d extraction emits deterministic body/face/edge metadata |
@@ -168,7 +168,7 @@ Status key:
 | `create_counterbore_hole` | Missing | Add counterbore params: face, center, hole diameter/depth, counterbore diameter/depth, unit, feature name. | Need stepped-hole semantics, diameter ordering validation, counterbore depth validation, fastener intent. |
 | `create_tapped_hole` | Missing | Add tapped-hole params: face, center, thread standard, thread size, thread depth, pilot depth, unit, feature name. | Thread catalog validation belongs in IR. Need tap drill data, pilot-depth relationship, manufacturing metadata, supported-size fallback. |
 | `create_external_thread` | Missing | Add external-thread params: cylindrical face ref, thread type/size, length, offset, full-length flag, unit, feature name. | Need cylindrical-face validation, nominal diameter compatibility, length/offset validation, cosmetic vs modeled thread policy. |
-| `create_pattern_feature` | Missing | Add pattern params: pattern type, seed feature refs, counts, spacing, axes, rotation count/angle, feature name. | Need feature refs, seed ownership, inferred axis/spacing record, global-origin circular limitation, instance identity, and fallback to explicit repeated features. |
+| `create_pattern_feature` | Supported for explicit hole seeds | Add pattern params: pattern type, seed feature refs, counts, spacing, axes, rotation count/angle, feature name. | build123d now replays committed simple-hole, counterbore-hole, and tapped-hole seed refs for global-axis/global-origin patterns. Raw Fusion feature tokens, `auto_last`, non-hole seeds, and oriented axes remain non-portable and fail closed. |
 | `select_edges` | Missing / Procedural | Add selection query/action or semantic selector model. | Selection should not be the design truth. IR needs selectors like "top perimeter edges of body_0" that can resolve per target/kernel. |
 | `clear_edge_selection` | Missing / Procedural | Add session action only if UI replay matters. | Should usually stay outside persistent design IR unless transcript replay requires it. |
 | `select_faces` | Missing / Procedural | Add selection query/action or semantic selector model. | Same as edge selection. Face refs are topology-unstable and must be regenerated after mutations. |
@@ -466,7 +466,7 @@ Fusion tools accept `feature_name` for many operations. IR drops it for current 
 Without feature identity:
 
 - user-facing timeline names are not reproducible
-- feature patterns cannot robustly reference seed features
+- non-hole feature patterns cannot robustly reference seed features
 - deletion/suppression cannot be modeled safely
 - benchmark comparison loses semantic landmarks
 

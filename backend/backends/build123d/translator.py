@@ -23,6 +23,7 @@ from ...ir.types import (
     IRDocument,
     ListSketchProfilesParams,
     LoftParams,
+    PatternFeatureParams,
     RevolveParams,
     ShellParams,
     SimpleHoleParams,
@@ -181,6 +182,162 @@ def _thread_nominal_diameter(thread_size: str) -> float:
     raise Build123dCapabilityError(
         "create_tapped_hole",
         f"build123d tapped-hole geometry cannot infer nominal diameter for thread size {thread_size!r}.",
+    )
+
+
+def _feature_ref_operation_id(feature_ref: str) -> str:
+    ref = str(feature_ref or "").strip()
+    if not ref or ref == "auto_last":
+        raise Build123dCapabilityError(
+            "pattern_feature",
+            "build123d feature patterns require explicit committed feature refs; auto_last is workflow-only.",
+        )
+    return ref.split(":", 1)[0]
+
+
+def _offset_point(point: Sequence[float], dx: float, dy: float, dz: float = 0.0) -> List[float]:
+    return [float(point[0]) + dx, float(point[1]) + dy, float(point[2]) + dz]
+
+
+def _rotate_point_z(point: Sequence[float], angle_degrees: float) -> List[float]:
+    angle = math.radians(angle_degrees)
+    x = float(point[0])
+    y = float(point[1])
+    return [
+        x * math.cos(angle) - y * math.sin(angle),
+        x * math.sin(angle) + y * math.cos(angle),
+        float(point[2]),
+    ]
+
+
+def _pattern_centers(params: PatternFeatureParams, seed_center: Sequence[float]) -> List[List[float]]:
+    if params.orientation_hint:
+        raise Build123dCapabilityError(
+            "pattern_feature",
+            "build123d feature patterns currently support only global-axis rectangular patterns "
+            "and global-origin Z circular patterns; oriented pattern axes remain non-portable.",
+        )
+    if params.pattern_type == "rectangular":
+        count_x = params.count_x or 1
+        count_y = params.count_y or 1
+        spacing_x = params.spacing_x or 0.0
+        spacing_y = params.spacing_y or 0.0
+        if count_x < 1 or count_y < 1:
+            raise ValueError("create_pattern_feature rectangular counts must be positive")
+        if count_x > 1 and spacing_x == 0.0:
+            raise ValueError("create_pattern_feature rectangular count_x > 1 requires spacing_x")
+        if count_y > 1 and spacing_y == 0.0:
+            raise ValueError("create_pattern_feature rectangular count_y > 1 requires spacing_y")
+        return [
+            _offset_point(seed_center, ix * spacing_x, iy * spacing_y)
+            for ix in range(count_x)
+            for iy in range(count_y)
+            if ix != 0 or iy != 0
+        ]
+
+    if params.pattern_type == "circular":
+        count = params.rotation_count or 0
+        if count < 2:
+            raise ValueError("create_pattern_feature circular patterns require rotation_count >= 2")
+        total_angle = params.rotation_angle_degrees if params.rotation_angle_degrees is not None else 360.0
+        step = total_angle / count
+        return [_rotate_point_z(seed_center, step * index) for index in range(1, count)]
+
+    raise ValueError(f"Unsupported pattern type for build123d translator: {params.pattern_type}")
+
+
+def _append_simple_hole(
+    lines: List[str],
+    op_id: str,
+    params: SimpleHoleParams,
+    *,
+    center: Optional[Sequence[float]] = None,
+    comment: str = "create_simple_hole",
+    validate_face_ref: bool = True,
+) -> None:
+    hole_center = center if center is not None else params.center
+    lines.append(f"    # {op_id}: {comment}")
+    if validate_face_ref:
+        lines.extend(
+            [
+                f"    _hole_face = _face_refs([{params.face_ref!r}])[0]",
+                "    _assert_z_face(_hole_face, 'create_simple_hole')",
+            ]
+        )
+    lines.extend(
+        [
+            f"    with Locations({_point3_expr(hole_center)}):",
+            f"        Hole({params.diameter / 2.0}, depth={params.depth if params.depth is not None else 'None'}, mode=Mode.SUBTRACT)",
+        ]
+    )
+
+
+def _append_counterbore_hole(
+    lines: List[str],
+    op_id: str,
+    params: CounterboreHoleParams,
+    *,
+    center: Optional[Sequence[float]] = None,
+    comment: str = "create_counterbore_hole",
+    validate_face_ref: bool = True,
+) -> None:
+    hole_center = center if center is not None else params.center
+    lines.append(f"    # {op_id}: {comment}")
+    if validate_face_ref:
+        lines.extend(
+            [
+                f"    _hole_face = _face_refs([{params.face_ref!r}])[0]",
+                "    _assert_z_face(_hole_face, 'create_counterbore_hole')",
+            ]
+        )
+    lines.extend(
+        [
+            f"    with Locations({_point3_expr(hole_center)}):",
+            f"        CounterBoreHole({params.hole_diameter / 2.0}, {params.counterbore_diameter / 2.0}, {params.counterbore_depth}, depth={params.hole_depth}, mode=Mode.SUBTRACT)",
+        ]
+    )
+
+
+def _append_tapped_hole(
+    lines: List[str],
+    op_id: str,
+    params: TappedHoleParams,
+    *,
+    center: Optional[Sequence[float]] = None,
+    comment: str = "create_tapped_hole",
+    include_center_metadata: bool = False,
+    validate_face_ref: bool = True,
+) -> None:
+    hole_center = center if center is not None else params.center
+    pilot_depth = params.pilot_hole_depth if params.pilot_hole_depth is not None else params.thread_depth
+    pilot_radius = _thread_nominal_diameter(params.thread_size) / 2.0
+    metadata_lines = [
+        "    _thread_metadata.append({",
+        f"        'operation_id': {op_id!r},",
+        "        'kind': 'tapped_hole',",
+        f"        'face_ref': {params.face_ref!r},",
+        f"        'thread_type': {params.thread_type!r},",
+        f"        'thread_size': {params.thread_size!r},",
+        f"        'thread_depth': {params.thread_depth},",
+        f"        'pilot_hole_depth': {pilot_depth},",
+    ]
+    if include_center_metadata:
+        metadata_lines.append(f"        'center': {list(hole_center)!r},")
+    metadata_lines.append("    })")
+    lines.append(f"    # {op_id}: {comment}")
+    if validate_face_ref:
+        lines.extend(
+            [
+                f"    _hole_face = _face_refs([{params.face_ref!r}])[0]",
+                "    _assert_z_face(_hole_face, 'create_tapped_hole')",
+            ]
+        )
+    lines.extend(
+        [
+            f"    with Locations({_point3_expr(hole_center)}):",
+            f"        Hole({pilot_radius}, depth={pilot_depth}, mode=Mode.SUBTRACT)",
+            *metadata_lines,
+        ]
     )
 
 
@@ -371,6 +528,7 @@ def translate_ir_document_to_build123d(document: IRDocument) -> Build123dProgram
     ]
     sketches: Dict[str, _SketchState] = {}
     construction_planes: Dict[str, str] = {}
+    feature_ops: Dict[str, IROperation] = {}
 
     for op in document.operations:
         if op.type == "create_construction_plane":
@@ -479,6 +637,7 @@ def translate_ir_document_to_build123d(document: IRDocument) -> Build123dProgram
             _append_sketch_plane_guard(lines, sketch_id, "extrude")
             _append_sketch_build(lines, sketch_id, sketch_state)
             lines.append(f"    extrude(amount={signed_distance}, mode={_mode_expr(params.operation)})")
+            feature_ops[op.id] = op
             continue
 
         if op.type == "revolve":
@@ -506,6 +665,7 @@ def translate_ir_document_to_build123d(document: IRDocument) -> Build123dProgram
             lines.append(
                 f"    revolve(axis={_axis_expr(params.axis)}, revolution_arc={_revolution_arc(params.extent)}, mode={_mode_expr(params.operation)})"
             )
+            feature_ops[op.id] = op
             continue
 
         if op.type == "loft":
@@ -530,6 +690,7 @@ def translate_ir_document_to_build123d(document: IRDocument) -> Build123dProgram
                 _append_sketch_plane_guard(lines, sketch_id, "loft")
                 _append_sketch_build(lines, sketch_id, sketch_state)
             lines.append(f"    loft(mode={_mode_expr(params.operation)})")
+            feature_ops[op.id] = op
             continue
 
         if op.type == "fillet":
@@ -542,6 +703,7 @@ def translate_ir_document_to_build123d(document: IRDocument) -> Build123dProgram
                     f"    fillet(_edge_refs({_ref_list_expr(params.edge_refs)}), {params.radius})",
                 ]
             )
+            feature_ops[op.id] = op
             continue
 
         if op.type == "chamfer":
@@ -554,6 +716,7 @@ def translate_ir_document_to_build123d(document: IRDocument) -> Build123dProgram
                     f"    chamfer(_edge_refs({_ref_list_expr(params.edge_refs)}), {params.distance})",
                 ]
             )
+            feature_ops[op.id] = op
             continue
 
         if op.type == "shell":
@@ -570,6 +733,7 @@ def translate_ir_document_to_build123d(document: IRDocument) -> Build123dProgram
                         f"    offset(_part.part, amount={_shell_amount(params)}, openings=_shell_openings, mode=Mode.REPLACE)",
                     ]
                 )
+                feature_ops[op.id] = op
                 continue
             if params.mode == "closed":
                 lines.extend(
@@ -578,6 +742,7 @@ def translate_ir_document_to_build123d(document: IRDocument) -> Build123dProgram
                         f"    offset(_part.part, amount={_shell_amount(params)}, mode=Mode.REPLACE)",
                     ]
                 )
+                feature_ops[op.id] = op
                 continue
             raise ValueError(f"Unsupported shell mode for build123d translator: {params.mode}")
 
@@ -585,56 +750,24 @@ def translate_ir_document_to_build123d(document: IRDocument) -> Build123dProgram
             params = op.params
             if not isinstance(params, SimpleHoleParams):
                 raise ValueError("create_simple_hole IR params shape mismatch")
-            lines.extend(
-                [
-                    f"    # {op.id}: create_simple_hole",
-                    f"    _hole_face = _face_refs([{params.face_ref!r}])[0]",
-                    "    _assert_z_face(_hole_face, 'create_simple_hole')",
-                    f"    with Locations({_point3_expr(params.center)}):",
-                    f"        Hole({params.diameter / 2.0}, depth={params.depth if params.depth is not None else 'None'}, mode=Mode.SUBTRACT)",
-                ]
-            )
+            _append_simple_hole(lines, op.id, params)
+            feature_ops[op.id] = op
             continue
 
         if op.type == "create_counterbore_hole":
             params = op.params
             if not isinstance(params, CounterboreHoleParams):
                 raise ValueError("create_counterbore_hole IR params shape mismatch")
-            lines.extend(
-                [
-                    f"    # {op.id}: create_counterbore_hole",
-                    f"    _hole_face = _face_refs([{params.face_ref!r}])[0]",
-                    "    _assert_z_face(_hole_face, 'create_counterbore_hole')",
-                    f"    with Locations({_point3_expr(params.center)}):",
-                    f"        CounterBoreHole({params.hole_diameter / 2.0}, {params.counterbore_diameter / 2.0}, {params.counterbore_depth}, depth={params.hole_depth}, mode=Mode.SUBTRACT)",
-                ]
-            )
+            _append_counterbore_hole(lines, op.id, params)
+            feature_ops[op.id] = op
             continue
 
         if op.type == "create_tapped_hole":
             params = op.params
             if not isinstance(params, TappedHoleParams):
                 raise ValueError("create_tapped_hole IR params shape mismatch")
-            pilot_depth = params.pilot_hole_depth if params.pilot_hole_depth is not None else params.thread_depth
-            pilot_radius = _thread_nominal_diameter(params.thread_size) / 2.0
-            lines.extend(
-                [
-                    f"    # {op.id}: create_tapped_hole",
-                    f"    _hole_face = _face_refs([{params.face_ref!r}])[0]",
-                    "    _assert_z_face(_hole_face, 'create_tapped_hole')",
-                    f"    with Locations({_point3_expr(params.center)}):",
-                    f"        Hole({pilot_radius}, depth={pilot_depth}, mode=Mode.SUBTRACT)",
-                    "    _thread_metadata.append({",
-                    f"        'operation_id': {op.id!r},",
-                    "        'kind': 'tapped_hole',",
-                    f"        'face_ref': {params.face_ref!r},",
-                    f"        'thread_type': {params.thread_type!r},",
-                    f"        'thread_size': {params.thread_size!r},",
-                    f"        'thread_depth': {params.thread_depth},",
-                    f"        'pilot_hole_depth': {pilot_depth},",
-                    "    })",
-                ]
-            )
+            _append_tapped_hole(lines, op.id, params)
+            feature_ops[op.id] = op
             continue
 
         if op.type == "create_external_thread":
@@ -657,7 +790,67 @@ def translate_ir_document_to_build123d(document: IRDocument) -> Build123dProgram
                     "    })",
                 ]
             )
+            feature_ops[op.id] = op
             continue
+
+        if op.type == "pattern_feature":
+            params = op.params
+            if not isinstance(params, PatternFeatureParams):
+                raise ValueError("pattern_feature IR params shape mismatch")
+            if len(params.feature_refs) != 1:
+                raise Build123dCapabilityError(
+                    "pattern_feature",
+                    "build123d feature patterns currently support exactly one replayable seed feature ref.",
+                )
+            seed_id = _feature_ref_operation_id(params.feature_refs[0])
+            seed_op = feature_ops.get(seed_id)
+            if seed_op is None:
+                raise Build123dCapabilityError(
+                    "pattern_feature",
+                    f"build123d feature pattern seed {params.feature_refs[0]!r} is not a committed replayable feature.",
+                )
+            seed_params = seed_op.params
+            if isinstance(seed_params, SimpleHoleParams):
+                for index, center in enumerate(_pattern_centers(params, seed_params.center), start=1):
+                    _append_simple_hole(
+                        lines,
+                        f"{op.id}_instance_{index}",
+                        seed_params,
+                        center=center,
+                        comment="pattern_feature simple_hole instance",
+                        validate_face_ref=False,
+                    )
+                feature_ops[op.id] = op
+                continue
+            if isinstance(seed_params, CounterboreHoleParams):
+                for index, center in enumerate(_pattern_centers(params, seed_params.center), start=1):
+                    _append_counterbore_hole(
+                        lines,
+                        f"{op.id}_instance_{index}",
+                        seed_params,
+                        center=center,
+                        comment="pattern_feature counterbore_hole instance",
+                        validate_face_ref=False,
+                    )
+                feature_ops[op.id] = op
+                continue
+            if isinstance(seed_params, TappedHoleParams):
+                for index, center in enumerate(_pattern_centers(params, seed_params.center), start=1):
+                    _append_tapped_hole(
+                        lines,
+                        f"{op.id}_instance_{index}",
+                        seed_params,
+                        center=center,
+                        comment="pattern_feature tapped_hole instance",
+                        include_center_metadata=True,
+                        validate_face_ref=False,
+                    )
+                feature_ops[op.id] = op
+                continue
+            raise Build123dCapabilityError(
+                "pattern_feature",
+                f"build123d feature patterns do not replay seed operation type {seed_op.type!r} yet.",
+            )
 
         if op.type == "list_sketch_profiles":
             params = op.params
