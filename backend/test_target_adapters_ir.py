@@ -1495,6 +1495,55 @@ def _build_cube_with_simple_hole_pattern_document() -> IRDocument:
     )
 
 
+def _build_cube_with_circular_hole_pattern_document() -> IRDocument:
+    document = _build_cube_document()
+    return IRDocument(
+        version=document.version,
+        units=document.units,
+        operations=[
+            *document.operations,
+            IROperation(
+                id="op_4",
+                type="create_simple_hole",
+                params=SimpleHoleParams(
+                    face_ref="face_5",
+                    center=[10.0, 0.0, 50.0],
+                    diameter=6.0,
+                    extent_type="through_all",
+                ),
+            ),
+            IROperation(
+                id="op_5",
+                type="pattern_feature",
+                params=PatternFeatureParams(
+                    pattern_type="circular",
+                    feature_refs=["op_4:simple_hole"],
+                    rotation_count=4,
+                    rotation_angle_degrees=360.0,
+                ),
+            ),
+        ],
+        metadata=document.metadata,
+    )
+
+
+def _build_cube_with_hole_pattern_and_chamfer_document() -> IRDocument:
+    document = _build_cube_with_simple_hole_pattern_document()
+    return IRDocument(
+        version=document.version,
+        units=document.units,
+        operations=[
+            *document.operations,
+            IROperation(
+                id="op_6",
+                type="chamfer",
+                params=ChamferParams(edge_refs=["edge_0"], distance=1.0),
+            ),
+        ],
+        metadata=document.metadata,
+    )
+
+
 def _build_cube_with_counterbore_document() -> IRDocument:
     document = _build_cube_document()
     return IRDocument(
@@ -1701,6 +1750,44 @@ def test_build123d_executor_replays_rectangular_simple_hole_pattern():
     entities = result.data["entities"]
     single_hole_volume = 3.141592653589793 * 3.0 * 3.0 * 50.0
     assert entities["volume_mm3"] < 125000.0 - (single_hole_volume * 2.5)
+    assert entities["faces"] > 0
+    assert entities["edges"] > 0
+
+
+@pytest.mark.skipif(not HAS_BUILD123D, reason="build123d is required for real-geometry adapter tests")
+def test_build123d_executor_replays_circular_simple_hole_pattern():
+    executor = Build123dTargetExecutor()
+    result = asyncio.run(
+        executor.execute_document(
+            "s_circular_hole_pattern",
+            _build_cube_with_circular_hole_pattern_document(),
+            request_id="circular-hole-pattern",
+        )
+    )
+
+    assert result.success, result.message
+    entities = result.data["entities"]
+    single_hole_volume = 3.141592653589793 * 3.0 * 3.0 * 50.0
+    assert entities["volume_mm3"] < 125000.0 - (single_hole_volume * 3.5)
+    assert entities["faces"] > 0
+    assert entities["edges"] > 0
+
+
+@pytest.mark.skipif(not HAS_BUILD123D, reason="build123d is required for real-geometry adapter tests")
+def test_build123d_executor_replays_hole_pattern_with_chamfer_finishing():
+    executor = Build123dTargetExecutor()
+    result = asyncio.run(
+        executor.execute_document(
+            "s_hole_pattern_chamfer",
+            _build_cube_with_hole_pattern_and_chamfer_document(),
+            request_id="hole-pattern-chamfer",
+        )
+    )
+
+    assert result.success, result.message
+    entities = result.data["entities"]
+    assert entities["volume_mm3"] > 0
+    assert entities["volume_mm3"] < 125000.0
     assert entities["faces"] > 0
     assert entities["edges"] > 0
 
