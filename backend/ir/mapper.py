@@ -411,6 +411,12 @@ def _feature_effects(operation_id: str, feature_kind: str) -> IROperationEffects
     )
 
 
+def _selector(kind: str, refs: Sequence[str], **metadata: Any) -> dict[str, Any]:
+    selector: dict[str, Any] = {"kind": kind, "refs": [str(ref).strip() for ref in refs if str(ref).strip()]}
+    selector.update({key: value for key, value in metadata.items() if value is not None})
+    return selector
+
+
 def _profile_ref(sketch_id: str, profile_index: int) -> str:
     return f"{sketch_id}:profile_{profile_index}" if sketch_id else ""
 
@@ -463,6 +469,14 @@ def map_tool_call_to_ir(
                 _length_to_mm(params.get("point_y"), field_name="point_y", unit="cm"),
                 _length_to_mm(params.get("point_z"), field_name="point_z", unit="cm"),
             ]
+        selectors = []
+        if mode == "angle_to_edge":
+            selectors = [
+                _selector("face", [str(params.get("reference_face_token") or params.get("reference_face_ref") or "").strip()]),
+                _selector("edge", [str(params.get("reference_edge_token") or params.get("reference_edge_ref") or "").strip()]),
+            ]
+        elif mode == "face_normal":
+            selectors = [_selector("face", [str(params.get("face_token") or params.get("face_ref") or "").strip()])]
         return IROperation(
             id=operation_id,
             type="create_construction_plane",
@@ -485,6 +499,7 @@ def map_tool_call_to_ir(
             metadata=metadata,
             requires=["construction_plane"],
             effects=_effects(creates={"planes": [plane_id]}),
+            selectors=selectors,
         )
 
     if name == "add_rectangle":
@@ -779,47 +794,49 @@ def map_tool_call_to_ir(
     if name == "apply_fillet":
         unit = str(params.get("radius_unit") or "mm")
         edge_refs = _to_string_list(params.get("edge_refs", params.get("entity_tokens")), field_name="edge_refs")
+        tangent_chain = _to_bool(
+            params.get("include_tangent_edges"),
+            field_name="include_tangent_edges",
+            default=True,
+        )
         return IROperation(
             id=operation_id,
             type="fillet",
             params=FilletParams(
                 edge_refs=edge_refs,
                 radius=_length_to_mm(params.get("radius"), field_name="radius", unit=unit),
-                include_tangent_edges=_to_bool(
-                    params.get("include_tangent_edges"),
-                    field_name="include_tangent_edges",
-                    default=True,
-                ),
+                include_tangent_edges=tangent_chain,
                 feature_name=str(params.get("feature_name") or "").strip() or None,
             ),
             dependencies=[],
             metadata=metadata,
             requires=_FEATURE_MUTATION_CAPABILITIES["fillet"],
             effects=_feature_effects(operation_id, "fillet"),
-            selectors=[{"kind": "edge", "refs": edge_refs, "tangent_chain": bool(params.get("include_tangent_edges", True))}],
+            selectors=[_selector("edge", edge_refs, tangent_chain=tangent_chain)],
         )
 
     if name == "apply_chamfer":
         unit = str(params.get("distance_unit") or "mm")
         edge_refs = _to_string_list(params.get("edge_refs", params.get("entity_tokens")), field_name="edge_refs")
+        tangent_chain = _to_bool(
+            params.get("include_tangent_edges"),
+            field_name="include_tangent_edges",
+            default=True,
+        )
         return IROperation(
             id=operation_id,
             type="chamfer",
             params=ChamferParams(
                 edge_refs=edge_refs,
                 distance=_length_to_mm(params.get("distance"), field_name="distance", unit=unit),
-                include_tangent_edges=_to_bool(
-                    params.get("include_tangent_edges"),
-                    field_name="include_tangent_edges",
-                    default=True,
-                ),
+                include_tangent_edges=tangent_chain,
                 feature_name=str(params.get("feature_name") or "").strip() or None,
             ),
             dependencies=[],
             metadata=metadata,
             requires=_FEATURE_MUTATION_CAPABILITIES["chamfer"],
             effects=_feature_effects(operation_id, "chamfer"),
-            selectors=[{"kind": "edge", "refs": edge_refs, "tangent_chain": bool(params.get("include_tangent_edges", True))}],
+            selectors=[_selector("edge", edge_refs, tangent_chain=tangent_chain)],
         )
 
     if name == "create_shell":
@@ -851,17 +868,18 @@ def map_tool_call_to_ir(
             metadata=metadata,
             requires=_FEATURE_MUTATION_CAPABILITIES["shell"],
             effects=_feature_effects(operation_id, "shell"),
-            selectors=[{"kind": "face" if mode == "open" else "body", "refs": face_refs if mode == "open" else body_refs}],
+            selectors=[_selector("face" if mode == "open" else "body", face_refs if mode == "open" else body_refs)],
         )
 
     if name == "create_simple_hole":
         diameter_unit = str(params.get("diameter_unit") or "mm")
         extent_type = str(params.get("extent_type") or "").strip().lower()
+        face_ref = str(params.get("face_ref") or params.get("face_token") or "").strip()
         return IROperation(
             id=operation_id,
             type="create_simple_hole",
             params=SimpleHoleParams(
-                face_ref=str(params.get("face_ref") or params.get("face_token") or "").strip(),
+                face_ref=face_ref,
                 center=[
                     _length_to_mm(params.get("center_x"), field_name="center_x", unit="mm"),
                     _length_to_mm(params.get("center_y"), field_name="center_y", unit="mm"),
@@ -876,15 +894,17 @@ def map_tool_call_to_ir(
             metadata=metadata,
             requires=_FEATURE_MUTATION_CAPABILITIES["create_simple_hole"],
             effects=_feature_effects(operation_id, "simple_hole"),
+            selectors=[_selector("face", [face_ref])],
         )
 
     if name == "create_counterbore_hole":
         diameter_unit = str(params.get("diameter_unit") or "mm")
+        face_ref = str(params.get("face_ref") or params.get("face_token") or "").strip()
         return IROperation(
             id=operation_id,
             type="create_counterbore_hole",
             params=CounterboreHoleParams(
-                face_ref=str(params.get("face_ref") or params.get("face_token") or "").strip(),
+                face_ref=face_ref,
                 center=[
                     _length_to_mm(params.get("center_x"), field_name="center_x", unit="mm"),
                     _length_to_mm(params.get("center_y"), field_name="center_y", unit="mm"),
@@ -904,15 +924,17 @@ def map_tool_call_to_ir(
             metadata=metadata,
             requires=_FEATURE_MUTATION_CAPABILITIES["create_counterbore_hole"],
             effects=_feature_effects(operation_id, "counterbore_hole"),
+            selectors=[_selector("face", [face_ref])],
         )
 
     if name == "create_tapped_hole":
         thread_type = _normalize_thread_type(params.get("thread_type"), field_name="thread_type")
+        face_ref = str(params.get("face_ref") or params.get("face_token") or "").strip()
         return IROperation(
             id=operation_id,
             type="create_tapped_hole",
             params=TappedHoleParams(
-                face_ref=str(params.get("face_ref") or params.get("face_token") or "").strip(),
+                face_ref=face_ref,
                 center=[
                     _length_to_mm(params.get("center_x"), field_name="center_x", unit="mm"),
                     _length_to_mm(params.get("center_y"), field_name="center_y", unit="mm"),
@@ -933,16 +955,18 @@ def map_tool_call_to_ir(
             metadata=metadata,
             requires=_FEATURE_MUTATION_CAPABILITIES["create_tapped_hole"],
             effects=_feature_effects(operation_id, "tapped_hole"),
+            selectors=[_selector("face", [face_ref])],
         )
 
     if name == "create_external_thread":
         thread_type = _normalize_thread_type(params.get("thread_type"), field_name="thread_type")
         is_full_length = _to_bool(params.get("is_full_length"), field_name="is_full_length", default=True)
+        face_ref = str(params.get("face_ref") or params.get("face_token") or "").strip()
         return IROperation(
             id=operation_id,
             type="create_external_thread",
             params=ExternalThreadParams(
-                face_ref=str(params.get("face_ref") or params.get("face_token") or "").strip(),
+                face_ref=face_ref,
                 thread_type=thread_type,  # type: ignore[arg-type]
                 thread_size=str(params.get("thread_size") or "").strip(),
                 is_full_length=is_full_length,
@@ -959,18 +983,20 @@ def map_tool_call_to_ir(
             metadata=metadata,
             requires=_FEATURE_MUTATION_CAPABILITIES["create_external_thread"],
             effects=_feature_effects(operation_id, "external_thread"),
+            selectors=[_selector("face", [face_ref])],
         )
 
     if name == "create_pattern_feature":
         pattern_type = str(params.get("pattern_type") or "").strip().lower()
         if pattern_type not in {"rectangular", "circular"}:
             raise UnsupportedToolMappingError("create_pattern_feature pattern_type must be rectangular or circular.")
+        feature_refs = _to_string_list(params.get("feature_refs", params.get("feature_tokens", ["auto_last"])), field_name="feature_refs")
         return IROperation(
             id=operation_id,
             type="pattern_feature",
             params=PatternFeatureParams(
                 pattern_type=pattern_type,  # type: ignore[arg-type]
-                feature_refs=_to_string_list(params.get("feature_refs", params.get("feature_tokens", ["auto_last"])), field_name="feature_refs"),
+                feature_refs=feature_refs,
                 count_x=_optional_int(params.get("count_x"), field_name="count_x"),
                 spacing_x=_optional_length_to_mm(params.get("spacing_x_cm"), field_name="spacing_x_cm", unit="cm"),
                 count_y=_optional_int(params.get("count_y"), field_name="count_y"),
@@ -986,6 +1012,7 @@ def map_tool_call_to_ir(
             metadata=metadata,
             requires=_FEATURE_MUTATION_CAPABILITIES["pattern_feature"],
             effects=_feature_effects(operation_id, "pattern"),
+            selectors=[_selector("feature", feature_refs)],
             fallback_policy=["infer_pattern_axis_or_spacing", "circular_patterns_use_global_origin_axis"],
         )
 
@@ -1001,11 +1028,12 @@ def map_tool_call_to_ir(
         )
 
     if name == "delete_feature":
+        feature_ref = str(params.get("feature_ref") or params.get("feature_token") or "").strip()
         return IROperation(
             id=operation_id,
             type="delete_feature",
             params=DeleteFeatureParams(
-                feature_ref=str(params.get("feature_ref") or params.get("feature_token") or "").strip(),
+                feature_ref=feature_ref,
                 description=str(params.get("description") or ""),
                 expected_name=str(params.get("expected_name") or "").strip() or None,
                 expected_timeline_index=_optional_int(
@@ -1017,9 +1045,10 @@ def map_tool_call_to_ir(
             metadata=metadata,
             requires=["parametric_timeline", "feature_lifecycle"],
             effects=_effects(
-                modifies={"features": [str(params.get("feature_ref") or params.get("feature_token") or "").strip()]},
+                modifies={"features": [feature_ref]},
                 invalidates={"features": ["downstream"], "faces": ["*"], "edges": ["*"], "bodies": ["topology_generation"]},
             ),
+            selectors=[_selector("feature", [feature_ref])],
         )
 
     if name == "adjust_feature_parameters":
@@ -1045,6 +1074,7 @@ def map_tool_call_to_ir(
                 modifies={"features": [feature_ref]},
                 invalidates={"features": ["downstream"], "faces": ["*"], "edges": ["*"], "bodies": ["topology_generation"]},
             ),
+            selectors=[_selector("feature", [feature_ref])],
         )
 
     if name in {"suppress_feature", "unsuppress_feature"}:
@@ -1069,6 +1099,7 @@ def map_tool_call_to_ir(
                 modifies={"features": [feature_ref]},
                 invalidates={"features": ["downstream"], "faces": ["*"], "edges": ["*"], "bodies": ["topology_generation"]},
             ),
+            selectors=[_selector("feature", [feature_ref])],
         )
 
     if name == "jump_to_timeline_position":
@@ -1102,7 +1133,7 @@ def map_tool_call_to_ir(
             dependencies=[],
             metadata=metadata,
             requires=["selection"],
-            selectors=[{"kind": kind, "refs": refs}],
+            selectors=[_selector(kind, refs)],
         )
 
     if name in {"clear_edge_selection", "clear_face_selection", "clear_body_selection"}:

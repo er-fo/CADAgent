@@ -13,6 +13,7 @@ from backend.agent_workflow import (
     handle_resume_operation_request,
 )
 from backend.ir import IRDocumentState, map_tool_call_to_ir, validate_ir_candidate
+from backend.ir.types import IRRef
 from backend.websocket_manager import ConnectionManager
 
 
@@ -184,6 +185,9 @@ def test_operation_checkpoint_restore_sets_ir_state_for_followup_tools() -> None
     session_id = "session-op-ir-restore"
 
     ir_state = _create_sketch_ir_state(session_id)
+    ir_state.entities["sketch"] = [
+        IRRef(kind="sketch", id="base_square", source_operation_id="op_1", target_handles={"fusion": "Sketch1"})
+    ]
     checkpoint = {
         "checkpoint_id": "opchk_ir",
         "conversation_index": 0,
@@ -192,6 +196,8 @@ def test_operation_checkpoint_restore_sets_ir_state_for_followup_tools() -> None
     }
 
     manager.restore_operation_checkpoint_state(session_id, checkpoint)
+    restored_state = _deserialize_ir_document_state(manager.get_ir_document_state(session_id) or {})
+    assert restored_state.entities["sketch"][0].target_handles["fusion"] == "Sketch1"
     _assert_add_rectangle_valid_after_restore(manager, session_id)
 
 
@@ -199,6 +205,16 @@ def test_message_checkpoint_capture_stores_runtime_state() -> None:
     manager = ConnectionManager()
     session_id = "session-message-capture"
     ir_state = _create_sketch_ir_state(session_id, "sketch_1")
+    ir_state.entities["sketch"] = [
+        IRRef(
+            kind="sketch",
+            id="sketch_1",
+            source_operation_id="op_1",
+            alias="Base sketch",
+            target_handles={"fusion": "Sketch1"},
+            fingerprint={"plane": "XY"},
+        )
+    ]
     manager.save_ir_document_state(session_id, _serialize_ir_document_state(ir_state))
     manager.set_feature_snapshot(session_id, {"success": True, "timeline_count": 1, "marker_position": 1})
     manager.set_latest_entity_context(session_id, {"bodies": [], "faces": [], "edges": [], "sketches": ["Sketch1"]})
@@ -213,6 +229,8 @@ def test_message_checkpoint_capture_stores_runtime_state() -> None:
 
     assert checkpoint is not None
     assert checkpoint["ir_state"]["operations"][0]["params"]["sketch"] == "sketch_1"
+    assert checkpoint["ir_state"]["entities"]["sketch"][0]["id"] == "sketch_1"
+    assert checkpoint["ir_state"]["entities"]["sketch"][0]["target_handles"]["fusion"] == "Sketch1"
     assert checkpoint["feature_snapshot"]["timeline_count"] == 1
     assert checkpoint["latest_entity_context"]["sketches"] == ["Sketch1"]
 
@@ -527,6 +545,43 @@ def test_ir_document_state_round_trips_profile_inspection_results_for_restore_va
         dependency_operations=restored.operations,
     )
     assert validate_ir_candidate(extrude, restored.operations) == []
+
+
+def test_ir_document_state_round_trips_entity_registry_and_to_document() -> None:
+    session_id = "session-ir-entity-registry"
+    state = IRDocumentState(metadata={"source": "fusion", "session_id": session_id})
+    state.entities["body"] = [
+        IRRef(
+            kind="body",
+            id="body_1",
+            source_operation_id="op_2",
+            alias="Primary body",
+            target_handles={"fusion": "body-token-1"},
+            fingerprint={"volume": 125.0, "centroid": [0.0, 0.0, 2.5]},
+            validity="valid",
+            generation=2,
+        )
+    ]
+    state.entities["face"] = [
+        IRRef(
+            kind="face",
+            id="face_1",
+            target_handles={"fusion": "face-token-1"},
+            validity="unknown",
+        )
+    ]
+
+    serialized = _serialize_ir_document_state(state)
+    restored = _deserialize_ir_document_state(serialized)
+    document = restored.to_document()
+
+    assert serialized["entities"]["body"][0]["id"] == "body_1"
+    assert restored.entities["body"][0].source_operation_id == "op_2"
+    assert restored.entities["body"][0].target_handles["fusion"] == "body-token-1"
+    assert restored.entities["body"][0].fingerprint["volume"] == 125.0
+    assert restored.entities["body"][0].generation == 2
+    assert restored.entities["face"][0].validity == "unknown"
+    assert document.entities == restored.entities
 
 
 def test_ir_document_state_round_trips_delete_hole_and_list_features_operations() -> None:

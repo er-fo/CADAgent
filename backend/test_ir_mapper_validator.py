@@ -12,6 +12,7 @@ try:
         FeatureParameterEditParams,
         FeatureSuppressionParams,
         IROperation,
+        ListFeaturesParams,
         PatternFeatureParams,
         SimpleHoleParams,
         TappedHoleParams,
@@ -27,6 +28,7 @@ except ImportError:  # pragma: no cover
         FeatureParameterEditParams,
         FeatureSuppressionParams,
         IROperation,
+        ListFeaturesParams,
         PatternFeatureParams,
         SimpleHoleParams,
         TappedHoleParams,
@@ -686,6 +688,152 @@ def test_mapper_captures_phase_4_selector_metadata():
     assert select_faces.selectors == [{"kind": "face", "refs": ["face_0", "face_1"]}]
     assert clear_faces.type == "clear_selection"
     assert clear_faces.effects.invalidates == {"selection": ["face"]}
+
+
+def test_mapper_normalizes_selector_metadata_for_face_and_feature_operations():
+    state = IRDocumentState()
+
+    hole = map_tool_call_to_ir(
+        {
+            "name": "create_simple_hole",
+            "input": {
+                "face_ref": "face_token_0",
+                "center_x": 0,
+                "center_y": 0,
+                "center_z": 0,
+                "diameter": 4,
+                "extent_type": "through_all",
+            },
+        },
+        state,
+    )
+    thread = map_tool_call_to_ir(
+        {
+            "name": "create_external_thread",
+            "input": {
+                "face_ref": "cyl_face_0",
+                "thread_type": "metric",
+                "thread_size": "M6",
+                "is_full_length": True,
+            },
+        },
+        state,
+    )
+    pattern = map_tool_call_to_ir(
+        {
+            "name": "create_pattern_feature",
+            "input": {"pattern_type": "rectangular", "feature_refs": ["feature_token_0"], "count_x": 2},
+        },
+        state,
+    )
+    edit = map_tool_call_to_ir(
+        {
+            "name": "adjust_feature_parameters",
+            "input": {"feature_ref": "feature_token_0", "parameters": {"distance": 5}},
+        },
+        state,
+    )
+
+    assert hole.selectors == [{"kind": "face", "refs": ["face_token_0"]}]
+    assert thread.selectors == [{"kind": "face", "refs": ["cyl_face_0"]}]
+    assert pattern.selectors == [{"kind": "feature", "refs": ["feature_token_0"]}]
+    assert edit.selectors == [{"kind": "feature", "refs": ["feature_token_0"]}]
+
+
+def test_candidate_validation_rejects_missing_selector_refs_when_registry_exists():
+    state = IRDocumentState()
+    registry = IROperation(
+        id="op_registry",
+        type="list_features",
+        params=ListFeaturesParams(),
+        target_results=[
+            {
+                "target": "fusion",
+                "success": True,
+                "raw_result": {
+                    "faces": [{"entity_token": "face_known"}],
+                    "edges": [{"entity_token": "edge_known"}],
+                    "bodies": [{"entity_token": "body_known"}],
+                    "features": [{"entity_token": "feature_known"}],
+                },
+            }
+        ],
+    )
+    missing_face_hole = map_tool_call_to_ir(
+        {
+            "name": "create_simple_hole",
+            "input": {
+                "face_ref": "face_missing",
+                "center_x": 0,
+                "center_y": 0,
+                "center_z": 0,
+                "diameter": 4,
+                "extent_type": "through_all",
+            },
+        },
+        state,
+    )
+    missing_feature_edit = map_tool_call_to_ir(
+        {
+            "name": "adjust_feature_parameters",
+            "input": {"feature_ref": "feature_missing", "parameters": {"distance": 5}},
+        },
+        state,
+    )
+
+    face_errors = validate_ir_candidate(missing_face_hole, [registry])
+    feature_errors = validate_ir_candidate(missing_feature_edit, [registry])
+
+    assert any("face ref 'face_missing' is not present in committed selector registry" in err for err in face_errors)
+    assert any("feature ref 'feature_missing' is not present in committed selector registry" in err for err in feature_errors)
+
+
+def test_candidate_validation_rejects_stale_selector_refs_after_topology_invalidation():
+    state = IRDocumentState()
+    registry = IROperation(
+        id="op_registry",
+        type="list_features",
+        params=ListFeaturesParams(),
+        target_results=[
+            {
+                "target": "fusion",
+                "success": True,
+                "raw_result": {"edges": [{"entity_token": "edge_old"}]},
+            }
+        ],
+    )
+    invalidation = map_tool_call_to_ir(
+        {"name": "jump_to_timeline_position", "input": {"target_index": 1}},
+        state,
+    )
+    fillet = map_tool_call_to_ir(
+        {"name": "apply_fillet", "input": {"edge_refs": ["edge_old"], "radius": 2}},
+        state,
+    )
+
+    errors = validate_ir_candidate(fillet, [registry, invalidation])
+
+    assert any("edge ref 'edge_old' is stale in committed selector registry" in err for err in errors)
+
+
+def test_candidate_validation_preserves_selector_refs_without_registry_evidence():
+    state = IRDocumentState()
+    hole = map_tool_call_to_ir(
+        {
+            "name": "create_simple_hole",
+            "input": {
+                "face_ref": "face_0",
+                "center_x": 0,
+                "center_y": 0,
+                "center_z": 0,
+                "diameter": 4,
+                "extent_type": "through_all",
+            },
+        },
+        state,
+    )
+
+    assert validate_ir_candidate(hole, []) == []
 
 
 def test_mapper_captures_phase_5_invalidation_semantics():

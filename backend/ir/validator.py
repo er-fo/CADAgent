@@ -65,6 +65,22 @@ _FEATURE_PARAMETER_ALLOWED_KEYS = (
     | _FEATURE_PARAMETER_COUNT_KEYS
     | _FEATURE_PARAMETER_ANGLE_KEYS
 )
+_SELECTOR_KINDS = {"edge", "face", "body", "feature"}
+_SELECTOR_EFFECT_KEYS = {
+    "edge": "edges",
+    "face": "faces",
+    "body": "bodies",
+    "feature": "features",
+}
+_REF_KEYS = (
+    "entity_token",
+    "entity_ref",
+    "feature_token",
+    "feature_ref",
+    "token",
+    "ref",
+    "id",
+)
 
 
 def _is_nonempty_string(value: object) -> bool:
@@ -188,9 +204,139 @@ def _has_refs(values: Sequence[str]) -> bool:
     return any(_is_nonempty_string(value) for value in values)
 
 
+def _extract_ref_from_mapping(value: Mapping[str, object]) -> str:
+    for key in _REF_KEYS:
+        ref = value.get(key)
+        if _is_nonempty_string(ref):
+            return str(ref).strip()
+    return ""
+
+
+def _extract_registry_refs(payload: Mapping[str, object], key: str) -> set[str]:
+    refs: set[str] = set()
+    values = payload.get(key)
+    if isinstance(values, Mapping):
+        values = list(values.values())
+    if not isinstance(values, Sequence) or isinstance(values, (str, bytes, bytearray)):
+        return refs
+    for value in values:
+        if _is_nonempty_string(value):
+            refs.add(str(value).strip())
+        elif isinstance(value, Mapping):
+            ref = _extract_ref_from_mapping(value)
+            if ref:
+                refs.add(ref)
+    return refs
+
+
+def _target_result_payloads(result: Mapping[str, object]) -> list[Mapping[str, object]]:
+    payloads: list[Mapping[str, object]] = [result]
+    for key in ("raw_result", "data", "entities"):
+        value = result.get(key)
+        if isinstance(value, Mapping):
+            payloads.append(value)
+            nested_entities = value.get("entities")
+            if isinstance(nested_entities, Mapping):
+                payloads.append(nested_entities)
+    return payloads
+
+
+def _selector_registry_from_committed(
+    operations: Sequence[IROperation],
+) -> tuple[dict[str, set[str]], dict[str, set[str]]]:
+    valid_refs: dict[str, set[str]] = {kind: set() for kind in _SELECTOR_KINDS}
+    stale_refs: dict[str, set[str]] = {kind: set() for kind in _SELECTOR_KINDS}
+
+    for op in operations:
+        for kind, effect_key in _SELECTOR_EFFECT_KEYS.items():
+            invalidated = set(op.effects.invalidates.get(effect_key, []))
+            if invalidated & {"*", "topology_generation", "after_marker"}:
+                stale_refs[kind].update(valid_refs[kind])
+                valid_refs[kind].clear()
+
+        for result in op.target_results:
+            if not isinstance(result, Mapping):
+                continue
+            if result.get("success") is False:
+                continue
+            for payload in _target_result_payloads(result):
+                valid_refs["edge"].update(_extract_registry_refs(payload, "edges"))
+                valid_refs["face"].update(_extract_registry_refs(payload, "faces"))
+                valid_refs["body"].update(_extract_registry_refs(payload, "bodies"))
+                valid_refs["feature"].update(_extract_registry_refs(payload, "features"))
+
+        for kind in _SELECTOR_KINDS:
+            stale_refs[kind].difference_update(valid_refs[kind])
+
+    return valid_refs, stale_refs
+
+
+def _selector_refs(operation: IROperation) -> dict[str, set[str]]:
+    refs_by_kind: dict[str, set[str]] = {kind: set() for kind in _SELECTOR_KINDS}
+    for selector in operation.selectors:
+        if not isinstance(selector, Mapping):
+            continue
+        kind = str(selector.get("kind") or "").strip()
+        if kind not in _SELECTOR_KINDS:
+            continue
+        refs = selector.get("refs")
+        if isinstance(refs, str):
+            values = [refs]
+        elif isinstance(refs, Sequence) and not isinstance(refs, (bytes, bytearray)):
+            values = refs
+        else:
+            values = []
+        refs_by_kind[kind].update(str(ref).strip() for ref in values if str(ref).strip())
+    return refs_by_kind
+
+
+def _validate_selector_metadata(operation: IROperation, errors: List[str]) -> None:
+    for index, selector in enumerate(operation.selectors):
+        if not isinstance(selector, Mapping):
+            errors.append(f"selector[{index}] must be a mapping")
+            continue
+        kind = str(selector.get("kind") or "").strip()
+        if kind not in _SELECTOR_KINDS:
+            errors.append(f"selector[{index}] kind must be edge/face/body/feature")
+            continue
+        refs = selector.get("refs")
+        if isinstance(refs, str):
+            ref_values = [refs]
+        elif isinstance(refs, Sequence) and not isinstance(refs, (bytes, bytearray)):
+            ref_values = refs
+        else:
+            errors.append(f"selector[{index}] refs must be a non-empty string list")
+            continue
+        if not any(_is_nonempty_string(ref) for ref in ref_values):
+            errors.append(f"selector[{index}] refs must include at least one non-empty ref")
+
+
+def _validate_committed_selector_refs(
+    operation: IROperation,
+    committed_operations: Sequence[IROperation],
+    errors: List[str],
+) -> None:
+    valid_refs, stale_refs = _selector_registry_from_committed(committed_operations)
+    for kind, refs in _selector_refs(operation).items():
+        if not refs:
+            continue
+        known_refs = valid_refs[kind]
+        stale = stale_refs[kind]
+        if not known_refs and not stale:
+            continue
+        for ref in sorted(refs):
+            if ref in known_refs:
+                continue
+            if ref in stale:
+                errors.append(f"{operation.type} {kind} ref '{ref}' is stale in committed selector registry")
+            elif known_refs:
+                errors.append(f"{operation.type} {kind} ref '{ref}' is not present in committed selector registry")
+
+
 def validate_operation(operation: IROperation) -> List[str]:
     """Validate a single IR operation."""
     errors: List[str] = []
+    _validate_selector_metadata(operation, errors)
 
     if operation.type == "create_sketch":
         params = operation.params
@@ -655,6 +801,7 @@ def validate_ir_candidate(
     committed_ids = {op.id for op in committed_operations}
     committed_sketches = _sketch_ids_from_committed(committed_operations)
     committed_planes = _construction_plane_ids_from_committed(committed_operations)
+    _validate_committed_selector_refs(operation, committed_operations, errors)
 
     missing_dependencies = [dep for dep in operation.dependencies if dep not in committed_ids]
     if missing_dependencies:

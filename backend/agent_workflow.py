@@ -66,6 +66,7 @@ try:
         FeatureParameterEditParams,
         FeatureSuppressionParams,
         FilletParams,
+        IRRef,
         IROperation,
         IROperationEffects,
         JumpToTimelinePositionParams,
@@ -126,6 +127,7 @@ except ImportError:  # pragma: no cover - script execution fallback
         FeatureParameterEditParams,
         FeatureSuppressionParams,
         FilletParams,
+        IRRef,
         IROperation,
         IROperationEffects,
         JumpToTimelinePositionParams,
@@ -1730,6 +1732,18 @@ def _serialize_ir_operation(operation: IROperation) -> Dict[str, Any]:
     }
 
 
+def _serialize_ir_entity_registry(entities: Mapping[str, Sequence[IRRef]]) -> Dict[str, List[Dict[str, Any]]]:
+    """Serialize IR entity refs into checkpoint-safe plain data."""
+    serialized: Dict[str, List[Dict[str, Any]]] = {}
+    for kind, refs in entities.items():
+        if not isinstance(refs, Sequence) or isinstance(refs, (str, bytes)):
+            continue
+        records = [asdict(ref) for ref in refs if isinstance(ref, IRRef)]
+        if records:
+            serialized[str(kind)] = records
+    return serialized
+
+
 def _serialize_ir_document_state(ir_doc_state: IRDocumentState) -> Dict[str, Any]:
     """Serialize committed IR document state for cross-request/resume continuity."""
     return {
@@ -1737,8 +1751,53 @@ def _serialize_ir_document_state(ir_doc_state: IRDocumentState) -> Dict[str, Any
         "units": ir_doc_state.units,
         "counter": int(getattr(ir_doc_state, "_counter", 0) or 0),
         "operations": [_serialize_ir_operation(operation) for operation in ir_doc_state.operations],
+        "entities": _serialize_ir_entity_registry(getattr(ir_doc_state, "entities", {}) or {}),
         "metadata": dict(ir_doc_state.metadata) if ir_doc_state.metadata else None,
     }
+
+
+def _deserialize_ir_ref(payload: Mapping[str, Any], fallback_kind: str) -> IRRef:
+    """Deserialize one checkpointed IR entity reference."""
+    raw_target_handles = payload.get("target_handles")
+    raw_fingerprint = payload.get("fingerprint")
+    try:
+        generation = int(payload.get("generation") or 0)
+    except (TypeError, ValueError):
+        generation = 0
+
+    return IRRef(
+        kind=str(payload.get("kind") or fallback_kind).strip() or fallback_kind,  # type: ignore[arg-type]
+        id=str(payload.get("id") or "").strip(),
+        source_operation_id=str(payload.get("source_operation_id") or "").strip() or None,
+        alias=str(payload.get("alias") or "").strip() or None,
+        target_handles={
+            str(key): str(value)
+            for key, value in dict(raw_target_handles).items()
+        } if isinstance(raw_target_handles, Mapping) else {},
+        fingerprint=dict(raw_fingerprint) if isinstance(raw_fingerprint, Mapping) else None,
+        validity=str(payload.get("validity") or "valid").strip() or "valid",  # type: ignore[arg-type]
+        generation=generation,
+    )
+
+
+def _deserialize_ir_entity_registry(raw_entities: Any) -> Dict[str, List[IRRef]]:
+    """Deserialize a checkpointed IR entity registry."""
+    entities: Dict[str, List[IRRef]] = {}
+    if not isinstance(raw_entities, Mapping):
+        return entities
+
+    for kind, raw_refs in raw_entities.items():
+        kind_key = str(kind)
+        if not isinstance(raw_refs, list):
+            continue
+        refs = [
+            _deserialize_ir_ref(ref_payload, kind_key)
+            for ref_payload in raw_refs
+            if isinstance(ref_payload, Mapping)
+        ]
+        if refs:
+            entities[kind_key] = refs
+    return entities
 
 
 def _deserialize_ir_operation(payload: Mapping[str, Any]) -> IROperation:
@@ -2059,6 +2118,7 @@ def _deserialize_ir_document_state(ir_state: Mapping[str, Any]) -> IRDocumentSta
     state = IRDocumentState(
         version=str(ir_state.get("version") or "1.0"),
         units=str(ir_state.get("units") or "mm"),
+        entities=_deserialize_ir_entity_registry(ir_state.get("entities")),
         metadata=dict(raw_metadata) if isinstance(raw_metadata, Mapping) else None,
     )
 

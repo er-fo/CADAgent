@@ -1339,6 +1339,32 @@ def _build_loft_document() -> IRDocument:
     )
 
 
+def _assert_build123d_entity_metadata(entities: dict, *, face_types: set[str], edge_types: set[str]) -> None:
+    assert entities["bodies"] == 1
+    assert len(entities["bodies_metadata"]) == entities["bodies"]
+    assert len(entities["faces_metadata"]) == entities["faces"]
+    assert len(entities["edges_metadata"]) == entities["edges"]
+
+    for collection_name, prefix in (
+        ("bodies_metadata", "body"),
+        ("faces_metadata", "face"),
+        ("edges_metadata", "edge"),
+    ):
+        fingerprints = set()
+        for index, entity in enumerate(entities[collection_name]):
+            assert entity["id"] == f"{prefix}_{index}"
+            assert entity["index"] == index
+            assert entity["fingerprint"]
+            assert entity["bounding_box"]["size"]
+            assert entity["center"]
+            fingerprints.add(entity["fingerprint"])
+        assert fingerprints
+
+    assert entities["bodies_metadata"][0]["topology_type"] == "Solid"
+    assert face_types.issubset({face["geometry_type"] for face in entities["faces_metadata"]})
+    assert edge_types.issubset({edge["geometry_type"] for edge in entities["edges_metadata"]})
+
+
 @pytest.mark.skipif(not HAS_BUILD123D, reason="build123d is required for real-geometry adapter tests")
 def test_build123d_executor_creates_real_cube_and_exports_step(tmp_path: Path):
     executor = Build123dTargetExecutor()
@@ -1350,6 +1376,7 @@ def test_build123d_executor_creates_real_cube_and_exports_step(tmp_path: Path):
     assert entities["faces"] == 6
     assert entities["edges"] == 12
     assert entities["vertices"] == 8
+    _assert_build123d_entity_metadata(entities, face_types={"PLANE"}, edge_types={"LINE"})
 
     out_path = executor.export_step("s_cube", str(tmp_path / "cube.step"))
     assert Path(out_path).exists()
@@ -1369,6 +1396,7 @@ def test_build123d_executor_creates_real_cylinder():
     expected_volume = 3.141592653589793 * 10.0 * 10.0 * 40.0
     assert abs(entities["volume_mm3"] - expected_volume) < 10.0
     assert entities["faces"] == 3
+    _assert_build123d_entity_metadata(entities, face_types={"CYLINDER", "PLANE"}, edge_types={"CIRCLE", "LINE"})
 
 
 @pytest.mark.skipif(not HAS_BUILD123D, reason="build123d is required for real-geometry adapter tests")
@@ -1395,6 +1423,7 @@ def test_build123d_executor_revolves_profile():
     expected_volume = 2.0 * 3.141592653589793 * 20.0 * 10.0 * 20.0
     assert abs(entities["volume_mm3"] - expected_volume) < 25.0
     assert entities["faces"] == 4
+    _assert_build123d_entity_metadata(entities, face_types={"CYLINDER", "PLANE"}, edge_types={"CIRCLE", "LINE"})
 
 
 @pytest.mark.skipif(not HAS_BUILD123D, reason="build123d is required for real-geometry adapter tests")
@@ -1406,6 +1435,7 @@ def test_build123d_executor_lofts_between_offset_profiles():
     entities = result.data["entities"]
     assert abs(entities["volume_mm3"] - 4666.666666666667) < 5.0
     assert entities["faces"] == 6
+    _assert_build123d_entity_metadata(entities, face_types={"BSPLINE", "PLANE"}, edge_types={"BSPLINE", "LINE"})
 
 
 @pytest.mark.skipif(not HAS_BUILD123D, reason="build123d is required for real-geometry adapter tests")
