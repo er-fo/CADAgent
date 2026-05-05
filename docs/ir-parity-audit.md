@@ -21,7 +21,7 @@ Resolved or materially improved:
 
 Remaining important gaps:
 
-- build123d still directly supports only the sketch/extrude subset plus profile-inspection guards; advanced operations are represented in IR but not translated into build123d geometry yet.
+- build123d directly supports the sketch/extrude subset, including ordered closed line/arc profiles and profile-inspection guards; advanced solid/feature operations are represented in IR but not translated into build123d geometry yet.
 - Topology refs are represented and invalidated at a coarse level; durable semantic re-selection is still limited.
 - Fusion result topology is captured through target results/runtime refresh, but a fully populated persistent IR entity registry remains future work.
 - Direct Fusion IR execution for feature refs requires already-resolved tokens or an entity store; workflow execution remains the preferred path for ref-heavy feature operations.
@@ -31,7 +31,7 @@ Remaining important gaps:
 | Area | Current IR Status | Fusion Adapter | build123d Adapter |
 | --- | --- | --- | --- |
 | Construction planes | Modeled with datum, offset, angle-to-edge, and face-normal params | Translates to existing Fusion codegen and resolves entity refs | Explicitly unsupported |
-| Sketch primitives | Sketches, rectangles, circles, lines, arcs, and profile queries are modeled | Translates to Fusion codegen with canonical mm-to-cm conversion | Rectangles/circles/extrudes supported; lines/arcs rejected explicitly |
+| Sketch primitives | Sketches, rectangles, circles, lines, arcs, and profile queries are modeled | Translates to Fusion codegen with canonical mm-to-cm conversion | Rectangles/circles supported; ordered closed line/arc profiles emit `BuildLine`/`make_face`; extrudes materialize deterministic build123d sketches |
 | Solid features | Extrude, revolve, loft, fillet, chamfer, shell, holes, threads, patterns modeled | Translates to Fusion codegen or feature payloads | Explicitly unsupported outside the sketch/extrude subset |
 | Selection and timeline | Selection, feature listing, delete, and jump operations modeled | Routed to Fusion payload/codegen paths | Explicitly unsupported |
 | Units | IR is canonical millimeters | Converts to Fusion centimeters at the boundary | Consumes millimeters |

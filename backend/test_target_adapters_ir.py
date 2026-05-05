@@ -11,6 +11,7 @@ try:
     from .backends.fusion.translator import translate_ir_to_fusion_tool_call
     from .entity_store import EntityStore
     from .ir.types import (
+        AddArcParams,
         AddCircleParams,
         AddLineParams,
         AddRectangleParams,
@@ -37,6 +38,7 @@ except ImportError:  # pragma: no cover
     from backend.backend.backends.fusion.translator import translate_ir_to_fusion_tool_call
     from backend.backend.entity_store import EntityStore
     from backend.backend.ir.types import (
+        AddArcParams,
         AddCircleParams,
         AddLineParams,
         AddRectangleParams,
@@ -873,21 +875,82 @@ def test_build123d_translator_rejects_unsupported_extrude_operation():
         translate_ir_document_to_build123d(document)
 
 
-def test_build123d_translator_fails_explicitly_for_unsupported_widened_ir():
+def test_build123d_translator_supports_line_and_arc_sketch_primitives():
     document = IRDocument(
         version="1.0",
         units="mm",
         operations=[
             IROperation(
+                id="op_sketch",
+                type="create_sketch",
+                params=CreateSketchParams(plane="XY", sketch="sketch_0"),
+            ),
+            IROperation(
                 id="op_line",
                 type="add_line",
-                params=AddLineParams(sketch="sketch_0", start=[0.0, 0.0], end=[10.0, 0.0]),
-            )
+                params=AddLineParams(sketch="sketch_0", start=[-10.0, 0.0], end=[10.0, 0.0]),
+            ),
+            IROperation(
+                id="op_arc",
+                type="add_arc",
+                params=AddArcParams(sketch="sketch_0", center=[0.0, 0.0], start=[10.0, 0.0], end=[-10.0, 0.0]),
+            ),
+            IROperation(
+                id="op_extrude",
+                type="extrude",
+                params=ExtrudeParams(
+                    profile="sketch_0:profile_0",
+                    distance=5.0,
+                    direction="positive",
+                    operation="new",
+                    sketch="sketch_0",
+                    profile_index=0,
+                ),
+            ),
         ],
         metadata={"source": "test"},
     )
 
-    with pytest.raises(ValueError, match="Unsupported IR operation for build123d translator: add_line"):
+    program = translate_ir_document_to_build123d(document)
+
+    assert "BuildLine" in program.code
+    assert "Line((-10.0, 0.0), (10.0, 0.0))" in program.code
+    assert "CenterArc((0.0, 0.0), 10.0, 0.0, 180.0)" in program.code
+    assert "make_face()" in program.code
+
+
+def test_build123d_translator_rejects_open_line_arc_profiles_before_runtime():
+    document = IRDocument(
+        version="1.0",
+        units="mm",
+        operations=[
+            IROperation(
+                id="op_sketch",
+                type="create_sketch",
+                params=CreateSketchParams(plane="XY", sketch="sketch_0"),
+            ),
+            IROperation(
+                id="op_line",
+                type="add_line",
+                params=AddLineParams(sketch="sketch_0", start=[0.0, 0.0], end=[10.0, 0.0]),
+            ),
+            IROperation(
+                id="op_extrude",
+                type="extrude",
+                params=ExtrudeParams(
+                    profile="sketch_0:profile_0",
+                    distance=5.0,
+                    direction="positive",
+                    operation="new",
+                    sketch="sketch_0",
+                    profile_index=0,
+                ),
+            ),
+        ],
+        metadata={"source": "test"},
+    )
+
+    with pytest.raises(ValueError, match="does not form a closed loop"):
         translate_ir_document_to_build123d(document)
 
 
@@ -1006,6 +1069,43 @@ def _build_cylinder_document() -> IRDocument:
     )
 
 
+def _build_line_arc_profile_document() -> IRDocument:
+    return IRDocument(
+        version="1.0",
+        units="mm",
+        operations=[
+            IROperation(
+                id="op_1",
+                type="create_sketch",
+                params=CreateSketchParams(plane="XY", sketch="sketch_0"),
+            ),
+            IROperation(
+                id="op_2",
+                type="add_line",
+                params=AddLineParams(sketch="sketch_0", start=[-10.0, 0.0], end=[10.0, 0.0]),
+            ),
+            IROperation(
+                id="op_3",
+                type="add_arc",
+                params=AddArcParams(sketch="sketch_0", center=[0.0, 0.0], start=[10.0, 0.0], end=[-10.0, 0.0]),
+            ),
+            IROperation(
+                id="op_4",
+                type="extrude",
+                params=ExtrudeParams(
+                    profile="sketch_0:profile_0",
+                    distance=5.0,
+                    direction="positive",
+                    operation="new",
+                    sketch="sketch_0",
+                    profile_index=0,
+                ),
+            ),
+        ],
+        metadata={"source": "test"},
+    )
+
+
 @pytest.mark.skipif(not HAS_BUILD123D, reason="build123d is required for real-geometry adapter tests")
 def test_build123d_executor_creates_real_cube_and_exports_step(tmp_path: Path):
     executor = Build123dTargetExecutor()
@@ -1036,6 +1136,20 @@ def test_build123d_executor_creates_real_cylinder():
     expected_volume = 3.141592653589793 * 10.0 * 10.0 * 40.0
     assert abs(entities["volume_mm3"] - expected_volume) < 10.0
     assert entities["faces"] == 3
+
+
+@pytest.mark.skipif(not HAS_BUILD123D, reason="build123d is required for real-geometry adapter tests")
+def test_build123d_executor_extrudes_closed_line_arc_profile():
+    executor = Build123dTargetExecutor()
+    result = asyncio.run(
+        executor.execute_document("s_line_arc", _build_line_arc_profile_document(), request_id="line-arc")
+    )
+
+    assert result.success, result.message
+    entities = result.data["entities"]
+    expected_volume = 0.5 * 3.141592653589793 * 10.0 * 10.0 * 5.0
+    assert abs(entities["volume_mm3"] - expected_volume) < 5.0
+    assert entities["faces"] == 4
 
 
 @pytest.mark.skipif(not HAS_BUILD123D, reason="build123d is required for real-geometry adapter tests")

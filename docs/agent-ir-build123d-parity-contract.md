@@ -24,12 +24,14 @@ The agent input → IR path already models the broad Fusion CAD tool surface, bu
 - `create_sketch`
 - `add_rectangle`
 - `add_circle`
+- `add_line`
+- `add_arc`
 - `list_sketch_profiles`
 - `extrude_profile`
 
 ## Remaining Work
 
-- Implement build123d translation for portable geometry operations.
+- Implement build123d translation for portable solid feature operations beyond sketch/profile extrusion.
 - Add durable topology selectors for edge/face/body-dependent operations.
 - Define replay/revision semantics for Fusion timeline and feature lifecycle operations.
 

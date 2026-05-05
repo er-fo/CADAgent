@@ -19,7 +19,7 @@ try:
     )
     from .ir.document import IRDocumentState
     from .ir.mapper import map_tool_call_to_ir
-    from .ir.types import IRDocument, IROperation
+    from .ir.types import AddRectangleParams, CreateSketchParams, IRDocument, IROperation
     from .ir.validator import validate_operation
 except ImportError:  # pragma: no cover
     from backend.backend.backends.build123d.translator import Build123dCapabilityError, translate_ir_document_to_build123d
@@ -32,7 +32,7 @@ except ImportError:  # pragma: no cover
     )
     from backend.backend.ir.document import IRDocumentState
     from backend.backend.ir.mapper import map_tool_call_to_ir
-    from backend.backend.ir.types import IRDocument, IROperation
+    from backend.backend.ir.types import AddRectangleParams, CreateSketchParams, IRDocument, IROperation
     from backend.backend.ir.validator import validate_operation
 
 
@@ -119,13 +119,13 @@ def test_parity_contract_rows_are_complete(tool_name, capability):
             {"name": "add_line", "input": {"sketch_id": "s0", "start_u": 0, "start_v": 0, "end_u": 1, "end_v": 0}},
             "add_line",
             "add_line",
-            False,
+            True,
         ),
         (
             {"name": "add_arc", "input": {"sketch_id": "s0", "center_u": 0, "center_v": 0, "start_u": 1, "start_v": 0, "end_u": 0, "end_v": 1}},
             "add_arc",
             "add_arc",
-            False,
+            True,
         ),
         (
             {"name": "revolve_profile", "input": {"sketch_id": "s0", "profile_index": 0, "axis": {"type": "construction", "axis": "z"}, "extent": {"mode": "full"}, "operation": "NewBody"}},
@@ -282,7 +282,22 @@ def test_golden_tool_call_maps_validates_and_preserves_fusion_translation(
     fusion_tool, _fusion_input = translate_ir_to_fusion_tool_call(operation)
     assert fusion_tool == expected_fusion
 
-    document = IRDocument(version="1.0", units="mm", operations=[operation], metadata={"source": "test"})
+    operations = [operation]
+    if expected_ir == "extrude":
+        operations = [
+            IROperation(
+                id="op_sketch",
+                type="create_sketch",
+                params=CreateSketchParams(plane="XY", sketch="s0"),
+            ),
+            IROperation(
+                id="op_rect",
+                type="add_rectangle",
+                params=AddRectangleParams(sketch="s0", center=[0.0, 0.0], width=10.0, height=10.0),
+            ),
+            operation,
+        ]
+    document = IRDocument(version="1.0", units="mm", operations=operations, metadata={"source": "test"})
     if build123d_supported:
         program = translate_ir_document_to_build123d(document)
         assert "from build123d import" in program.code
