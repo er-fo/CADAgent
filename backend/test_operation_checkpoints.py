@@ -584,6 +584,64 @@ def test_ir_document_state_round_trips_delete_hole_and_list_features_operations(
     assert restored_list.params.description == "Refresh features"
 
 
+def test_ir_document_state_round_trips_selection_and_timeline_revision_metadata() -> None:
+    session_id = "session-ir-selection-timeline"
+    state = IRDocumentState(metadata={"source": "fusion", "session_id": session_id})
+
+    select_faces = map_tool_call_to_ir(
+        {
+            "name": "select_faces",
+            "input": {"face_refs": ["face-token-1", "face-token-2"], "clear_existing": False},
+        },
+        state,
+        metadata={"source": "fusion", "session_id": session_id, "request_id": "r1", "iteration": 1},
+    )
+    state.append(select_faces)
+
+    clear_faces = map_tool_call_to_ir(
+        {"name": "clear_face_selection", "input": {}},
+        state,
+        metadata={"source": "fusion", "session_id": session_id, "request_id": "r1", "iteration": 2},
+    )
+    state.append(clear_faces)
+
+    jump = map_tool_call_to_ir(
+        {
+            "name": "jump_to_timeline_position",
+            "input": {"target_index": 6, "reason": "truncate regenerated branch"},
+        },
+        state,
+        metadata={"source": "fusion", "session_id": session_id, "request_id": "r1", "iteration": 3},
+    )
+    state.append(jump)
+
+    restored = _deserialize_ir_document_state(_serialize_ir_document_state(state))
+
+    restored_select, restored_clear, restored_jump = restored.operations
+    assert restored_select.type == "select_entities"
+    assert restored_select.params.kind == "face"
+    assert restored_select.params.refs == ["face-token-1", "face-token-2"]
+    assert restored_select.params.clear_existing is False
+    assert restored_select.selectors == [{"kind": "face", "refs": ["face-token-1", "face-token-2"]}]
+    assert restored_select.requires == ["selection"]
+
+    assert restored_clear.type == "clear_selection"
+    assert restored_clear.params.kind == "face"
+    assert restored_clear.effects.invalidates == {"selection": ["face"]}
+
+    assert restored_jump.type == "jump_to_timeline_position"
+    assert restored_jump.params.target_index == 6
+    assert restored_jump.params.reason == "truncate regenerated branch"
+    assert restored_jump.requires == ["parametric_timeline", "document_revision"]
+    assert restored_jump.effects.invalidates == {
+        "operations": ["after_marker"],
+        "features": ["after_marker"],
+        "faces": ["*"],
+        "edges": ["*"],
+    }
+    assert restored.metadata["session_id"] == session_id
+
+
 def test_ir_document_state_rejects_malformed_feature_suppression_bool() -> None:
     with pytest.raises(ValueError, match="Invalid boolean"):
         _deserialize_ir_document_state(
