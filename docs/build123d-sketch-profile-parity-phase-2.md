@@ -27,4 +27,4 @@ None intended. Invalid open line/arc extrusion now fails earlier with a determin
 ## Remaining Gaps
 
 - Multiple build123d profile-index selection remains limited by build123d/Fusion profile model differences.
-- Phase 3 now supports portable construction-plane datum/offset cases, solid revolve, and solid loft; holes, fillets, chamfers, shell, patterns, and selector-dependent variants remain unsupported.
+- Later parity work now supports portable construction-plane datum/offset cases, solid revolve/loft, selector-resolved fillets/chamfers/shell/holes, and thread metadata; feature patterns and lifecycle replay remain unsupported.

@@ -19,7 +19,7 @@ try:
     )
     from .ir.document import IRDocumentState
     from .ir.mapper import map_tool_call_to_ir
-    from .ir.types import AddRectangleParams, CreateSketchParams, IRDocument, IROperation
+    from .ir.types import AddRectangleParams, CreateSketchParams, ExtrudeParams, IRDocument, IROperation
     from .ir.validator import validate_operation
 except ImportError:  # pragma: no cover
     from backend.backend.backends.build123d.translator import Build123dCapabilityError, translate_ir_document_to_build123d
@@ -32,7 +32,7 @@ except ImportError:  # pragma: no cover
     )
     from backend.backend.ir.document import IRDocumentState
     from backend.backend.ir.mapper import map_tool_call_to_ir
-    from backend.backend.ir.types import AddRectangleParams, CreateSketchParams, IRDocument, IROperation
+    from backend.backend.ir.types import AddRectangleParams, CreateSketchParams, ExtrudeParams, IRDocument, IROperation
     from backend.backend.ir.validator import validate_operation
 
 
@@ -143,43 +143,43 @@ def test_parity_contract_rows_are_complete(tool_name, capability):
             {"name": "apply_fillet", "input": {"edge_refs": ["edge_0"], "radius": 2, "radius_unit": "mm"}},
             "fillet",
             "apply_fillet",
-            False,
+            True,
         ),
         (
             {"name": "apply_chamfer", "input": {"edge_refs": ["edge_0"], "distance": 2, "distance_unit": "mm"}},
             "chamfer",
             "apply_chamfer",
-            False,
+            True,
         ),
         (
             {"name": "create_shell", "input": {"mode": "open", "face_refs": ["face_0"], "inside_thickness": 1, "thickness_unit": "mm"}},
             "shell",
             "create_shell",
-            False,
+            True,
         ),
         (
             {"name": "create_simple_hole", "input": {"face_ref": "face_0", "center_x": 0, "center_y": 0, "center_z": 0, "diameter": 4, "diameter_unit": "mm", "extent_type": "through_all"}},
             "create_simple_hole",
             "create_simple_hole",
-            False,
+            True,
         ),
         (
             {"name": "create_counterbore_hole", "input": {"face_ref": "face_0", "center_x": 0, "center_y": 0, "center_z": 0, "hole_diameter": 4, "hole_depth": 5, "counterbore_diameter": 8, "counterbore_depth": 2, "diameter_unit": "mm"}},
             "create_counterbore_hole",
             "create_counterbore_hole",
-            False,
+            True,
         ),
         (
             {"name": "create_tapped_hole", "input": {"face_ref": "face_0", "center_x": 0, "center_y": 0, "center_z": 0, "thread_type": "metric", "thread_size": "M6", "thread_depth": 8}},
             "create_tapped_hole",
             "create_tapped_hole",
-            False,
+            True,
         ),
         (
             {"name": "create_external_thread", "input": {"face_ref": "face_0", "thread_type": "metric", "thread_size": "M6", "is_full_length": True}},
             "create_external_thread",
             "create_external_thread",
-            False,
+            True,
         ),
         (
             {"name": "create_pattern_feature", "input": {"pattern_type": "rectangular", "feature_refs": ["feature_0"], "count_x": 2, "spacing_x_cm": 1}},
@@ -335,6 +335,40 @@ def test_golden_tool_call_maps_validates_and_preserves_fusion_translation(
             ),
             operation,
         ]
+    elif expected_ir in {
+        "fillet",
+        "chamfer",
+        "shell",
+        "create_simple_hole",
+        "create_counterbore_hole",
+        "create_tapped_hole",
+        "create_external_thread",
+    }:
+        operations = [
+            IROperation(
+                id="op_sketch",
+                type="create_sketch",
+                params=CreateSketchParams(plane="XY", sketch="s0"),
+            ),
+            IROperation(
+                id="op_rect",
+                type="add_rectangle",
+                params=AddRectangleParams(sketch="s0", center=[0.0, 0.0], width=10.0, height=10.0),
+            ),
+            IROperation(
+                id="op_extrude",
+                type="extrude",
+                params=ExtrudeParams(
+                    profile="s0:profile_0",
+                    distance=10.0,
+                    direction="positive",
+                    operation="new",
+                    sketch="s0",
+                    profile_index=0,
+                ),
+            ),
+            operation,
+        ]
     document = IRDocument(version="1.0", units="mm", operations=operations, metadata={"source": "test"})
     if build123d_supported:
         program = translate_ir_document_to_build123d(document)
@@ -350,7 +384,7 @@ def test_golden_tool_call_maps_validates_and_preserves_fusion_translation(
 def test_build123d_capability_errors_are_precise_for_unsupported_ir():
     state = IRDocumentState()
     operation = map_tool_call_to_ir(
-        {"name": "apply_fillet", "input": {"edge_refs": ["edge_0"], "radius": 1, "radius_unit": "mm"}},
+        {"name": "create_pattern_feature", "input": {"pattern_type": "rectangular", "feature_refs": ["feature_0"], "count_x": 2}},
         state,
     )
     document = IRDocument(version="1.0", units="mm", operations=[operation], metadata={"source": "test"})
@@ -358,6 +392,6 @@ def test_build123d_capability_errors_are_precise_for_unsupported_ir():
     with pytest.raises(Build123dCapabilityError) as exc_info:
         translate_ir_document_to_build123d(document)
 
-    assert exc_info.value.operation_type == "fillet"
-    assert "portable edge selectors" in exc_info.value.reason
-    assert "Unsupported IR operation for build123d translator: fillet" in str(exc_info.value)
+    assert exc_info.value.operation_type == "pattern_feature"
+    assert "Feature patterns need portable feature refs" in exc_info.value.reason
+    assert "Unsupported IR operation for build123d translator: pattern_feature" in str(exc_info.value)

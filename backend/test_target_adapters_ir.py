@@ -12,9 +12,11 @@ try:
     from .entity_store import EntityStore
     from .ir.types import (
         AddArcParams,
+        ChamferParams,
         AddCircleParams,
         AddLineParams,
         AddRectangleParams,
+        CounterboreHoleParams,
         CreateConstructionPlaneParams,
         CreateSketchParams,
         DeleteFeatureParams,
@@ -31,6 +33,7 @@ try:
         SelectEntitiesParams,
         ShellParams,
         SimpleHoleParams,
+        TappedHoleParams,
     )
 except ImportError:  # pragma: no cover
     from backend.backend.backends.build123d import Build123dTargetExecutor
@@ -40,9 +43,11 @@ except ImportError:  # pragma: no cover
     from backend.backend.entity_store import EntityStore
     from backend.backend.ir.types import (
         AddArcParams,
+        ChamferParams,
         AddCircleParams,
         AddLineParams,
         AddRectangleParams,
+        CounterboreHoleParams,
         CreateConstructionPlaneParams,
         CreateSketchParams,
         DeleteFeatureParams,
@@ -59,6 +64,7 @@ except ImportError:  # pragma: no cover
         SelectEntitiesParams,
         ShellParams,
         SimpleHoleParams,
+        TappedHoleParams,
     )
 
 
@@ -1339,6 +1345,148 @@ def _build_loft_document() -> IRDocument:
     )
 
 
+def _build_cube_with_fillet_document() -> IRDocument:
+    document = _build_cube_document()
+    return IRDocument(
+        version=document.version,
+        units=document.units,
+        operations=[
+            *document.operations,
+            IROperation(
+                id="op_4",
+                type="fillet",
+                params=FilletParams(edge_refs=["edge_0"], radius=2.0),
+            ),
+        ],
+        metadata=document.metadata,
+    )
+
+
+def _build_cube_with_chamfer_document() -> IRDocument:
+    document = _build_cube_document()
+    return IRDocument(
+        version=document.version,
+        units=document.units,
+        operations=[
+            *document.operations,
+            IROperation(
+                id="op_4",
+                type="chamfer",
+                params=ChamferParams(edge_refs=["edge_0"], distance=2.0),
+            ),
+        ],
+        metadata=document.metadata,
+    )
+
+
+def _build_cube_with_shell_document() -> IRDocument:
+    document = _build_cube_document()
+    return IRDocument(
+        version=document.version,
+        units=document.units,
+        operations=[
+            *document.operations,
+            IROperation(
+                id="op_4",
+                type="shell",
+                params=ShellParams(mode="open", face_refs=["face_5"], inside_thickness=2.0),
+            ),
+        ],
+        metadata=document.metadata,
+    )
+
+
+def _build_cube_with_simple_hole_document() -> IRDocument:
+    document = _build_cube_document()
+    return IRDocument(
+        version=document.version,
+        units=document.units,
+        operations=[
+            *document.operations,
+            IROperation(
+                id="op_4",
+                type="create_simple_hole",
+                params=SimpleHoleParams(
+                    face_ref="face_5",
+                    center=[0.0, 0.0, 50.0],
+                    diameter=10.0,
+                    extent_type="through_all",
+                ),
+            ),
+        ],
+        metadata=document.metadata,
+    )
+
+
+def _build_cube_with_counterbore_document() -> IRDocument:
+    document = _build_cube_document()
+    return IRDocument(
+        version=document.version,
+        units=document.units,
+        operations=[
+            *document.operations,
+            IROperation(
+                id="op_4",
+                type="create_counterbore_hole",
+                params=CounterboreHoleParams(
+                    face_ref="face_5",
+                    center=[0.0, 0.0, 50.0],
+                    hole_diameter=6.0,
+                    hole_depth=50.0,
+                    counterbore_diameter=12.0,
+                    counterbore_depth=5.0,
+                ),
+            ),
+        ],
+        metadata=document.metadata,
+    )
+
+
+def _build_cube_with_tapped_hole_document() -> IRDocument:
+    document = _build_cube_document()
+    return IRDocument(
+        version=document.version,
+        units=document.units,
+        operations=[
+            *document.operations,
+            IROperation(
+                id="op_4",
+                type="create_tapped_hole",
+                params=TappedHoleParams(
+                    face_ref="face_5",
+                    center=[0.0, 0.0, 50.0],
+                    thread_type="metric",
+                    thread_size="M6",
+                    thread_depth=20.0,
+                ),
+            ),
+        ],
+        metadata=document.metadata,
+    )
+
+
+def _build_cylinder_with_external_thread_document() -> IRDocument:
+    document = _build_cylinder_document()
+    return IRDocument(
+        version=document.version,
+        units=document.units,
+        operations=[
+            *document.operations,
+            IROperation(
+                id="op_4",
+                type="create_external_thread",
+                params=ExternalThreadParams(
+                    face_ref="face_0",
+                    thread_type="metric",
+                    thread_size="M10",
+                    is_full_length=True,
+                ),
+            ),
+        ],
+        metadata=document.metadata,
+    )
+
+
 def _assert_build123d_entity_metadata(entities: dict, *, face_types: set[str], edge_types: set[str]) -> None:
     assert entities["bodies"] == 1
     assert len(entities["bodies_metadata"]) == entities["bodies"]
@@ -1436,6 +1584,78 @@ def test_build123d_executor_lofts_between_offset_profiles():
     assert abs(entities["volume_mm3"] - 4666.666666666667) < 5.0
     assert entities["faces"] == 6
     _assert_build123d_entity_metadata(entities, face_types={"BSPLINE", "PLANE"}, edge_types={"BSPLINE", "LINE"})
+
+
+@pytest.mark.skipif(not HAS_BUILD123D, reason="build123d is required for real-geometry adapter tests")
+@pytest.mark.parametrize(
+    "document_factory",
+    [
+        _build_cube_with_fillet_document,
+        _build_cube_with_chamfer_document,
+        _build_cube_with_shell_document,
+        _build_cube_with_simple_hole_document,
+        _build_cube_with_counterbore_document,
+    ],
+)
+def test_build123d_executor_supports_selector_dependent_features(document_factory):
+    executor = Build123dTargetExecutor()
+    result = asyncio.run(executor.execute_document("s_feature", document_factory(), request_id="feature"))
+
+    assert result.success, result.message
+    entities = result.data["entities"]
+    assert entities["volume_mm3"] > 0
+    assert entities["volume_mm3"] < 125000.0
+    assert entities["faces"] > 0
+    assert entities["edges"] > 0
+
+
+@pytest.mark.skipif(not HAS_BUILD123D, reason="build123d is required for real-geometry adapter tests")
+def test_build123d_executor_adds_tapped_hole_thread_metadata():
+    executor = Build123dTargetExecutor()
+    result = asyncio.run(
+        executor.execute_document("s_tapped", _build_cube_with_tapped_hole_document(), request_id="tapped")
+    )
+
+    assert result.success, result.message
+    entities = result.data["entities"]
+    assert entities["thread_metadata"] == [
+        {
+            "operation_id": "op_4",
+            "kind": "tapped_hole",
+            "face_ref": "face_5",
+            "thread_type": "metric",
+            "thread_size": "M6",
+            "thread_depth": 20.0,
+            "pilot_hole_depth": 20.0,
+        }
+    ]
+
+
+@pytest.mark.skipif(not HAS_BUILD123D, reason="build123d is required for real-geometry adapter tests")
+def test_build123d_executor_adds_external_thread_metadata():
+    executor = Build123dTargetExecutor()
+    result = asyncio.run(
+        executor.execute_document(
+            "s_external_thread",
+            _build_cylinder_with_external_thread_document(),
+            request_id="external-thread",
+        )
+    )
+
+    assert result.success, result.message
+    entities = result.data["entities"]
+    assert entities["thread_metadata"] == [
+        {
+            "operation_id": "op_4",
+            "kind": "external_thread",
+            "face_ref": "face_0",
+            "thread_type": "metric",
+            "thread_size": "M10",
+            "is_full_length": True,
+            "thread_length": None,
+            "thread_offset": 0.0,
+        }
+    ]
 
 
 @pytest.mark.skipif(not HAS_BUILD123D, reason="build123d is required for real-geometry adapter tests")

@@ -21,14 +21,14 @@ Resolved or materially improved:
 
 Remaining important gaps:
 
-- build123d directly supports the sketch/extrude subset, portable datum/offset construction planes, construction-axis solid revolve, solid loft, ordered closed line/arc profiles, and profile-inspection guards. Selector-dependent feature operations are represented in IR but not translated into build123d geometry yet.
-- Topology refs are represented and invalidated at a coarse level; durable semantic re-selection is still limited.
-- Fusion result topology is captured through target results/runtime refresh, but a fully populated persistent IR entity registry remains future work.
+- build123d directly supports the sketch/extrude subset, portable datum/offset construction planes, construction-axis solid revolve, solid loft, ordered closed line/arc profiles, profile-inspection guards, selector-resolved finishing/shell/hole features, and thread metadata.
+- Topology refs are represented and invalidated at a coarse level; feature-level replay for patterns and lifecycle operations remains limited.
+- Fusion and build123d result topology is captured through target results/runtime refresh and persistent IR entity registry snapshots.
 - Direct Fusion IR execution for feature refs requires already-resolved tokens or an entity store; workflow execution remains the preferred path for ref-heavy feature operations.
 
 Phase 3/4/5 review note (2026-05-05):
 
-- Contract coverage in `backend/test_ir_parity_contract.py` and workflow/validator coverage in `backend/test_ir_mapper_validator.py` plus `backend/test_ir_workflow_routing.py` verifies the supported portable Phase 3 build123d subset while preserving explicit unsupported/fusion-only behavior for Phase 4/5 selector and lifecycle semantics.
+- Contract coverage in `backend/test_ir_parity_contract.py` and workflow/validator coverage in `backend/test_ir_mapper_validator.py` plus `backend/test_ir_workflow_routing.py` verifies the supported portable build123d subset while preserving explicit unsupported/fusion-only behavior for feature pattern and lifecycle/timeline semantics.
 
 ### Current Post-Widening Matrix
 
@@ -36,10 +36,10 @@ Phase 3/4/5 review note (2026-05-05):
 | --- | --- | --- | --- |
 | Construction planes | Modeled with datum, offset, angle-to-edge, and face-normal params | Translates to existing Fusion codegen and resolves entity refs | Datum and offset_from_datum supported; face/edge-relative modes fail closed pending portable selectors |
 | Sketch primitives | Sketches, rectangles, circles, lines, arcs, and profile queries are modeled | Translates to Fusion codegen with canonical mm-to-cm conversion | Rectangles/circles supported; ordered closed line/arc profiles emit `BuildLine`/`make_face`; extrudes materialize deterministic build123d sketches |
-| Solid features | Extrude, revolve, loft, fillet, chamfer, shell, holes, threads, patterns modeled | Translates to Fusion codegen or feature payloads | Extrude, portable solid revolve, and portable solid loft supported; selector-dependent features remain explicitly unsupported |
+| Solid features | Extrude, revolve, loft, fillet, chamfer, shell, holes, threads, patterns modeled | Translates to Fusion codegen or feature payloads | Extrude, portable solid revolve/loft, selector-resolved fillet/chamfer/shell/holes, and thread metadata supported; feature patterns remain explicitly unsupported |
 | Selection and timeline | Selection, feature listing, delete, and jump operations modeled | Routed to Fusion payload/codegen paths | Explicitly unsupported |
 | Units | IR is canonical millimeters | Converts to Fusion centimeters at the boundary | Consumes millimeters |
-| Results and refs | Operations can carry target execution results, effects, selectors, and invalidation metadata | Runtime refresh remains the source of detailed topology refs | Persistent IR entity registry remains future work |
+| Results and refs | Operations can carry target execution results, effects, selectors, registry refs, and invalidation metadata | Runtime refresh remains the source of detailed topology refs | build123d extraction emits deterministic body/face/edge metadata |
 
 ## Historical Pre-Widening Result
 

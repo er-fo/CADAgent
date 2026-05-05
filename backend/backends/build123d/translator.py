@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import re
 from dataclasses import dataclass
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -12,13 +13,20 @@ from ...ir.types import (
     AddCircleParams,
     AddLineParams,
     AddRectangleParams,
+    ChamferParams,
+    CounterboreHoleParams,
     CreateConstructionPlaneParams,
     CreateSketchParams,
     ExtrudeParams,
+    ExternalThreadParams,
+    FilletParams,
     IRDocument,
     ListSketchProfilesParams,
     LoftParams,
     RevolveParams,
+    ShellParams,
+    SimpleHoleParams,
+    TappedHoleParams,
 )
 
 
@@ -94,6 +102,10 @@ def _mode_expr(operation: str) -> str:
     return mode_expr
 
 
+def _ref_list_expr(refs: Sequence[str]) -> str:
+    return repr([str(ref).strip() for ref in refs if str(ref).strip()])
+
+
 def _axis_expr(axis: Dict[str, object]) -> str:
     axis_type = str(axis.get("type") or "").strip().lower()
     if axis_type == "construction":
@@ -129,6 +141,47 @@ def _revolution_arc(extent: Dict[str, object]) -> float:
 
 def _point_expr(point: Sequence[float]) -> str:
     return f"({point[0]}, {point[1]})"
+
+
+def _point3_expr(point: Sequence[float]) -> str:
+    return f"({point[0]}, {point[1]}, {point[2]})"
+
+
+def _shell_amount(params: ShellParams) -> float:
+    inside = float(params.inside_thickness or 0.0)
+    outside = float(params.outside_thickness or 0.0)
+    if inside > 0.0 and outside > 0.0:
+        raise Build123dCapabilityError(
+            "shell",
+            "build123d shell translation supports either inside_thickness or outside_thickness, not both.",
+        )
+    if inside > 0.0:
+        return -inside
+    if outside > 0.0:
+        return outside
+    raise ValueError("create_shell requires a positive inside_thickness or outside_thickness for build123d translation")
+
+
+def _thread_nominal_diameter(thread_size: str) -> float:
+    text = str(thread_size or "").strip()
+    metric_match = re.fullmatch(r"M(\d+(?:\.\d+)?)", text, flags=re.IGNORECASE)
+    if metric_match:
+        return float(metric_match.group(1))
+
+    number_match = re.fullmatch(r"#(6|8|10)-\d+", text)
+    if number_match:
+        return {"6": 3.5052, "8": 4.1656, "10": 4.826}.get(number_match.group(1), 0.0)
+
+    fraction_match = re.fullmatch(r"(\d+)/(\d+)-\d+", text)
+    if fraction_match:
+        numerator = float(fraction_match.group(1))
+        denominator = float(fraction_match.group(2))
+        return (numerator / denominator) * 25.4
+
+    raise Build123dCapabilityError(
+        "create_tapped_hole",
+        f"build123d tapped-hole geometry cannot infer nominal diameter for thread size {thread_size!r}.",
+    )
 
 
 def _distance(a: Sequence[float], b: Sequence[float]) -> float:
@@ -279,11 +332,40 @@ def translate_ir_document_to_build123d(document: IRDocument) -> Build123dProgram
     lets line/arc loops become one build123d face instead of isolated curves.
     """
     lines: List[str] = [
-        "from build123d import Axis, BuildLine, BuildPart, BuildSketch, CenterArc, Circle, Line, Locations, Mode, Plane, Rectangle, extrude, loft, make_face, revolve",
+        "from build123d import Axis, BuildLine, BuildPart, BuildSketch, CenterArc, Circle, CounterBoreHole, Hole, Line, Locations, Mode, Plane, Rectangle, extrude, fillet, chamfer, loft, make_face, offset, revolve",
         "",
+        "_thread_metadata = []",
         "_construction_planes = {}",
         "_sketch_planes = {}",
         "_last_sketch_for_profile = {}",
+        "",
+        "def _parse_ref_index(ref, prefix, count):",
+        "    ref_text = str(ref or '').strip()",
+        "    expected = prefix + '_'",
+        "    if not ref_text.startswith(expected):",
+        "        raise ValueError(f\"Unsupported build123d {prefix} ref '{ref_text}'. Expected {expected}<index>.\")",
+        "    try:",
+        "        index = int(ref_text[len(expected):])",
+        "    except ValueError as exc:",
+        "        raise ValueError(f\"Unsupported build123d {prefix} ref '{ref_text}'. Expected numeric index.\") from exc",
+        "    if index < 0 or index >= count:",
+        "        raise ValueError(f\"build123d {prefix} ref '{ref_text}' is out of range for {count} available {prefix}s.\")",
+        "    return index",
+        "",
+        "def _edge_refs(refs):",
+        "    edges = list(_part.part.edges())",
+        "    return [edges[_parse_ref_index(ref, 'edge', len(edges))] for ref in refs]",
+        "",
+        "def _face_refs(refs):",
+        "    faces = list(_part.part.faces())",
+        "    return [faces[_parse_ref_index(ref, 'face', len(faces))] for ref in refs]",
+        "",
+        "def _assert_z_face(face, operation):",
+        "    normal_at = getattr(face, 'normal_at', None)",
+        "    normal = normal_at(0.5, 0.5) if callable(normal_at) else None",
+        "    if normal is None or abs(float(normal.Z)) < 0.999:",
+        "        raise ValueError(f\"{operation} currently supports only planar faces normal to global Z in build123d translation.\")",
+        "",
         "",
         "with BuildPart() as _part:",
     ]
@@ -450,6 +532,133 @@ def translate_ir_document_to_build123d(document: IRDocument) -> Build123dProgram
             lines.append(f"    loft(mode={_mode_expr(params.operation)})")
             continue
 
+        if op.type == "fillet":
+            params = op.params
+            if not isinstance(params, FilletParams):
+                raise ValueError("fillet IR params shape mismatch")
+            lines.extend(
+                [
+                    f"    # {op.id}: fillet",
+                    f"    fillet(_edge_refs({_ref_list_expr(params.edge_refs)}), {params.radius})",
+                ]
+            )
+            continue
+
+        if op.type == "chamfer":
+            params = op.params
+            if not isinstance(params, ChamferParams):
+                raise ValueError("chamfer IR params shape mismatch")
+            lines.extend(
+                [
+                    f"    # {op.id}: chamfer",
+                    f"    chamfer(_edge_refs({_ref_list_expr(params.edge_refs)}), {params.distance})",
+                ]
+            )
+            continue
+
+        if op.type == "shell":
+            params = op.params
+            if not isinstance(params, ShellParams):
+                raise ValueError("shell IR params shape mismatch")
+            if params.mode == "open":
+                if not params.face_refs:
+                    raise ValueError("create_shell open mode requires face_refs for build123d translation")
+                lines.extend(
+                    [
+                        f"    # {op.id}: shell",
+                        f"    _shell_openings = _face_refs({_ref_list_expr(params.face_refs)})",
+                        f"    offset(_part.part, amount={_shell_amount(params)}, openings=_shell_openings, mode=Mode.REPLACE)",
+                    ]
+                )
+                continue
+            if params.mode == "closed":
+                lines.extend(
+                    [
+                        f"    # {op.id}: shell",
+                        f"    offset(_part.part, amount={_shell_amount(params)}, mode=Mode.REPLACE)",
+                    ]
+                )
+                continue
+            raise ValueError(f"Unsupported shell mode for build123d translator: {params.mode}")
+
+        if op.type == "create_simple_hole":
+            params = op.params
+            if not isinstance(params, SimpleHoleParams):
+                raise ValueError("create_simple_hole IR params shape mismatch")
+            lines.extend(
+                [
+                    f"    # {op.id}: create_simple_hole",
+                    f"    _hole_face = _face_refs([{params.face_ref!r}])[0]",
+                    "    _assert_z_face(_hole_face, 'create_simple_hole')",
+                    f"    with Locations({_point3_expr(params.center)}):",
+                    f"        Hole({params.diameter / 2.0}, depth={params.depth if params.depth is not None else 'None'}, mode=Mode.SUBTRACT)",
+                ]
+            )
+            continue
+
+        if op.type == "create_counterbore_hole":
+            params = op.params
+            if not isinstance(params, CounterboreHoleParams):
+                raise ValueError("create_counterbore_hole IR params shape mismatch")
+            lines.extend(
+                [
+                    f"    # {op.id}: create_counterbore_hole",
+                    f"    _hole_face = _face_refs([{params.face_ref!r}])[0]",
+                    "    _assert_z_face(_hole_face, 'create_counterbore_hole')",
+                    f"    with Locations({_point3_expr(params.center)}):",
+                    f"        CounterBoreHole({params.hole_diameter / 2.0}, {params.counterbore_diameter / 2.0}, {params.counterbore_depth}, depth={params.hole_depth}, mode=Mode.SUBTRACT)",
+                ]
+            )
+            continue
+
+        if op.type == "create_tapped_hole":
+            params = op.params
+            if not isinstance(params, TappedHoleParams):
+                raise ValueError("create_tapped_hole IR params shape mismatch")
+            pilot_depth = params.pilot_hole_depth if params.pilot_hole_depth is not None else params.thread_depth
+            pilot_radius = _thread_nominal_diameter(params.thread_size) / 2.0
+            lines.extend(
+                [
+                    f"    # {op.id}: create_tapped_hole",
+                    f"    _hole_face = _face_refs([{params.face_ref!r}])[0]",
+                    "    _assert_z_face(_hole_face, 'create_tapped_hole')",
+                    f"    with Locations({_point3_expr(params.center)}):",
+                    f"        Hole({pilot_radius}, depth={pilot_depth}, mode=Mode.SUBTRACT)",
+                    "    _thread_metadata.append({",
+                    f"        'operation_id': {op.id!r},",
+                    "        'kind': 'tapped_hole',",
+                    f"        'face_ref': {params.face_ref!r},",
+                    f"        'thread_type': {params.thread_type!r},",
+                    f"        'thread_size': {params.thread_size!r},",
+                    f"        'thread_depth': {params.thread_depth},",
+                    f"        'pilot_hole_depth': {pilot_depth},",
+                    "    })",
+                ]
+            )
+            continue
+
+        if op.type == "create_external_thread":
+            params = op.params
+            if not isinstance(params, ExternalThreadParams):
+                raise ValueError("create_external_thread IR params shape mismatch")
+            lines.extend(
+                [
+                    f"    # {op.id}: create_external_thread",
+                    f"    _thread_face = _face_refs([{params.face_ref!r}])[0]",
+                    "    _thread_metadata.append({",
+                    f"        'operation_id': {op.id!r},",
+                    "        'kind': 'external_thread',",
+                    f"        'face_ref': {params.face_ref!r},",
+                    f"        'thread_type': {params.thread_type!r},",
+                    f"        'thread_size': {params.thread_size!r},",
+                    f"        'is_full_length': {params.is_full_length},",
+                    f"        'thread_length': {params.thread_length!r},",
+                    f"        'thread_offset': {params.thread_offset},",
+                    "    })",
+                ]
+            )
+            continue
+
         if op.type == "list_sketch_profiles":
             params = op.params
             if not isinstance(params, ListSketchProfilesParams):
@@ -469,6 +678,7 @@ def translate_ir_document_to_build123d(document: IRDocument) -> Build123dProgram
         [
             "",
             "part_result = _part.part",
+            "thread_metadata = _thread_metadata",
         ]
     )
 

@@ -693,24 +693,6 @@ def test_execute_workflow_commits_resolved_pattern_feature_refs(monkeypatch: pyt
     "tool_call",
     [
         {
-            "id": "toolu_fillet",
-            "name": "apply_fillet",
-            "input": {"edge_refs": ["e0"], "radius": 2, "description": "round edge"},
-        },
-        {
-            "id": "toolu_hole",
-            "name": "create_simple_hole",
-            "input": {
-                "face_ref": "face_0",
-                "center_x": 0,
-                "center_y": 0,
-                "center_z": 0,
-                "diameter": 4,
-                "extent_type": "through_all",
-                "description": "hole",
-            },
-        },
-        {
             "id": "toolu_select",
             "name": "select_edges",
             "input": {"edge_refs": ["e0"], "description": "select"},
@@ -765,6 +747,58 @@ def test_build123d_rejects_fusion_only_feature_and_selection_tools(
     assert call_count["geometry_exec"] == 0
     assert any(msg.get("message") == "Unsupported build123d tool" for msg in manager.sent_messages)
     assert any("not supported by the build123d target" in text for text in _extract_tool_result_texts(manager.history))
+
+
+def test_build123d_routes_supported_feature_tools_to_ir_adapter(monkeypatch: pytest.MonkeyPatch):
+    manager = _FakeManager()
+    call_count = {"llm": 0, "build_exec": 0}
+
+    async def fake_call_claude_with_tools(*args, **kwargs):
+        call_count["llm"] += 1
+        if call_count["llm"] == 1:
+            return {
+                "stop_reason": "tool_use",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "toolu_fillet",
+                        "name": "apply_fillet",
+                        "input": {"edge_refs": ["edge_0"], "radius": 2, "description": "round edge"},
+                    }
+                ],
+            }
+        return _end_turn_response()
+
+    async def fake_execute_document(session_id, document, request_id=None):
+        call_count["build_exec"] += 1
+        assert document.operations[-1].type == "fillet"
+        return TargetExecutionResult(
+            success=True,
+            target="build123d",
+            message="feature ok",
+            data={"entities": {"faces": 6, "edges": 15, "vertices": 10, "volume_mm3": 1.0}},
+        )
+
+    monkeypatch.setattr(agent_workflow, "USE_PROMPT_ROUTING", False)
+    monkeypatch.setattr(agent_workflow, "call_claude_with_tools", fake_call_claude_with_tools)
+    monkeypatch.setattr(agent_workflow._BUILD123D_EXECUTOR, "execute_document", fake_execute_document)
+
+    asyncio.run(
+        agent_workflow._execute_workflow_loop(
+            session_id="s-build-feature",
+            messages=[{"role": "user", "content": [{"type": "text", "text": "round edge"}]}],
+            max_iterations=3,
+            model_name=None,
+            manager=manager,  # type: ignore[arg-type]
+            last_user_message_sent=None,
+            request={"execution_target": "build123d", "request_id": "feature-1"},
+            feature_snapshot=None,
+        )
+    )
+
+    assert call_count["build_exec"] == 1
+    assert not any(msg.get("message") == "Unsupported build123d tool" for msg in manager.sent_messages)
+    assert any(msg.get("type") == "ir_operation_committed" for msg in manager.sent_messages)
 
 
 def test_ir_routed_topology_mutations_are_deferred_after_first_mutation(monkeypatch: pytest.MonkeyPatch):

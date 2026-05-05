@@ -40,11 +40,19 @@ class Build123dTargetExecutor:
     ) -> TargetExecutionResult:
         try:
             program = translate_ir_document_to_build123d(document)
-            part = await asyncio.to_thread(self._run_program, program.code)
+            execution_result = await asyncio.to_thread(self._run_program, program.code)
+            part = execution_result.get("part") if isinstance(execution_result, dict) else execution_result
+            thread_metadata = (
+                execution_result.get("thread_metadata", [])
+                if isinstance(execution_result, dict)
+                else []
+            )
             entities: Dict[str, Any] = {}
             if part is not None:
                 self._session_part_cache[session_id] = part
                 entities = extract_entities(part)
+                if thread_metadata:
+                    entities["thread_metadata"] = thread_metadata
                 message = f"Executed {len(document.operations)} IR operation(s) in build123d."
             else:
                 message = (
@@ -82,4 +90,7 @@ class Build123dTargetExecutor:
     def _run_program(code: str) -> Any:
         namespace: Dict[str, Any] = {}
         exec(code, namespace, namespace)
-        return namespace.get("part_result")
+        return {
+            "part": namespace.get("part_result"),
+            "thread_metadata": namespace.get("thread_metadata", []),
+        }

@@ -557,6 +557,15 @@ IR_ROUTED_TOOLS = {
     "jump_to_timeline_position",
     "delete_feature",
 }
+BUILD123D_FEATURE_IR_ROUTED_TOOLS = {
+    "apply_fillet",
+    "apply_chamfer",
+    "create_shell",
+    "create_simple_hole",
+    "create_counterbore_hole",
+    "create_tapped_hole",
+    "create_external_thread",
+}
 CODEGEN_REF_RESOLUTION_TOOLS = {
     "create_construction_plane",
     "create_sketch",
@@ -4834,7 +4843,9 @@ async def _execute_workflow_loop(
                     continue
                 topology_mutation_executed = True
 
-            if tool_name in IR_ROUTED_TOOLS:
+            if tool_name in IR_ROUTED_TOOLS or (
+                execution_target == "build123d" and tool_name in BUILD123D_FEATURE_IR_ROUTED_TOOLS
+            ):
                 ir_tool_call: Mapping[str, Any] = tool_call
                 resolved_ir_input: Optional[Dict[str, Any]] = None
                 if (

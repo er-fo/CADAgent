@@ -31,21 +31,28 @@ The agent input → IR path already models the broad Fusion CAD tool surface, bu
 - portable `create_construction_plane` datum/offset modes
 - portable solid `revolve_profile` using construction axes and full/angle extents
 - portable solid `create_loft` across ordered sketch/profile sections
+- selector-resolved `apply_fillet` and `apply_chamfer`
+- selector-resolved `create_shell`
+- selector-resolved `create_simple_hole` and `create_counterbore_hole`
+- selector-resolved `create_tapped_hole` as pilot geometry plus thread metadata
+- selector-resolved `create_external_thread` as thread metadata
 
 ## Phase 3/4/5 Review Status
 
 ### Phase 3: build123d solid feature parity
 
-- The parity contract and golden tests now cover portable construction planes, solid revolve, and solid loft in the build123d translator.
+- The parity contract and golden tests now cover portable construction planes, solid revolve, solid loft, selector-resolved finishing, shell, and hole/thread operations in the build123d translator.
 - `revolve_profile` supports construction-axis full/angle solid revolves. Non-portable edge/face axes and to-entity extents still fail closed with typed capability errors.
 - `create_loft` supports ordered solid loft sections that can be rebuilt from sketch/profile refs. Surface loft policy and guide/rail semantics remain outside the current portable contract.
-- `apply_fillet`, `apply_chamfer`, `create_shell`, `create_simple_hole`, `create_counterbore_hole`, `create_tapped_hole`, and `create_external_thread` remain intentionally unsupported for build123d because they still depend on portable selector/replay semantics.
+- `apply_fillet`, `apply_chamfer`, `create_shell`, `create_simple_hole`, `create_counterbore_hole`, `create_tapped_hole`, and `create_external_thread` now require resolved build123d selector refs and fail closed when refs are missing or stale.
+- Tapped holes use pilot-hole geometry plus thread metadata; external threads are metadata-only and do not claim modeled helical thread geometry.
 
 ### Phase 4: entity registry and selectors
 
 - Edge/face/body selection tools are classified as `fusion_only` in the static capability matrix because they manipulate Fusion UI/session state rather than persistent build123d geometry.
-- The backend now persists IR selector/effect/target-result metadata through checkpoint restore, but that is not yet the same as a portable build123d entity registry.
-- The current build123d gap is durable semantic re-selection and feature/body/face registry replay across topology-changing edits.
+- The backend now persists IR selector/effect/target-result metadata and IR entity registry data through checkpoint restore.
+- build123d extraction now returns deterministic body/face/edge metadata for selector validation and replay.
+- The remaining build123d gap is feature-level replay across lifecycle/timeline edits.
 
 ### Phase 5: feature lifecycle and timeline semantics
 
@@ -60,8 +67,7 @@ The agent input → IR path already models the broad Fusion CAD tool surface, bu
 
 ## Remaining Work
 
-- Implement build123d translation for remaining selector-dependent solid operations beyond construction planes, extrude, revolve, and loft.
-- Add durable topology selectors for edge/face/body-dependent operations.
+- Implement build123d translation for feature patterns.
 - Define replay/revision semantics for Fusion timeline and feature lifecycle operations.
 
 ## Breaking Changes
