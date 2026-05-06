@@ -2070,6 +2070,7 @@ function renderRunFromData(runData, options = {}) {
 }
 
 const SPEC_FIRST_ARTIFACT_STAGES = [
+    { key: 'context_pack', label: 'Context' },
     { key: 'requirements_contract', label: 'Requirements' },
     { key: 'embodiment_graph', label: 'Embodiment' },
     { key: 'realization_schema', label: 'Realization' }
@@ -2097,8 +2098,456 @@ function getSpecFirstArtifactStageDefaults() {
         state: '',
         artifactId: null,
         logPath: null,
-        diagnostics: []
+        diagnostics: [],
+        refs: [],
+        previewJson: ''
     }));
+}
+
+function asSpecFirstMapping(value) {
+    return value && typeof value === 'object' && !Array.isArray(value) ? value : null;
+}
+
+function hasSpecFirstValue(value) {
+    if (value === null || typeof value === 'undefined') {
+        return false;
+    }
+    if (typeof value === 'string') {
+        return value.trim().length > 0;
+    }
+    if (Array.isArray(value)) {
+        return value.length > 0;
+    }
+    if (typeof value === 'object') {
+        return Object.keys(value).length > 0;
+    }
+    return true;
+}
+
+function firstSpecFirstValue(...values) {
+    for (let index = 0; index < values.length; index += 1) {
+        if (hasSpecFirstValue(values[index])) {
+            return values[index];
+        }
+    }
+    return null;
+}
+
+function firstSpecFirstString(...values) {
+    for (let index = 0; index < values.length; index += 1) {
+        if (typeof values[index] === 'string' && values[index].trim()) {
+            return values[index].trim();
+        }
+    }
+    return '';
+}
+
+function getSpecFirstNestedValue(source, path) {
+    if (!source || !path) {
+        return undefined;
+    }
+    const parts = Array.isArray(path) ? path : String(path).split('.');
+    let current = source;
+    for (let index = 0; index < parts.length; index += 1) {
+        const key = parts[index];
+        if (!current || typeof current !== 'object' || !(key in current)) {
+            return undefined;
+        }
+        current = current[key];
+    }
+    return current;
+}
+
+function firstSpecFirstNestedValue(sources, paths) {
+    for (let pathIndex = 0; pathIndex < paths.length; pathIndex += 1) {
+        for (let sourceIndex = 0; sourceIndex < sources.length; sourceIndex += 1) {
+            const value = getSpecFirstNestedValue(sources[sourceIndex], paths[pathIndex]);
+            if (hasSpecFirstValue(value)) {
+                return value;
+            }
+        }
+    }
+    return null;
+}
+
+function dedupeSpecFirstLines(values) {
+    const seen = new Set();
+    const lines = [];
+    (values || []).forEach((value) => {
+        const text = typeof value === 'string' ? value.trim() : '';
+        if (!text || seen.has(text)) {
+            return;
+        }
+        seen.add(text);
+        lines.push(text);
+    });
+    return lines;
+}
+
+function prettySpecFirstFieldLabel(fieldName) {
+    return String(fieldName || '')
+        .replace(/_/g, ' ')
+        .replace(/\b\w/g, (match) => match.toUpperCase());
+}
+
+function stringifySpecFirstPreview(value, maxLength = 2400) {
+    if (!hasSpecFirstValue(value)) {
+        return '';
+    }
+
+    let text = '';
+    if (typeof value === 'string') {
+        text = value.trim();
+    } else {
+        try {
+            text = JSON.stringify(value, null, 2);
+        } catch (error) {
+            text = String(value);
+        }
+    }
+
+    if (text.length <= maxLength) {
+        return text;
+    }
+    return `${text.slice(0, maxLength)}\n...`;
+}
+
+function summarizeTraceabilityMap(traceabilityMap) {
+    const mapping = asSpecFirstMapping(traceabilityMap);
+    if (!mapping) {
+        return '';
+    }
+
+    const operationIds = Object.keys(mapping);
+    if (operationIds.length === 0) {
+        return '';
+    }
+
+    const requirementRefs = new Set();
+    const validationBindingIds = new Set();
+    operationIds.forEach((operationId) => {
+        const entry = asSpecFirstMapping(mapping[operationId]);
+        const requirementIds = entry && Array.isArray(entry.requirement_refs) ? entry.requirement_refs : [];
+        const bindingIds = entry && Array.isArray(entry.validation_binding_ids) ? entry.validation_binding_ids : [];
+        requirementIds.forEach((requirementId) => {
+            if (hasSpecFirstValue(requirementId)) {
+                requirementRefs.add(String(requirementId));
+            }
+        });
+        bindingIds.forEach((bindingId) => {
+            if (hasSpecFirstValue(bindingId)) {
+                validationBindingIds.add(String(bindingId));
+            }
+        });
+    });
+
+    const parts = [`${operationIds.length} mapped op(s)`];
+    if (requirementRefs.size > 0) {
+        parts.push(`${requirementRefs.size} requirement ref(s)`);
+    }
+    if (validationBindingIds.size > 0) {
+        parts.push(`${validationBindingIds.size} validation binding(s)`);
+    }
+    return parts.join(' | ');
+}
+
+function summarizeTraceabilityEntryCount(value) {
+    if (typeof value === 'number' && Number.isFinite(value)) {
+        return `${value} mapped op(s)`;
+    }
+    if (typeof value === 'string' && value.trim()) {
+        const parsed = Number(value.trim());
+        if (Number.isFinite(parsed)) {
+            return `${parsed} mapped op(s)`;
+        }
+    }
+    return '';
+}
+
+function formatSpecFirstExecutionMode(value) {
+    const normalized = firstSpecFirstString(value).toLowerCase();
+    if (!normalized) {
+        return '';
+    }
+    if (normalized === 'spec_first') {
+        return 'Spec-first';
+    }
+    if (normalized === 'direct_tool' || normalized === 'direct_cad') {
+        return 'Direct';
+    }
+    return prettySpecFirstState(normalized);
+}
+
+function formatSpecFirstExecutionTarget(value) {
+    const normalized = firstSpecFirstString(value).toLowerCase();
+    if (!normalized) {
+        return '';
+    }
+    if (normalized === 'fusion') {
+        return 'Fusion';
+    }
+    if (normalized === 'studio') {
+        return 'Studio';
+    }
+    if (normalized === 'build123d') {
+        return 'build123d';
+    }
+    return prettySpecFirstState(normalized);
+}
+
+function resolveSpecFirstExecutionMode(message, fallback = '') {
+    const sources = [
+        asSpecFirstMapping(message && message.data),
+        asSpecFirstMapping(message && message.diagnostics),
+        asSpecFirstMapping(message)
+    ];
+    return firstSpecFirstString(
+        firstSpecFirstNestedValue(sources, ['execution_mode']),
+        fallback
+    );
+}
+
+function resolveSpecFirstExecutionTarget(message, fallback = '') {
+    const sources = [
+        asSpecFirstMapping(message && message.data),
+        asSpecFirstMapping(message && message.diagnostics),
+        asSpecFirstMapping(message)
+    ];
+    return firstSpecFirstString(
+        firstSpecFirstNestedValue(sources, ['execution_target', 'target']),
+        fallback
+    );
+}
+
+function dedupeSpecFirstRefs(entries) {
+    const seen = new Set();
+    return (entries || []).filter((entry) => {
+        if (!entry || !entry.label || !hasSpecFirstValue(entry.value)) {
+            return false;
+        }
+        const value = Array.isArray(entry.value) ? entry.value.join(', ') : String(entry.value);
+        const key = `${entry.label}:${value}`;
+        if (seen.has(key)) {
+            return false;
+        }
+        seen.add(key);
+        return true;
+    });
+}
+
+function collectSpecFirstRefs(sources, refFields) {
+    const entries = [];
+    refFields.forEach((field) => {
+        const value = firstSpecFirstNestedValue(sources, [field]);
+        if (!hasSpecFirstValue(value)) {
+            return;
+        }
+        const label = prettySpecFirstFieldLabel(String(field).split('.').slice(-1)[0]);
+        entries.push({
+            label,
+            value: Array.isArray(value) ? value.join(', ') : String(value)
+        });
+    });
+    return dedupeSpecFirstRefs(entries);
+}
+
+function extractSpecFirstArtifactObservability(message) {
+    const data = asSpecFirstMapping(message && message.data);
+    const diagnostics = asSpecFirstMapping(message && message.diagnostics);
+    const direct = asSpecFirstMapping(message);
+    const sources = [data, diagnostics, direct];
+
+    let previewValue = firstSpecFirstNestedValue(sources, [
+        'artifact',
+        'artifact_payload',
+        'payload',
+        'artifact_preview',
+        'preview',
+        'context_pack',
+        'requirements_contract',
+        'embodiment_graph',
+        'realization_schema'
+    ]);
+
+    if (!hasSpecFirstValue(previewValue)) {
+        const diagnosticPreview = asSpecFirstMapping(diagnostics);
+        if (diagnosticPreview) {
+            const interestingKeys = Object.keys(diagnosticPreview).filter((key) => ![
+                'blocking',
+                'decision_id',
+                'decision_type',
+                'message',
+                'messages',
+                'operation_count',
+                'question',
+                'reason',
+                'target'
+            ].includes(key));
+            if (interestingKeys.length > 0) {
+                previewValue = diagnosticPreview;
+            }
+        }
+    }
+
+    return {
+        logPath: firstSpecFirstString(
+            firstSpecFirstNestedValue(sources, ['log_path', 'logPath']),
+            message && message.log_path
+        ),
+        refs: collectSpecFirstRefs(sources, [
+            'payload_ref',
+            'artifact_ref',
+            'source_artifact_id',
+            'source_artifact_ids',
+            'source_requirements_contract_id',
+            'source_embodiment_graph_id',
+            'selected_option_id',
+            'selected_candidate_id',
+            'context_pack_id'
+        ]),
+        previewJson: stringifySpecFirstPreview(previewValue)
+    };
+}
+
+function extractSpecFirstCandidateObservability(message, payload, currentCandidate = null) {
+    const source = asSpecFirstMapping(payload) || {};
+    const executionResult = asSpecFirstMapping(source.execution_result);
+    const rawResult = asSpecFirstMapping(source.raw_result);
+    const data = asSpecFirstMapping(source.data);
+    const candidatePreview = asSpecFirstMapping(source.candidate_preview)
+        || asSpecFirstMapping(message && message.candidate_preview)
+        || asSpecFirstMapping(data && data.candidate_preview);
+    const sources = [candidatePreview, executionResult, rawResult, data, source];
+
+    const operationCount = firstSpecFirstValue(
+        firstSpecFirstNestedValue(sources, ['operation_count', 'ir_operation_count']),
+        currentCandidate && currentCandidate.operationCount
+    );
+    const traceabilitySummary = firstSpecFirstString(
+        firstSpecFirstNestedValue(sources, ['traceability_summary']),
+        summarizeTraceabilityMap(firstSpecFirstNestedValue(sources, ['traceability_map'])),
+        summarizeTraceabilityEntryCount(firstSpecFirstNestedValue(sources, ['traceability_entry_count'])),
+        currentCandidate && currentCandidate.traceabilitySummary
+    );
+    const executionTarget = firstSpecFirstString(
+        firstSpecFirstNestedValue(sources, ['execution_target', 'target']),
+        resolveSpecFirstExecutionTarget(message, ''),
+        currentCandidate && currentCandidate.executionTarget
+    );
+    const executionMessage = firstSpecFirstString(
+        firstSpecFirstNestedValue(sources, ['execution_message', 'message']),
+        currentCandidate && currentCandidate.executionMessage
+    );
+    const stepPath = firstSpecFirstString(
+        firstSpecFirstNestedValue(sources, [
+            'step_export_path',
+            'step_path',
+            'step_file',
+            'step_output_path',
+            'export_step_path'
+        ]),
+        currentCandidate && currentCandidate.stepPath
+    );
+    const exportPath = firstSpecFirstString(
+        firstSpecFirstNestedValue(sources, [
+            'export_path',
+            'export_file',
+            'output_path',
+            'exported_path',
+            'data.export_path',
+            'data.output_path'
+        ]),
+        currentCandidate && currentCandidate.exportPath
+    );
+    const detailLines = dedupeSpecFirstLines([
+        firstSpecFirstString(firstSpecFirstNestedValue(sources, ['summary'])),
+        executionMessage,
+        ...(currentCandidate && Array.isArray(currentCandidate.details) ? currentCandidate.details : [])
+    ]);
+
+    return {
+        operationCount: operationCount !== null && operationCount !== undefined ? operationCount : null,
+        traceabilitySummary,
+        executionTarget,
+        executionMessage,
+        stepPath,
+        exportPath,
+        details: detailLines
+    };
+}
+
+function extractSpecFirstResultDetails(message, currentResult = null) {
+    const data = asSpecFirstMapping(message && message.data);
+    const diagnostics = asSpecFirstMapping(message && message.diagnostics);
+    const candidatePreview = asSpecFirstMapping(message && message.candidate_preview)
+        || asSpecFirstMapping(data && data.candidate_preview)
+        || asSpecFirstMapping(diagnostics && diagnostics.candidate_preview);
+    const direct = asSpecFirstMapping(message);
+    const sources = [candidatePreview, data, diagnostics, direct];
+
+    return {
+        executionTarget: firstSpecFirstString(
+            firstSpecFirstNestedValue(sources, ['execution_target', 'target']),
+            currentResult && currentResult.executionTarget
+        ),
+        executionMessage: firstSpecFirstString(
+            firstSpecFirstNestedValue(sources, ['execution_message', 'message']),
+            currentResult && currentResult.executionMessage
+        ),
+        stepPath: firstSpecFirstString(
+            firstSpecFirstNestedValue(sources, ['step_export_path', 'step_path', 'step_file', 'step_output_path', 'export_step_path']),
+            currentResult && currentResult.stepPath
+        ),
+        exportPath: firstSpecFirstString(
+            firstSpecFirstNestedValue(sources, ['export_path', 'export_file', 'exported_path', 'output_path']),
+            currentResult && currentResult.exportPath
+        )
+    };
+}
+
+function hasSpecFirstResultDetails(result) {
+    return !!(result && (
+        firstSpecFirstString(result.executionTarget)
+        || firstSpecFirstString(result.executionMessage)
+        || firstSpecFirstString(result.stepPath)
+        || firstSpecFirstString(result.exportPath)
+    ));
+}
+
+function extractSpecFirstDecisionPayload(message) {
+    const data = asSpecFirstMapping(message && message.data);
+    const diagnostics = asSpecFirstMapping(message && message.diagnostics);
+    const direct = asSpecFirstMapping(message);
+
+    const options = []
+        .concat(Array.isArray(diagnostics && diagnostics.options) ? diagnostics.options : [])
+        .concat(Array.isArray(data && data.options) ? data.options : [])
+        .concat(Array.isArray(direct && direct.options) ? direct.options : []);
+
+    return {
+        blocking: diagnostics && diagnostics.blocking !== false,
+        decisionId: firstSpecFirstString(
+            diagnostics && diagnostics.decision_id,
+            data && data.decision_id,
+            direct && direct.decision_id
+        ),
+        decisionType: firstSpecFirstString(
+            diagnostics && diagnostics.decision_type,
+            data && data.decision_type,
+            direct && direct.decision_type
+        ),
+        question: firstSpecFirstString(
+            diagnostics && diagnostics.question,
+            data && data.question,
+            direct && direct.question
+        ) || 'A decision is required before CADAgent can continue.',
+        reason: firstSpecFirstString(
+            diagnostics && diagnostics.reason,
+            data && data.reason,
+            direct && direct.reason
+        ),
+        options
+    };
 }
 
 function getSpecFirstItemId(synthesisRunId) {
@@ -2114,13 +2563,17 @@ function getSpecFirstItem(docId, synthesisRunId) {
 }
 
 function createSpecFirstItem(message) {
+    const displayExecutionMode = resolveSpecFirstExecutionMode(message, state.executionMode);
+    const displayExecutionTarget = resolveSpecFirstExecutionTarget(message, state.executionTarget);
     return {
         type: 'specfirst',
         id: getSpecFirstItemId(message.synthesis_run_id),
         synthesisRunId: message.synthesis_run_id || '',
         requestId: message.request_id || '',
-        executionMode: normalizeExecutionMode(message.execution_mode || state.executionMode),
-        executionTarget: normalizeExecutionTarget(message.execution_target || state.executionTarget),
+        executionMode: normalizeExecutionMode(displayExecutionMode || state.executionMode),
+        executionTarget: normalizeExecutionTarget(displayExecutionTarget || state.executionTarget),
+        displayExecutionMode,
+        displayExecutionTarget,
         status: 'in-progress',
         state: message.state || '',
         statusText: 'Spec-first run started',
@@ -2128,6 +2581,7 @@ function createSpecFirstItem(message) {
         candidates: [],
         diagnostics: [],
         decision: null,
+        result: null,
         createdAt: Date.now(),
         updatedAt: Date.now()
     };
@@ -2158,6 +2612,9 @@ function findSpecFirstArtifact(item, key) {
 
 function inferSpecFirstArtifactKey(message) {
     const stateValue = String(message.state || '').toUpperCase();
+    if (stateValue.includes('CONTEXT_PACK')) {
+        return 'context_pack';
+    }
     if (stateValue.includes('REQUIREMENTS')) {
         return 'requirements_contract';
     }
@@ -2168,6 +2625,7 @@ function inferSpecFirstArtifactKey(message) {
         return 'realization_schema';
     }
     if (typeof message.artifact_id === 'string') {
+        if (message.artifact_id.startsWith('ctx')) return 'context_pack';
         if (message.artifact_id.startsWith('req')) return 'requirements_contract';
         if (message.artifact_id.startsWith('emb')) return 'embodiment_graph';
         if (message.artifact_id.startsWith('real')) return 'realization_schema';
@@ -2250,9 +2708,9 @@ function extractDiagnosticsList(diagnostics) {
 }
 
 function buildSpecFirstRunSummary(item) {
-    const modeLabel = item.executionMode === 'spec_first' ? 'Spec-first' : 'Direct';
-    const targetLabel = item.executionTarget === 'build123d' ? 'build123d' : 'Fusion';
-    return `${modeLabel} / ${targetLabel}`;
+    const modeLabel = formatSpecFirstExecutionMode(item.displayExecutionMode || item.executionMode) || 'Spec-first';
+    const targetLabel = formatSpecFirstExecutionTarget(item.displayExecutionTarget || item.executionTarget);
+    return targetLabel ? `${modeLabel} / ${targetLabel}` : modeLabel;
 }
 
 function describeSpecFirstMessage(message) {
@@ -2284,9 +2742,14 @@ function updateSpecFirstItemFromMessage(item, message) {
 
     item.updatedAt = Date.now();
     item.state = message.state || item.state;
-    item.executionMode = normalizeExecutionMode(message.execution_mode || item.executionMode);
-    item.executionTarget = normalizeExecutionTarget(message.execution_target || item.executionTarget);
+    const displayExecutionMode = resolveSpecFirstExecutionMode(message, item.displayExecutionMode || item.executionMode);
+    const displayExecutionTarget = resolveSpecFirstExecutionTarget(message, item.displayExecutionTarget || item.executionTarget);
+    item.displayExecutionMode = displayExecutionMode || item.displayExecutionMode || item.executionMode;
+    item.displayExecutionTarget = displayExecutionTarget || item.displayExecutionTarget || item.executionTarget;
+    item.executionMode = normalizeExecutionMode(displayExecutionMode || item.executionMode);
+    item.executionTarget = normalizeExecutionTarget(displayExecutionTarget || item.executionTarget);
     item.statusText = describeSpecFirstMessage(message);
+    item.result = extractSpecFirstResultDetails(message, item.result);
 
     const diagnostics = message.diagnostics || null;
     if (diagnostics) {
@@ -2296,36 +2759,56 @@ function updateSpecFirstItemFromMessage(item, message) {
     const artifactKey = inferSpecFirstArtifactKey(message);
     if (message.type === 'spec_first_started' || message.type === 'spec_first_state_changed') {
         item.status = 'in-progress';
+        if (artifactKey) {
+            const artifactObservability = extractSpecFirstArtifactObservability(message);
+            updateSpecFirstArtifact(item, artifactKey, {
+                status: artifactKey === 'context_pack' ? 'success' : 'active',
+                state: message.state || '',
+                artifactId: message.artifact_id || null,
+                logPath: artifactObservability.logPath || message.log_path || null,
+                refs: artifactObservability.refs,
+                previewJson: artifactObservability.previewJson,
+                diagnostics: extractDiagnosticsList(diagnostics)
+            });
+        }
     } else if (message.type === 'spec_first_artifact_submitted') {
         item.status = 'in-progress';
         if (artifactKey) {
+            const artifactObservability = extractSpecFirstArtifactObservability(message);
             updateSpecFirstArtifact(item, artifactKey, {
                 status: 'active',
                 state: message.state || '',
                 artifactId: message.artifact_id || null,
-                logPath: message.log_path || null,
-                diagnostics: []
+                logPath: artifactObservability.logPath || message.log_path || null,
+                refs: artifactObservability.refs,
+                previewJson: artifactObservability.previewJson,
+                diagnostics: extractDiagnosticsList(diagnostics)
             });
         }
     } else if (message.type === 'spec_first_validation_passed') {
         item.status = 'in-progress';
         if (artifactKey) {
+            const artifactObservability = extractSpecFirstArtifactObservability(message);
             updateSpecFirstArtifact(item, artifactKey, {
                 status: 'success',
                 state: message.state || '',
                 artifactId: message.artifact_id || null,
+                logPath: artifactObservability.logPath || message.log_path || null,
+                refs: artifactObservability.refs,
+                previewJson: artifactObservability.previewJson,
                 diagnostics: []
             });
         }
     } else if (message.type === 'spec_first_human_decision_required') {
+        const decisionPayload = extractSpecFirstDecisionPayload(message);
         item.status = 'waiting';
         item.decision = {
-            blocking: diagnostics && diagnostics.blocking !== false,
-            decisionId: diagnostics && diagnostics.decision_id ? String(diagnostics.decision_id) : '',
-            decisionType: diagnostics && diagnostics.decision_type ? String(diagnostics.decision_type) : '',
-            question: diagnostics && diagnostics.question ? String(diagnostics.question) : 'A decision is required before CADAgent can continue.',
-            reason: diagnostics && diagnostics.reason ? String(diagnostics.reason) : '',
-            options: diagnostics && Array.isArray(diagnostics.options) ? diagnostics.options : [],
+            blocking: decisionPayload.blocking,
+            decisionId: decisionPayload.decisionId,
+            decisionType: decisionPayload.decisionType,
+            question: decisionPayload.question,
+            reason: decisionPayload.reason,
+            options: decisionPayload.options,
             answered: false,
             submitting: false,
             answer: '',
@@ -2350,9 +2833,13 @@ function updateSpecFirstItemFromMessage(item, message) {
     } else if (message.type === 'spec_first_validation_failed' || message.type === 'spec_first_failed') {
         item.status = 'error';
         if (artifactKey) {
+            const artifactObservability = extractSpecFirstArtifactObservability(message);
             updateSpecFirstArtifact(item, artifactKey, {
                 status: 'error',
                 state: message.state || '',
+                logPath: artifactObservability.logPath || message.log_path || null,
+                refs: artifactObservability.refs,
+                previewJson: artifactObservability.previewJson,
                 diagnostics: extractDiagnosticsList(diagnostics)
             });
         }
@@ -2382,11 +2869,22 @@ function updateSpecFirstItemFromMessage(item, message) {
             } else {
                 candidate.status = 'success';
             }
-            const detailText = payload.message
-                || payload.summary
-                || (payload.operation_count !== undefined && payload.operation_count !== null ? `${payload.operation_count} operation(s)` : '')
-                || message.message;
-            candidate.details = detailText ? [String(detailText)] : [];
+            const observability = extractSpecFirstCandidateObservability(message, payload, candidate);
+            candidate.operationCount = observability.operationCount;
+            candidate.traceabilitySummary = observability.traceabilitySummary;
+            candidate.executionTarget = observability.executionTarget;
+            candidate.executionMessage = observability.executionMessage;
+            candidate.stepPath = observability.stepPath;
+            candidate.exportPath = observability.exportPath;
+            candidate.details = observability.details;
+            if (!hasSpecFirstResultDetails(item.result) && hasSpecFirstResultDetails(observability)) {
+                item.result = {
+                    executionTarget: observability.executionTarget,
+                    executionMessage: observability.executionMessage,
+                    stepPath: observability.stepPath,
+                    exportPath: observability.exportPath
+                };
+            }
         }
     }
 }
@@ -2429,6 +2927,18 @@ function buildSpecFirstSection(item) {
     header.appendChild(status);
     section.appendChild(header);
 
+    const meta = document.createElement('div');
+    meta.className = 'specfirst-run-meta';
+    const modeMeta = document.createElement('span');
+    modeMeta.className = 'specfirst-run-meta-chip';
+    modeMeta.textContent = `Mode: ${formatSpecFirstExecutionMode(item.displayExecutionMode || item.executionMode) || 'Unknown'}`;
+    meta.appendChild(modeMeta);
+    const targetMeta = document.createElement('span');
+    targetMeta.className = 'specfirst-run-meta-chip';
+    targetMeta.textContent = `Target: ${formatSpecFirstExecutionTarget(item.displayExecutionTarget || item.executionTarget) || 'Unknown'}`;
+    meta.appendChild(targetMeta);
+    section.appendChild(meta);
+
     const artifactBlock = document.createElement('div');
     artifactBlock.className = 'specfirst-block';
     const artifactLabel = document.createElement('div');
@@ -2439,6 +2949,9 @@ function buildSpecFirstSection(item) {
     const artifactList = document.createElement('div');
     artifactList.className = 'specfirst-artifact-list';
     (item.artifacts || []).forEach((artifact) => {
+        const entry = document.createElement('div');
+        entry.className = 'specfirst-artifact-entry';
+
         const row = document.createElement('div');
         row.className = 'specfirst-artifact-row';
 
@@ -2449,14 +2962,66 @@ function buildSpecFirstSection(item) {
 
         const detail = document.createElement('span');
         detail.className = 'specfirst-artifact-detail';
-        detail.textContent = artifact.artifactId || prettySpecFirstState(artifact.state || artifact.status);
+        const artifactDetailParts = [];
+        if (artifact.state) {
+            artifactDetailParts.push(prettySpecFirstState(artifact.state));
+        }
+        if (artifact.artifactId) {
+            artifactDetailParts.push(String(artifact.artifactId));
+        }
+        detail.textContent = artifactDetailParts.join(' | ') || prettySpecFirstState(artifact.state || artifact.status);
         row.appendChild(detail);
 
         const chip = document.createElement('span');
         chip.className = `specfirst-artifact-chip ${getSpecFirstStatusTone(artifact.status)}`;
         chip.textContent = artifact.status || 'pending';
         row.appendChild(chip);
-        artifactList.appendChild(row);
+        entry.appendChild(row);
+
+        const detailList = document.createElement('div');
+        detailList.className = 'specfirst-detail-list';
+        if (artifact.logPath) {
+            const logRow = document.createElement('div');
+            logRow.className = 'specfirst-detail-row';
+            const logLabel = document.createElement('span');
+            logLabel.className = 'specfirst-detail-label';
+            logLabel.textContent = 'Log';
+            logRow.appendChild(logLabel);
+            const logValue = document.createElement('span');
+            logValue.className = 'specfirst-detail-value';
+            logValue.textContent = artifact.logPath;
+            logRow.appendChild(logValue);
+            detailList.appendChild(logRow);
+        }
+        (artifact.refs || []).forEach((ref) => {
+            const refRow = document.createElement('div');
+            refRow.className = 'specfirst-detail-row';
+            const refLabel = document.createElement('span');
+            refLabel.className = 'specfirst-detail-label';
+            refLabel.textContent = ref.label;
+            refRow.appendChild(refLabel);
+            const refValue = document.createElement('span');
+            refValue.className = 'specfirst-detail-value';
+            refValue.textContent = ref.value;
+            refRow.appendChild(refValue);
+            detailList.appendChild(refRow);
+        });
+        if (detailList.children.length > 0) {
+            entry.appendChild(detailList);
+        }
+
+        if (artifact.previewJson) {
+            const previewLabel = document.createElement('div');
+            previewLabel.className = 'specfirst-preview-label';
+            previewLabel.textContent = 'JSON preview';
+            entry.appendChild(previewLabel);
+            const preview = document.createElement('pre');
+            preview.className = 'specfirst-json-preview';
+            preview.textContent = artifact.previewJson;
+            entry.appendChild(preview);
+        }
+
+        artifactList.appendChild(entry);
     });
     artifactBlock.appendChild(artifactList);
     section.appendChild(artifactBlock);
@@ -2472,6 +3037,9 @@ function buildSpecFirstSection(item) {
         const candidateList = document.createElement('div');
         candidateList.className = 'specfirst-candidate-list';
         item.candidates.forEach((candidate) => {
+            const entry = document.createElement('div');
+            entry.className = 'specfirst-candidate-entry';
+
             const row = document.createElement('div');
             row.className = 'specfirst-candidate-row';
 
@@ -2484,17 +3052,143 @@ function buildSpecFirstSection(item) {
             chip.className = `specfirst-artifact-chip ${getSpecFirstStatusTone(candidate.status)}`;
             chip.textContent = prettySpecFirstState(candidate.state || candidate.status);
             row.appendChild(chip);
-            candidateList.appendChild(row);
+            entry.appendChild(row);
 
-            if (Array.isArray(candidate.details) && candidate.details.length > 0) {
+            const candidateDetailList = document.createElement('div');
+            candidateDetailList.className = 'specfirst-detail-list';
+            if (candidate.operationCount !== null && candidate.operationCount !== undefined && candidate.operationCount !== '') {
+                const operationRow = document.createElement('div');
+                operationRow.className = 'specfirst-detail-row';
+                const operationLabel = document.createElement('span');
+                operationLabel.className = 'specfirst-detail-label';
+                operationLabel.textContent = 'Operations';
+                operationRow.appendChild(operationLabel);
+                const operationValue = document.createElement('span');
+                operationValue.className = 'specfirst-detail-value';
+                operationValue.textContent = String(candidate.operationCount);
+                operationRow.appendChild(operationValue);
+                candidateDetailList.appendChild(operationRow);
+            }
+            if (candidate.traceabilitySummary) {
+                const traceabilityRow = document.createElement('div');
+                traceabilityRow.className = 'specfirst-detail-row';
+                const traceabilityLabel = document.createElement('span');
+                traceabilityLabel.className = 'specfirst-detail-label';
+                traceabilityLabel.textContent = 'Traceability';
+                traceabilityRow.appendChild(traceabilityLabel);
+                const traceabilityValue = document.createElement('span');
+                traceabilityValue.className = 'specfirst-detail-value';
+                traceabilityValue.textContent = candidate.traceabilitySummary;
+                traceabilityRow.appendChild(traceabilityValue);
+                candidateDetailList.appendChild(traceabilityRow);
+            }
+            if (candidate.executionTarget) {
+                const targetRow = document.createElement('div');
+                targetRow.className = 'specfirst-detail-row';
+                const targetLabel = document.createElement('span');
+                targetLabel.className = 'specfirst-detail-label';
+                targetLabel.textContent = 'Target';
+                targetRow.appendChild(targetLabel);
+                const targetValue = document.createElement('span');
+                targetValue.className = 'specfirst-detail-value';
+                targetValue.textContent = formatSpecFirstExecutionTarget(candidate.executionTarget);
+                targetRow.appendChild(targetValue);
+                candidateDetailList.appendChild(targetRow);
+            }
+            if (candidate.executionMessage) {
+                const messageRow = document.createElement('div');
+                messageRow.className = 'specfirst-detail-row';
+                const messageLabel = document.createElement('span');
+                messageLabel.className = 'specfirst-detail-label';
+                messageLabel.textContent = 'Message';
+                messageRow.appendChild(messageLabel);
+                const messageValue = document.createElement('span');
+                messageValue.className = 'specfirst-detail-value';
+                messageValue.textContent = candidate.executionMessage;
+                messageRow.appendChild(messageValue);
+                candidateDetailList.appendChild(messageRow);
+            }
+            if (candidate.stepPath) {
+                const stepRow = document.createElement('div');
+                stepRow.className = 'specfirst-detail-row';
+                const stepLabel = document.createElement('span');
+                stepLabel.className = 'specfirst-detail-label';
+                stepLabel.textContent = 'STEP';
+                stepRow.appendChild(stepLabel);
+                const stepValue = document.createElement('span');
+                stepValue.className = 'specfirst-detail-value';
+                stepValue.textContent = candidate.stepPath;
+                stepRow.appendChild(stepValue);
+                candidateDetailList.appendChild(stepRow);
+            }
+            if (candidate.exportPath && candidate.exportPath !== candidate.stepPath) {
+                const exportRow = document.createElement('div');
+                exportRow.className = 'specfirst-detail-row';
+                const exportLabel = document.createElement('span');
+                exportLabel.className = 'specfirst-detail-label';
+                exportLabel.textContent = 'Export';
+                exportRow.appendChild(exportLabel);
+                const exportValue = document.createElement('span');
+                exportValue.className = 'specfirst-detail-value';
+                exportValue.textContent = candidate.exportPath;
+                exportRow.appendChild(exportValue);
+                candidateDetailList.appendChild(exportRow);
+            }
+            if (candidateDetailList.children.length > 0) {
+                entry.appendChild(candidateDetailList);
+            }
+
+            const candidateNotes = dedupeSpecFirstLines(candidate.details || []).filter((detailLine) => (
+                detailLine !== candidate.executionMessage
+                && detailLine !== candidate.traceabilitySummary
+            ));
+            candidateNotes.forEach((detailLine) => {
                 const detail = document.createElement('div');
                 detail.className = 'specfirst-candidate-details';
-                detail.textContent = candidate.details[0];
-                candidateList.appendChild(detail);
-            }
+                detail.textContent = detailLine;
+                entry.appendChild(detail);
+            });
+
+            candidateList.appendChild(entry);
         });
         candidateBlock.appendChild(candidateList);
         section.appendChild(candidateBlock);
+    }
+
+    if ((!Array.isArray(item.candidates) || item.candidates.length === 0) && hasSpecFirstResultDetails(item.result)) {
+        const resultBlock = document.createElement('div');
+        resultBlock.className = 'specfirst-block';
+        const resultLabel = document.createElement('div');
+        resultLabel.className = 'specfirst-block-label';
+        resultLabel.textContent = 'Result';
+        resultBlock.appendChild(resultLabel);
+        const resultDetails = document.createElement('div');
+        resultDetails.className = 'specfirst-detail-list';
+
+        [
+            ['Target', formatSpecFirstExecutionTarget(item.result.executionTarget)],
+            ['Message', item.result.executionMessage],
+            ['STEP', item.result.stepPath],
+            ['Export', item.result.exportPath && item.result.exportPath !== item.result.stepPath ? item.result.exportPath : '']
+        ].forEach(([label, value]) => {
+            if (!value) {
+                return;
+            }
+            const row = document.createElement('div');
+            row.className = 'specfirst-detail-row';
+            const rowLabel = document.createElement('span');
+            rowLabel.className = 'specfirst-detail-label';
+            rowLabel.textContent = label;
+            row.appendChild(rowLabel);
+            const rowValue = document.createElement('span');
+            rowValue.className = 'specfirst-detail-value';
+            rowValue.textContent = value;
+            row.appendChild(rowValue);
+            resultDetails.appendChild(row);
+        });
+
+        resultBlock.appendChild(resultDetails);
+        section.appendChild(resultBlock);
     }
 
     if (item.decision && !item.decision.answered) {
@@ -2521,13 +3215,28 @@ function buildSpecFirstSection(item) {
                 const button = document.createElement('button');
                 button.type = 'button';
                 button.className = 'specfirst-decision-option';
+                const optionId = String(option.id || option.value || option.label || '');
+                const optionLabel = String(option.label || option.value || option.id || 'Option');
+                const optionDetail = firstSpecFirstString(option.description, option.reason);
                 button.setAttribute('data-synthesis-run-id', item.synthesisRunId || '');
-                button.setAttribute('data-option-id', String(option.id || option.value || option.label || ''));
-                button.setAttribute('data-option-label', String(option.label || option.value || option.id || 'Option'));
-                if (item.decision.selectedOptionId === String(option.id || option.value || option.label || '')) {
+                button.setAttribute('data-option-id', optionId);
+                button.setAttribute('data-option-label', optionLabel);
+                if (item.decision.selectedOptionId === optionId) {
                     button.classList.add('selected');
                 }
-                button.textContent = String(option.label || option.value || option.id || 'Option');
+                const buttonCopy = document.createElement('span');
+                buttonCopy.className = 'specfirst-decision-option-copy';
+                const buttonTitle = document.createElement('span');
+                buttonTitle.className = 'specfirst-decision-option-title';
+                buttonTitle.textContent = optionLabel;
+                buttonCopy.appendChild(buttonTitle);
+                if (optionDetail) {
+                    const buttonDetail = document.createElement('span');
+                    buttonDetail.className = 'specfirst-decision-option-detail';
+                    buttonDetail.textContent = optionDetail;
+                    buttonCopy.appendChild(buttonDetail);
+                }
+                button.appendChild(buttonCopy);
                 options.appendChild(button);
             });
             decisionBlock.appendChild(options);
