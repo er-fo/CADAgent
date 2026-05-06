@@ -394,7 +394,9 @@ class AgentController:
         image_data: Optional[str] = None,
         image_format: str = "png",
         attachments: Optional[List[Dict[str, Any]]] = None,
-        reasoning_effort: Optional[str] = None
+        reasoning_effort: Optional[str] = None,
+        execution_mode: Optional[str] = None,
+        execution_target: Optional[str] = None,
     ) -> None:
         """
         Submit a user request to the backend for processing.
@@ -409,6 +411,8 @@ class AgentController:
             image_format: Image format (png, jpg, jpeg)
             attachments: Optional attachment list from the palette
             reasoning_effort: User-selected reasoning effort level (off/low/medium/high/xhigh/on)
+            execution_mode: Requested execution mode (direct_tool/spec_first)
+            execution_target: Requested execution target (fusion/build123d)
         """
         # For production Supabase-backed deployments, block command execution until
         # we have a valid JWT. This prevents opening unauthenticated WS sessions
@@ -478,6 +482,8 @@ class AgentController:
             "session_id": self.get_session_id(),
             "model_name": model_name,
             "reasoning_effort": reasoning_effort,
+            "execution_mode": str(execution_mode or "direct_tool"),
+            "execution_target": str(execution_target or "fusion"),
             "client_capabilities": {
                 "timeline_feature_delete": True,
                 "timeline_feature_suppression": True,
@@ -835,6 +841,18 @@ class AgentController:
                 'build_plan_completed',
                 doc_id=doc_id,
                 data=message.get("data", {}),
+            )
+        elif isinstance(message_type, str) and (
+            message_type.startswith("spec_first_")
+            or message_type.startswith("candidate_")
+            or message_type in {"artifact_drafted", "artifact_gate_result"}
+        ):
+            forwarded = dict(message)
+            forwarded.pop("type", None)
+            self._palette_manager.send_message(
+                message_type,
+                doc_id=doc_id,
+                **forwarded,
             )
         elif message_type == "authentication_ack":
             # Forward authentication acknowledgment to palette with API keys status

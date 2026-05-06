@@ -84,6 +84,9 @@ let state = {
     activeRun: null,
     selectedModel: 'minimax.minimax-m2.5',
     reasoningEffort: 'off',
+    executionMode: 'direct_tool',
+    executionTarget: 'fusion',
+    executionTargetManual: false,
     reasoning: {
         activeSession: null,
         sessionCounter: 0
@@ -242,6 +245,8 @@ const elements = {
     cadRequest: document.getElementById('cadRequest'),
     modelSelect: document.getElementById('modelSelect'),
     reasoningSelect: document.getElementById('reasoningSelect'),
+    executionModeSelect: document.getElementById('executionModeSelect'),
+    executionTargetSelect: document.getElementById('executionTargetSelect'),
     planningMode: document.getElementById('planningMode'),
     planningModeState: document.getElementById('planningModeState'),
     visualContextToggle: document.getElementById('visualContextToggle'),
@@ -349,6 +354,7 @@ function initialize() {
     detectEnvironment();
     setupEventListeners();
     setupChatInputAutoResize(elements.cadRequest);
+    syncExecutionControls();
     // Ensure the model selector sizes to its text
     try { autoSizeModelSelect(); } catch (e) {}
     if (elements.planningMode) {
@@ -478,6 +484,32 @@ function setupEventListeners() {
         }
     }
 
+    if (elements.executionModeSelect) {
+        elements.executionModeSelect.addEventListener('change', (event) => {
+            const nextMode = normalizeExecutionMode(event.target.value);
+            const previousMode = state.executionMode;
+            state.executionMode = nextMode;
+
+            if (!state.executionTargetManual) {
+                if (nextMode === 'spec_first' && state.executionTarget === 'fusion') {
+                    state.executionTarget = 'build123d';
+                } else if (previousMode === 'spec_first' && nextMode === 'direct_tool' && state.executionTarget === 'build123d') {
+                    state.executionTarget = 'fusion';
+                }
+            }
+
+            syncExecutionControls();
+        });
+    }
+
+    if (elements.executionTargetSelect) {
+        elements.executionTargetSelect.addEventListener('change', (event) => {
+            state.executionTargetManual = true;
+            state.executionTarget = normalizeExecutionTarget(event.target.value);
+            syncExecutionControls();
+        });
+    }
+
     if (elements.reasoningSelect) {
         elements.reasoningSelect.addEventListener('change', (event) => {
             state.reasoningEffort = event.target.value;
@@ -510,6 +542,18 @@ function setupEventListeners() {
             if (!target || typeof target.closest !== 'function') {
                 return;
             }
+            const decisionOption = target.closest('.specfirst-decision-option');
+            if (decisionOption && elements.chatMessages.contains(decisionOption)) {
+                event.preventDefault();
+                handleSpecFirstDecisionOptionClick(decisionOption);
+                return;
+            }
+            const decisionSubmit = target.closest('.specfirst-decision-submit');
+            if (decisionSubmit && elements.chatMessages.contains(decisionSubmit)) {
+                event.preventDefault();
+                handleSpecFirstDecisionSubmit(decisionSubmit);
+                return;
+            }
             const revertBtn = target.closest('.revert-btn');
             if (!revertBtn || !elements.chatMessages.contains(revertBtn)) {
                 return;
@@ -522,6 +566,14 @@ function setupEventListeners() {
                 return;
             }
             handleRevertToCheckpoint(messageId);
+        });
+
+        elements.chatMessages.addEventListener('input', (event) => {
+            const target = event.target;
+            if (!target || !target.classList || !target.classList.contains('specfirst-decision-response')) {
+                return;
+            }
+            handleSpecFirstDecisionInput(target);
         });
     }
 
@@ -850,7 +902,9 @@ function handleExecute() {
         include_visual_context: includeVisualContext,
         model_name: state.selectedModel,
         reasoning_effort: state.reasoningEffort,
-        request_id: requestId
+        request_id: requestId,
+        execution_mode: state.executionMode,
+        execution_target: state.executionTarget
     };
     
     // Add attachments. Keep legacy image_data/image_format for the first image.
@@ -1118,6 +1172,47 @@ function updateExecuteButtonState() {
         } else {
             elements.inlineReconnect.classList.remove('hidden');
         }
+    }
+}
+
+function normalizeExecutionMode(value) {
+    return String(value || '').trim().toLowerCase() === 'spec_first' ? 'spec_first' : 'direct_tool';
+}
+
+function normalizeExecutionTarget(value) {
+    return String(value || '').trim().toLowerCase() === 'build123d' ? 'build123d' : 'fusion';
+}
+
+function syncExecutionControls() {
+    state.executionMode = normalizeExecutionMode(state.executionMode);
+    state.executionTarget = normalizeExecutionTarget(state.executionTarget);
+    if (state.executionMode === 'spec_first' && state.executionTarget !== 'build123d') {
+        state.executionTarget = 'build123d';
+    }
+
+    if (elements.executionModeSelect) {
+        elements.executionModeSelect.value = state.executionMode;
+        elements.executionModeSelect.setAttribute(
+            'title',
+            state.executionMode === 'spec_first'
+                ? 'Spec-first artifact workflow'
+                : 'Direct CAD tool workflow'
+        );
+    }
+
+    if (elements.executionTargetSelect) {
+        const fusionOption = elements.executionTargetSelect.querySelector('option[value="fusion"]');
+        if (fusionOption) {
+            fusionOption.disabled = state.executionMode === 'spec_first';
+            fusionOption.textContent = state.executionMode === 'spec_first' ? 'Fusion (direct only)' : 'Fusion';
+        }
+        elements.executionTargetSelect.value = state.executionTarget;
+        elements.executionTargetSelect.setAttribute(
+            'title',
+            state.executionTarget === 'build123d'
+                ? 'Route execution toward the build123d target'
+                : 'Route execution toward the Fusion target'
+        );
     }
 }
 
@@ -1974,6 +2069,663 @@ function renderRunFromData(runData, options = {}) {
     return runState;
 }
 
+const SPEC_FIRST_ARTIFACT_STAGES = [
+    { key: 'requirements_contract', label: 'Requirements' },
+    { key: 'embodiment_graph', label: 'Embodiment' },
+    { key: 'realization_schema', label: 'Realization' }
+];
+
+function isSpecFirstLifecycleMessageType(type) {
+    return typeof type === 'string' && type.startsWith('spec_first_');
+}
+
+function isSpecFirstCandidateMessageType(type) {
+    return typeof type === 'string'
+        && (
+            type.startsWith('candidate_')
+            || type.startsWith('spec_first_candidate_')
+            || type === 'artifact_drafted'
+            || type === 'artifact_gate_result'
+        );
+}
+
+function getSpecFirstArtifactStageDefaults() {
+    return SPEC_FIRST_ARTIFACT_STAGES.map((stage) => ({
+        key: stage.key,
+        label: stage.label,
+        status: 'pending',
+        state: '',
+        artifactId: null,
+        logPath: null,
+        diagnostics: []
+    }));
+}
+
+function getSpecFirstItemId(synthesisRunId) {
+    return `specfirst_${synthesisRunId || generateId('specfirst')}`;
+}
+
+function getSpecFirstItem(docId, synthesisRunId) {
+    const docState = getDocState(docId, false);
+    if (!docState || !Array.isArray(docState.items)) {
+        return null;
+    }
+    return docState.items.find((item) => item && item.type === 'specfirst' && item.synthesisRunId === synthesisRunId) || null;
+}
+
+function createSpecFirstItem(message) {
+    return {
+        type: 'specfirst',
+        id: getSpecFirstItemId(message.synthesis_run_id),
+        synthesisRunId: message.synthesis_run_id || '',
+        requestId: message.request_id || '',
+        executionMode: normalizeExecutionMode(message.execution_mode || state.executionMode),
+        executionTarget: normalizeExecutionTarget(message.execution_target || state.executionTarget),
+        status: 'in-progress',
+        state: message.state || '',
+        statusText: 'Spec-first run started',
+        artifacts: getSpecFirstArtifactStageDefaults(),
+        candidates: [],
+        diagnostics: [],
+        decision: null,
+        createdAt: Date.now(),
+        updatedAt: Date.now()
+    };
+}
+
+function ensureSpecFirstItem(message, docId = currentDocId) {
+    const resolvedDocId = resolveDocId(docId);
+    const docState = getDocState(resolvedDocId, true);
+    if (!docState) {
+        return null;
+    }
+
+    let item = getSpecFirstItem(resolvedDocId, message.synthesis_run_id);
+    if (!item) {
+        item = createSpecFirstItem(message);
+        docState.items.push(item);
+    }
+
+    return item;
+}
+
+function findSpecFirstArtifact(item, key) {
+    if (!item || !Array.isArray(item.artifacts)) {
+        return null;
+    }
+    return item.artifacts.find((artifact) => artifact && artifact.key === key) || null;
+}
+
+function inferSpecFirstArtifactKey(message) {
+    const stateValue = String(message.state || '').toUpperCase();
+    if (stateValue.includes('REQUIREMENTS')) {
+        return 'requirements_contract';
+    }
+    if (stateValue.includes('EMBODIMENT')) {
+        return 'embodiment_graph';
+    }
+    if (stateValue.includes('REALIZATION')) {
+        return 'realization_schema';
+    }
+    if (typeof message.artifact_id === 'string') {
+        if (message.artifact_id.startsWith('req')) return 'requirements_contract';
+        if (message.artifact_id.startsWith('emb')) return 'embodiment_graph';
+        if (message.artifact_id.startsWith('real')) return 'realization_schema';
+    }
+    return null;
+}
+
+function prettySpecFirstState(stateValue) {
+    const normalized = String(stateValue || '').trim();
+    if (!normalized) {
+        return 'Working';
+    }
+    return normalized
+        .toLowerCase()
+        .split('_')
+        .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+        .join(' ');
+}
+
+function getSpecFirstStatusTone(status) {
+    switch (status) {
+        case 'success':
+            return 'success';
+        case 'error':
+            return 'error';
+        case 'waiting':
+            return 'waiting';
+        case 'active':
+        case 'in-progress':
+            return 'active';
+        default:
+            return 'pending';
+    }
+}
+
+function updateSpecFirstArtifact(item, artifactKey, updates = {}) {
+    const artifact = findSpecFirstArtifact(item, artifactKey);
+    if (artifact) {
+        Object.assign(artifact, updates);
+    }
+}
+
+function ensureSpecFirstCandidate(item, candidateId) {
+    if (!Array.isArray(item.candidates)) {
+        item.candidates = [];
+    }
+    const normalizedId = String(candidateId || `candidate_${item.candidates.length + 1}`);
+    let candidate = item.candidates.find((entry) => entry && entry.id === normalizedId);
+    if (!candidate) {
+        candidate = {
+            id: normalizedId,
+            label: normalizedId,
+            status: 'pending',
+            state: '',
+            details: []
+        };
+        item.candidates.push(candidate);
+    }
+    return candidate;
+}
+
+function extractDiagnosticsList(diagnostics) {
+    if (!diagnostics) {
+        return [];
+    }
+    if (Array.isArray(diagnostics)) {
+        return diagnostics.map((value) => String(value));
+    }
+    if (Array.isArray(diagnostics.messages)) {
+        return diagnostics.messages.map((value) => String(value));
+    }
+    const values = [];
+    if (typeof diagnostics.question === 'string' && diagnostics.question.trim()) {
+        values.push(diagnostics.question.trim());
+    }
+    if (typeof diagnostics.reason === 'string' && diagnostics.reason.trim()) {
+        values.push(diagnostics.reason.trim());
+    }
+    return values;
+}
+
+function buildSpecFirstRunSummary(item) {
+    const modeLabel = item.executionMode === 'spec_first' ? 'Spec-first' : 'Direct';
+    const targetLabel = item.executionTarget === 'build123d' ? 'build123d' : 'Fusion';
+    return `${modeLabel} / ${targetLabel}`;
+}
+
+function describeSpecFirstMessage(message) {
+    if (message.type === 'spec_first_human_decision_required') {
+        return 'Waiting for a human decision';
+    }
+    if (message.type === 'spec_first_human_decision_response_sent') {
+        return 'Decision sent';
+    }
+    if (message.type === 'spec_first_human_decision_response_failed') {
+        return 'Decision could not be sent';
+    }
+    if (message.type === 'spec_first_completed') {
+        return 'Spec-first run completed';
+    }
+    if (message.type === 'spec_first_failed' || message.type === 'spec_first_validation_failed') {
+        return 'Spec-first run failed';
+    }
+    if (isSpecFirstCandidateMessageType(message.type)) {
+        return prettySpecFirstState(message.type);
+    }
+    return prettySpecFirstState(message.state);
+}
+
+function updateSpecFirstItemFromMessage(item, message) {
+    if (!item) {
+        return;
+    }
+
+    item.updatedAt = Date.now();
+    item.state = message.state || item.state;
+    item.executionMode = normalizeExecutionMode(message.execution_mode || item.executionMode);
+    item.executionTarget = normalizeExecutionTarget(message.execution_target || item.executionTarget);
+    item.statusText = describeSpecFirstMessage(message);
+
+    const diagnostics = message.diagnostics || null;
+    if (diagnostics) {
+        item.diagnostics = extractDiagnosticsList(diagnostics);
+    }
+
+    const artifactKey = inferSpecFirstArtifactKey(message);
+    if (message.type === 'spec_first_started' || message.type === 'spec_first_state_changed') {
+        item.status = 'in-progress';
+    } else if (message.type === 'spec_first_artifact_submitted') {
+        item.status = 'in-progress';
+        if (artifactKey) {
+            updateSpecFirstArtifact(item, artifactKey, {
+                status: 'active',
+                state: message.state || '',
+                artifactId: message.artifact_id || null,
+                logPath: message.log_path || null,
+                diagnostics: []
+            });
+        }
+    } else if (message.type === 'spec_first_validation_passed') {
+        item.status = 'in-progress';
+        if (artifactKey) {
+            updateSpecFirstArtifact(item, artifactKey, {
+                status: 'success',
+                state: message.state || '',
+                artifactId: message.artifact_id || null,
+                diagnostics: []
+            });
+        }
+    } else if (message.type === 'spec_first_human_decision_required') {
+        item.status = 'waiting';
+        item.decision = {
+            blocking: diagnostics && diagnostics.blocking !== false,
+            decisionId: diagnostics && diagnostics.decision_id ? String(diagnostics.decision_id) : '',
+            decisionType: diagnostics && diagnostics.decision_type ? String(diagnostics.decision_type) : '',
+            question: diagnostics && diagnostics.question ? String(diagnostics.question) : 'A decision is required before CADAgent can continue.',
+            reason: diagnostics && diagnostics.reason ? String(diagnostics.reason) : '',
+            options: diagnostics && Array.isArray(diagnostics.options) ? diagnostics.options : [],
+            answered: false,
+            submitting: false,
+            answer: '',
+            selectedOptionId: ''
+        };
+    } else if (message.type === 'spec_first_human_decision_response_sent') {
+        item.status = 'in-progress';
+        item.statusText = 'Decision sent';
+        if (item.decision) {
+            item.decision.answered = true;
+            item.decision.submitting = false;
+            item.decision.answer = message.answer || item.decision.answer || '';
+            item.decision.selectedOptionId = message.option_id || item.decision.selectedOptionId || '';
+        }
+    } else if (message.type === 'spec_first_human_decision_response_failed') {
+        item.status = 'waiting';
+        item.statusText = 'Decision could not be sent';
+        if (item.decision) {
+            item.decision.answered = false;
+            item.decision.submitting = false;
+        }
+    } else if (message.type === 'spec_first_validation_failed' || message.type === 'spec_first_failed') {
+        item.status = 'error';
+        if (artifactKey) {
+            updateSpecFirstArtifact(item, artifactKey, {
+                status: 'error',
+                state: message.state || '',
+                diagnostics: extractDiagnosticsList(diagnostics)
+            });
+        }
+    } else if (message.type === 'spec_first_completed') {
+        item.status = 'success';
+        item.decision = null;
+    } else if (isSpecFirstCandidateMessageType(message.type)) {
+        const diagnosticPayload = message.diagnostics && typeof message.diagnostics === 'object' ? message.diagnostics : {};
+        const dataPayload = message.data && typeof message.data === 'object' ? message.data : message;
+        const payload = { ...diagnosticPayload, ...dataPayload };
+        const candidateId = payload.candidate_id
+            || payload.selected_candidate_id
+            || message.candidate_id
+            || (message.type.startsWith('spec_first_candidate_') ? 'candidate_ir' : '');
+        if (candidateId) {
+            const candidate = ensureSpecFirstCandidate(item, candidateId);
+            candidate.label = payload.label || payload.name || candidate.label;
+            candidate.state = message.type;
+            if (message.type === 'candidate_build_started' || message.type === 'candidate_compile_started') {
+                candidate.status = 'active';
+            } else if (message.type === 'candidate_validation_result') {
+                candidate.status = payload.passed === false || payload.ok === false ? 'error' : 'success';
+            } else if (message.type === 'spec_first_candidate_compiled') {
+                candidate.status = 'active';
+            } else if (message.type === 'spec_first_candidate_admitted') {
+                candidate.status = 'success';
+            } else {
+                candidate.status = 'success';
+            }
+            const detailText = payload.message
+                || payload.summary
+                || (payload.operation_count !== undefined && payload.operation_count !== null ? `${payload.operation_count} operation(s)` : '')
+                || message.message;
+            candidate.details = detailText ? [String(detailText)] : [];
+        }
+    }
+}
+
+function serializeSpecFirstItem(item) {
+    try {
+        return JSON.stringify(item);
+    } catch (error) {
+        console.warn('Failed to serialize spec-first tracker', error);
+        return '';
+    }
+}
+
+function buildSpecFirstSection(item) {
+    const section = document.createElement('section');
+    section.className = 'specfirst-card';
+    section.setAttribute('data-specfirst-item-id', item.id);
+    section.setAttribute('data-synthesis-run-id', item.synthesisRunId || '');
+    section.setAttribute('data-specfirst-item', serializeSpecFirstItem(item));
+
+    const header = document.createElement('div');
+    header.className = 'specfirst-card-header';
+
+    const heading = document.createElement('div');
+    heading.className = 'specfirst-card-heading';
+    const title = document.createElement('span');
+    title.className = 'specfirst-card-title';
+    title.textContent = buildSpecFirstRunSummary(item);
+    heading.appendChild(title);
+
+    const runId = document.createElement('span');
+    runId.className = 'specfirst-card-runid';
+    runId.textContent = item.synthesisRunId || 'pending';
+    heading.appendChild(runId);
+    header.appendChild(heading);
+
+    const status = document.createElement('span');
+    status.className = `specfirst-status-chip ${getSpecFirstStatusTone(item.status)}`;
+    status.textContent = item.statusText || 'Working';
+    header.appendChild(status);
+    section.appendChild(header);
+
+    const artifactBlock = document.createElement('div');
+    artifactBlock.className = 'specfirst-block';
+    const artifactLabel = document.createElement('div');
+    artifactLabel.className = 'specfirst-block-label';
+    artifactLabel.textContent = 'Artifacts';
+    artifactBlock.appendChild(artifactLabel);
+
+    const artifactList = document.createElement('div');
+    artifactList.className = 'specfirst-artifact-list';
+    (item.artifacts || []).forEach((artifact) => {
+        const row = document.createElement('div');
+        row.className = 'specfirst-artifact-row';
+
+        const name = document.createElement('span');
+        name.className = 'specfirst-artifact-name';
+        name.textContent = artifact.label;
+        row.appendChild(name);
+
+        const detail = document.createElement('span');
+        detail.className = 'specfirst-artifact-detail';
+        detail.textContent = artifact.artifactId || prettySpecFirstState(artifact.state || artifact.status);
+        row.appendChild(detail);
+
+        const chip = document.createElement('span');
+        chip.className = `specfirst-artifact-chip ${getSpecFirstStatusTone(artifact.status)}`;
+        chip.textContent = artifact.status || 'pending';
+        row.appendChild(chip);
+        artifactList.appendChild(row);
+    });
+    artifactBlock.appendChild(artifactList);
+    section.appendChild(artifactBlock);
+
+    if (Array.isArray(item.candidates) && item.candidates.length > 0) {
+        const candidateBlock = document.createElement('div');
+        candidateBlock.className = 'specfirst-block';
+        const candidateLabel = document.createElement('div');
+        candidateLabel.className = 'specfirst-block-label';
+        candidateLabel.textContent = 'Candidates';
+        candidateBlock.appendChild(candidateLabel);
+
+        const candidateList = document.createElement('div');
+        candidateList.className = 'specfirst-candidate-list';
+        item.candidates.forEach((candidate) => {
+            const row = document.createElement('div');
+            row.className = 'specfirst-candidate-row';
+
+            const label = document.createElement('span');
+            label.className = 'specfirst-candidate-label';
+            label.textContent = candidate.label || candidate.id;
+            row.appendChild(label);
+
+            const chip = document.createElement('span');
+            chip.className = `specfirst-artifact-chip ${getSpecFirstStatusTone(candidate.status)}`;
+            chip.textContent = prettySpecFirstState(candidate.state || candidate.status);
+            row.appendChild(chip);
+            candidateList.appendChild(row);
+
+            if (Array.isArray(candidate.details) && candidate.details.length > 0) {
+                const detail = document.createElement('div');
+                detail.className = 'specfirst-candidate-details';
+                detail.textContent = candidate.details[0];
+                candidateList.appendChild(detail);
+            }
+        });
+        candidateBlock.appendChild(candidateList);
+        section.appendChild(candidateBlock);
+    }
+
+    if (item.decision && !item.decision.answered) {
+        const decisionBlock = document.createElement('div');
+        decisionBlock.className = 'specfirst-decision-block';
+        decisionBlock.setAttribute('data-synthesis-run-id', item.synthesisRunId || '');
+
+        const question = document.createElement('div');
+        question.className = 'specfirst-decision-question';
+        question.textContent = item.decision.question;
+        decisionBlock.appendChild(question);
+
+        if (item.decision.reason) {
+            const reason = document.createElement('div');
+            reason.className = 'specfirst-decision-reason';
+            reason.textContent = item.decision.reason;
+            decisionBlock.appendChild(reason);
+        }
+
+        if (Array.isArray(item.decision.options) && item.decision.options.length > 0) {
+            const options = document.createElement('div');
+            options.className = 'specfirst-decision-options';
+            item.decision.options.forEach((option) => {
+                const button = document.createElement('button');
+                button.type = 'button';
+                button.className = 'specfirst-decision-option';
+                button.setAttribute('data-synthesis-run-id', item.synthesisRunId || '');
+                button.setAttribute('data-option-id', String(option.id || option.value || option.label || ''));
+                button.setAttribute('data-option-label', String(option.label || option.value || option.id || 'Option'));
+                if (item.decision.selectedOptionId === String(option.id || option.value || option.label || '')) {
+                    button.classList.add('selected');
+                }
+                button.textContent = String(option.label || option.value || option.id || 'Option');
+                options.appendChild(button);
+            });
+            decisionBlock.appendChild(options);
+        }
+
+        const textarea = document.createElement('textarea');
+        textarea.className = 'specfirst-decision-response';
+        textarea.setAttribute('data-synthesis-run-id', item.synthesisRunId || '');
+        textarea.rows = 3;
+        textarea.placeholder = 'Answer required to continue';
+        textarea.value = item.decision.answer || '';
+        textarea.disabled = item.decision.submitting === true;
+        decisionBlock.appendChild(textarea);
+
+        const actions = document.createElement('div');
+        actions.className = 'specfirst-decision-actions';
+        const submit = document.createElement('button');
+        submit.type = 'button';
+        submit.className = 'specfirst-decision-submit';
+        submit.setAttribute('data-synthesis-run-id', item.synthesisRunId || '');
+        submit.disabled = item.decision.submitting === true;
+        submit.textContent = item.decision.submitting === true ? 'Submitting...' : 'Continue';
+        actions.appendChild(submit);
+        decisionBlock.appendChild(actions);
+        section.appendChild(decisionBlock);
+    } else if (item.decision && item.decision.answered) {
+        const answered = document.createElement('div');
+        answered.className = 'specfirst-decision-answered';
+        answered.textContent = `Decision sent: ${item.decision.answer}`;
+        section.appendChild(answered);
+    }
+
+    if (Array.isArray(item.diagnostics) && item.diagnostics.length > 0) {
+        const diagnostics = document.createElement('div');
+        diagnostics.className = 'specfirst-diagnostics';
+        item.diagnostics.forEach((line) => {
+            const row = document.createElement('div');
+            row.className = 'specfirst-diagnostic-line';
+            row.textContent = line;
+            diagnostics.appendChild(row);
+        });
+        section.appendChild(diagnostics);
+    }
+
+    return section;
+}
+
+function renderSpecFirstItem(item) {
+    if (!elements.chatMessages || !item) {
+        return null;
+    }
+
+    if (elements.welcomeMessage && !elements.welcomeMessage.classList.contains('hidden')) {
+        elements.welcomeMessage.classList.add('hidden');
+    }
+    if (elements.headerSection && !elements.headerSection.classList.contains('compact-mode')) {
+        elements.headerSection.classList.add('compact-mode');
+    }
+
+    const section = buildSpecFirstSection(item);
+    const existing = elements.chatMessages.querySelector(`[data-specfirst-item-id="${item.id}"]`);
+    if (existing && existing.parentNode) {
+        existing.replaceWith(section);
+    } else {
+        elements.chatMessages.appendChild(section);
+    }
+    return section;
+}
+
+function logSpecFirstMessage(message) {
+    const summary = describeSpecFirstMessage(message);
+    if (!summary) {
+        return;
+    }
+    const tone = message.type === 'spec_first_failed' || message.type === 'spec_first_validation_failed'
+        ? 'error'
+        : message.type === 'spec_first_human_decision_required'
+            ? 'warning'
+            : message.type === 'spec_first_completed'
+                ? 'success'
+                : 'info';
+    appendRunLogEntry(tone, summary, 'text');
+}
+
+function handleSpecFirstLifecycleMessage(message) {
+    const item = ensureSpecFirstItem(message);
+    if (!item) {
+        return;
+    }
+
+    updateSpecFirstItemFromMessage(item, message);
+    const section = renderSpecFirstItem(item);
+    persistCurrentThreadState();
+    if (section && typeof section.scrollIntoView === 'function') {
+        section.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    }
+
+    if (message.type === 'spec_first_human_decision_required' || message.type === 'spec_first_human_decision_response_failed') {
+        hideProgress();
+    } else if (message.type === 'spec_first_completed') {
+        hideProgress();
+        finalizeActiveRun('success');
+    } else if (message.type === 'spec_first_failed' || message.type === 'spec_first_validation_failed') {
+        hideProgress();
+        finalizeActiveRun('error');
+    } else {
+        showProgress(item.statusText || 'Spec-first workflow in progress');
+    }
+
+    logSpecFirstMessage(message);
+}
+
+function getSpecFirstItemForInteraction(element) {
+    const synthesisRunId = element.getAttribute('data-synthesis-run-id');
+    return synthesisRunId ? getSpecFirstItem(currentDocId, synthesisRunId) : null;
+}
+
+function handleSpecFirstDecisionOptionClick(button) {
+    const item = getSpecFirstItemForInteraction(button);
+    if (!item || !item.decision) {
+        return;
+    }
+    const optionId = button.getAttribute('data-option-id') || '';
+    const optionLabel = button.getAttribute('data-option-label') || button.textContent || '';
+    item.decision.selectedOptionId = optionId;
+    item.decision.answer = optionLabel || optionId;
+    item.decision.answered = false;
+    item.decision.submitting = false;
+    renderSpecFirstItem(item);
+    persistCurrentThreadState();
+}
+
+function handleSpecFirstDecisionInput(textarea) {
+    const item = getSpecFirstItemForInteraction(textarea);
+    if (!item || !item.decision) {
+        return;
+    }
+    item.decision.answer = textarea.value;
+    item.decision.answered = false;
+    item.decision.submitting = false;
+    persistCurrentThreadState();
+}
+
+function handleSpecFirstDecisionSubmit(button) {
+    const synthesisRunId = button.getAttribute('data-synthesis-run-id');
+    if (!synthesisRunId) {
+        return;
+    }
+
+    const item = getSpecFirstItem(currentDocId, synthesisRunId);
+    if (!item || !item.decision || !elements.chatMessages) {
+        return;
+    }
+
+    const card = elements.chatMessages.querySelector(`[data-specfirst-item-id="${item.id}"]`);
+    const textarea = card ? card.querySelector('.specfirst-decision-response') : null;
+    const answer = textarea ? textarea.value.trim() : (item.decision.answer || '').trim();
+    const selectedOptionId = item.decision.selectedOptionId || '';
+
+    if (!answer && !selectedOptionId) {
+        showToast('A decision is required to continue.');
+        return;
+    }
+
+    item.decision.answer = answer || selectedOptionId;
+    item.decision.answered = false;
+
+    const sent = sendToAddin({
+        action: 'send_to_backend',
+        message: {
+            type: 'spec_first_human_decision_response',
+            synthesis_run_id: synthesisRunId,
+            decision_id: item.decision.decisionId || undefined,
+            request_id: item.requestId || undefined,
+            answer: item.decision.answer,
+            option_id: selectedOptionId || undefined
+        }
+    });
+
+    if (!sent) {
+        item.decision.submitting = false;
+        item.status = 'waiting';
+        item.statusText = 'Decision pending';
+        renderSpecFirstItem(item);
+        persistCurrentThreadState();
+        showToast('Decision was not sent. Check the connection and retry.');
+        return;
+    }
+
+    item.decision.submitting = true;
+    item.status = 'in-progress';
+    item.statusText = 'Submitting decision';
+    renderSpecFirstItem(item);
+    persistCurrentThreadState();
+    showProgress('Submitting decision...');
+    appendRunLogEntry('info', `Submitting decision: ${item.decision.answer}`, 'text');
+}
+
 function renderActiveDoc() {
     if (!elements.chatMessages) return;
     elements.chatMessages.innerHTML = '';
@@ -1993,6 +2745,8 @@ function renderActiveDoc() {
     docState.items.forEach((item) => {
         if (item.type === 'message') {
             renderMessageFromData(item);
+        } else if (item.type === 'specfirst') {
+            renderSpecFirstItem(item);
         } else if (item.type === 'run') {
             runCounter += 1;
             if (!item.iteration) {
@@ -2062,6 +2816,18 @@ function rebuildDocStateFromDom(docId) {
                     requestId: requestId || null
                 }
             });
+        } else if (node.classList.contains('specfirst-card')) {
+            try {
+                const serialized = node.getAttribute('data-specfirst-item');
+                if (serialized) {
+                    const item = JSON.parse(serialized);
+                    if (item && item.type === 'specfirst') {
+                        items.push(item);
+                    }
+                }
+            } catch (error) {
+                console.warn('Failed to rebuild spec-first tracker from DOM', error);
+            }
         } else if (node.classList.contains('run-feed')) {
             const summaryTextEl = node.querySelector('.run-summary-text');
             const entries = [];
@@ -5713,6 +6479,11 @@ function processAddinMessage(message) {
     // TEMP auth/debug probe: keep last message reachable from console
     if (typeof window !== 'undefined') {
         window.__lastAddinMessage = message;
+    }
+
+    if (isSpecFirstLifecycleMessageType(message.type) || isSpecFirstCandidateMessageType(message.type)) {
+        handleSpecFirstLifecycleMessage(message);
+        return;
     }
 
     switch (message.type) {

@@ -801,6 +801,8 @@ class HTMLEventHandler(adsk.core.HTMLEventHandler):
                 include_visual_context = bool(payload.get('include_visual_context', False))
                 model_name = payload.get('model_name', 'claude-sonnet-4.5')
                 reasoning_effort = payload.get('reasoning_effort')
+                execution_mode = payload.get('execution_mode') or 'direct_tool'
+                execution_target = payload.get('execution_target') or 'fusion'
                 request_id = payload.get('request_id')  # Extract request_id for checkpoint correlation
 
                 # Extract image data if present
@@ -815,10 +817,19 @@ class HTMLEventHandler(adsk.core.HTMLEventHandler):
                 # Log with image indicator
                 has_image = " + image" if image_data else ""
                 has_attachments = f" + {len(attachments)} attachment(s)" if attachments else ""
-                logger.info(f"← Execute request: '{request}'{has_image}{has_attachments} (planning={planning_mode}, visual_context={include_visual_context}, model={model_name}, reasoning={reasoning_effort}, request_id={request_id})")
+                logger.info(
+                    f"← Execute request: '{request}'{has_image}{has_attachments} "
+                    f"(planning={planning_mode}, visual_context={include_visual_context}, "
+                    f"model={model_name}, reasoning={reasoning_effort}, "
+                    f"execution_mode={execution_mode}, execution_target={execution_target}, "
+                    f"request_id={request_id})"
+                )
 
                 if request or image_data or attachments:  # Allow attachment-only requests
-                    log_msg = f'Executing request (Planning: {planning_mode}, Model: {model_name})'
+                    log_msg = (
+                        f'Executing request (Planning: {planning_mode}, Model: {model_name}, '
+                        f'Mode: {execution_mode}, Target: {execution_target})'
+                    )
                     if image_data:
                         log_msg += ' [with sketch]'
                     elif attachments:
@@ -835,7 +846,9 @@ class HTMLEventHandler(adsk.core.HTMLEventHandler):
                         image_data=image_data,
                         image_format=image_format,
                         attachments=attachments,
-                        reasoning_effort=reasoning_effort
+                        reasoning_effort=reasoning_effort,
+                        execution_mode=execution_mode,
+                        execution_target=execution_target,
                     )
                 else:
                     logger.warning("← Empty request received (no text or image)")
@@ -922,17 +935,51 @@ class HTMLEventHandler(adsk.core.HTMLEventHandler):
             elif action_name == 'send_to_backend':
                 logger.info("← send_to_backend request received")
                 message = payload.get('message')
+                active_doc_id = self._controller.get_active_doc_id()
+
+                def notify_spec_first_decision_delivery(ok: bool, error_message: Optional[str] = None) -> None:
+                    if not isinstance(message, dict) or message.get('type') != 'spec_first_human_decision_response':
+                        return
+                    payload_kwargs = {
+                        'synthesis_run_id': message.get('synthesis_run_id'),
+                        'decision_id': message.get('decision_id'),
+                        'request_id': message.get('request_id'),
+                        'answer': message.get('answer'),
+                        'option_id': message.get('option_id'),
+                    }
+                    if ok:
+                        self._palette_manager.send_message(
+                            'spec_first_human_decision_response_sent',
+                            doc_id=active_doc_id,
+                            **payload_kwargs,
+                        )
+                    else:
+                        self._palette_manager.send_message(
+                            'spec_first_human_decision_response_failed',
+                            doc_id=active_doc_id,
+                            diagnostics={'messages': [error_message or 'Failed to send decision response']},
+                            **payload_kwargs,
+                        )
+
                 if not isinstance(message, dict):
                     logger.warning("send_to_backend payload missing or invalid 'message'")
-                    self._palette_manager.send_error('Invalid message payload', doc_id=self._controller.get_active_doc_id())
+                    self._palette_manager.send_error('Invalid message payload', doc_id=active_doc_id)
                 else:
                     client = self._controller._get_active_ws_client()
                     if client and client.is_connected():
-                        client.send_json(message)
-                        logger.info(f"✓ Forwarded message to backend (type={message.get('type', 'unknown')})")
+                        try:
+                            client.send_json(message)
+                        except Exception as exc:
+                            logger.warning(f"Cannot forward send_to_backend: {exc}")
+                            self._palette_manager.send_error('Backend send failed', doc_id=active_doc_id)
+                            notify_spec_first_decision_delivery(False, 'Backend send failed')
+                        else:
+                            logger.info(f"✓ Forwarded message to backend (type={message.get('type', 'unknown')})")
+                            notify_spec_first_decision_delivery(True)
                     else:
                         logger.warning("Cannot forward send_to_backend: backend not connected")
-                        self._palette_manager.send_error('Backend not connected', doc_id=self._controller.get_active_doc_id())
+                        self._palette_manager.send_error('Backend not connected', doc_id=active_doc_id)
+                        notify_spec_first_decision_delivery(False, 'Backend not connected')
 
             elif action_name == 'send_magic_link':
                 email = payload.get('email', '').strip()

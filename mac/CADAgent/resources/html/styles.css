@@ -333,6 +333,33 @@ textarea#cadRequest::placeholder { color: var(--fg-muted); }
 .reasoning-select option { background: var(--bg-panel); color: var(--fg-primary); }
 
 .mode-pill-group { display: flex; align-items: center; gap: 2px; }
+.execution-selector-group {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 2px;
+}
+.compose-select-label {
+  color: var(--fg-muted);
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.execution-select {
+  appearance: none;
+  background: transparent;
+  border: none;
+  color: var(--fg-secondary);
+  font-size: 10px;
+  font-weight: 500;
+  cursor: pointer;
+  padding: 3px 6px;
+  border-radius: var(--radius-sm);
+  transition: color 0.2s, background 0.2s;
+  font-family: var(--font-sans);
+}
+.execution-select:hover { color: var(--fg-primary); background: var(--surface-hover); }
+.execution-select option { background: var(--bg-panel); color: var(--fg-primary); }
 
 .mode-pill {
   background: transparent;
@@ -494,6 +521,178 @@ textarea#cadRequest::placeholder { color: var(--fg-muted); }
 .progress-meter { width: 80px; height: 2px; background: var(--border-subtle); border-radius: 1px; overflow: hidden; }
 .progress-meter-fill { height: 100%; background: var(--accent-primary); width: 0%; transition: width 0.3s; }
 .toast-text { font-size: 9px; color: var(--fg-secondary); font-weight: 500; letter-spacing: 0.02em; }
+
+.specfirst-card {
+  margin: 10px 12px 0;
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--border-subtle);
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.specfirst-card-header,
+.specfirst-card-heading,
+.specfirst-artifact-row,
+.specfirst-candidate-row,
+.specfirst-decision-actions {
+  display: flex;
+  align-items: center;
+}
+
+.specfirst-card-header {
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.specfirst-card-heading {
+  gap: 8px;
+  min-width: 0;
+}
+
+.specfirst-card-title {
+  color: var(--fg-primary);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.specfirst-card-runid {
+  color: var(--fg-muted);
+  font-family: var(--font-mono);
+  font-size: 9px;
+}
+
+.specfirst-status-chip,
+.specfirst-artifact-chip {
+  border-radius: var(--radius-full);
+  padding: 2px 6px;
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  border: 1px solid var(--border-subtle);
+}
+
+.specfirst-status-chip.pending,
+.specfirst-artifact-chip.pending {
+  color: var(--fg-muted);
+}
+
+.specfirst-status-chip.active,
+.specfirst-artifact-chip.active {
+  color: var(--accent-primary);
+  background: var(--accent-glow);
+}
+
+.specfirst-status-chip.waiting,
+.specfirst-artifact-chip.waiting {
+  color: #f59e0b;
+  background: rgba(245, 158, 11, 0.12);
+}
+
+.specfirst-status-chip.success,
+.specfirst-artifact-chip.success {
+  color: #10b981;
+  background: rgba(16, 185, 129, 0.12);
+}
+
+.specfirst-status-chip.error,
+.specfirst-artifact-chip.error {
+  color: #ef4444;
+  background: rgba(239, 68, 68, 0.12);
+}
+
+.specfirst-block,
+.specfirst-decision-block,
+.specfirst-diagnostics {
+  margin-top: 10px;
+}
+
+.specfirst-block-label {
+  color: var(--fg-muted);
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: 6px;
+}
+
+.specfirst-artifact-list,
+.specfirst-candidate-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.specfirst-artifact-row,
+.specfirst-candidate-row {
+  gap: 8px;
+}
+
+.specfirst-artifact-name,
+.specfirst-candidate-label {
+  color: var(--fg-primary);
+  font-size: 11px;
+  min-width: 0;
+  flex: 1;
+}
+
+.specfirst-artifact-detail,
+.specfirst-candidate-details,
+.specfirst-decision-reason,
+.specfirst-diagnostic-line,
+.specfirst-decision-answered {
+  color: var(--fg-secondary);
+  font-size: 10px;
+  line-height: 1.4;
+}
+
+.specfirst-decision-question {
+  color: var(--fg-primary);
+  font-size: 11px;
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+
+.specfirst-decision-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.specfirst-decision-option,
+.specfirst-decision-submit {
+  border: 1px solid var(--border-subtle);
+  background: transparent;
+  color: var(--fg-secondary);
+  font-size: 10px;
+  padding: 5px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.specfirst-decision-option.selected,
+.specfirst-decision-option:hover,
+.specfirst-decision-submit:hover {
+  color: var(--fg-primary);
+  background: var(--surface-hover);
+}
+
+.specfirst-decision-response {
+  width: 100%;
+  margin-top: 8px;
+  border: 1px solid var(--border-subtle);
+  background: rgba(0, 0, 0, 0.12);
+  color: var(--fg-primary);
+  border-radius: 6px;
+  padding: 8px;
+  font-family: var(--font-sans);
+  font-size: 11px;
+  resize: vertical;
+}
+
+.specfirst-decision-actions {
+  justify-content: flex-end;
+  margin-top: 8px;
+}
 
 /* Run Log / Reasoning (Refined) */
 .run-feed {

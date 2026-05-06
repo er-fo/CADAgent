@@ -148,6 +148,21 @@
                 </button>
                 <input type="file" id="imageInput" accept="image/png,image/jpeg,image/jpg,text/plain,text/markdown,text/csv,application/json,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,.txt,.md,.markdown,.csv,.json,.pdf,.docx" multiple style="display: none;" />
 
+                <div class="execution-selector-group">
+                  <label class="compose-select-label" for="executionModeSelect">Mode</label>
+                  <select id="executionModeSelect" class="execution-select" title="Execution mode" aria-label="Execution mode">
+                    <option value="direct_tool" selected>Direct</option>
+                    <option value="spec_first">Spec-first</option>
+                  </select>
+                </div>
+                <div class="execution-selector-group">
+                  <label class="compose-select-label" for="executionTargetSelect">Target</label>
+                  <select id="executionTargetSelect" class="execution-select" title="Execution target" aria-label="Execution target">
+                    <option value="fusion" selected>Fusion</option>
+                    <option value="build123d">build123d</option>
+                  </select>
+                </div>
+
                 <div class="model-selector-container">
                   <select id="modelSelect" class="model-select" title="Select AI model" aria-label="Select model">
                     <option value="minimax.minimax-m2.5" selected>MiniMax M2.5 (Free)</option>
