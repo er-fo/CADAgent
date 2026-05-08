@@ -283,6 +283,7 @@ TOPOLOGY_MUTATING_TOOLS = GEOMETRY_MODIFYING_TOOLS | TIMELINE_MODIFYING_TOOLS
 
 OPERATION_CHECKPOINT_TOOLS = GEOMETRY_MODIFYING_TOOLS | TIMELINE_MODIFYING_TOOLS | {
     "create_sketch",
+    SKETCH_GEOMETRY_BATCH_TOOL,
     "add_line",
     "add_arc",
     "add_circle",
@@ -1120,6 +1121,7 @@ def _get_sketch_entity_store(session_id: str, manager: ConnectionManager) -> Ske
 
 
 _SKETCH_ID_INPUT_TOOLS = {
+    "add_sketch_geometry_batch",
     "add_rectangle",
     "add_circle",
     "add_line",
@@ -1151,6 +1153,24 @@ def _canonicalize_sketch_tool_input(
         return cleaned
 
     cleaned["sketch_id"] = canonical_sketch_id
+
+    if tool_name == SKETCH_GEOMETRY_BATCH_TOOL and isinstance(cleaned.get("operations"), Sequence):
+        canonical_operations: List[Any] = []
+        changed_operations = False
+        for raw_operation in cleaned.get("operations") or []:
+            if not isinstance(raw_operation, Mapping):
+                canonical_operations.append(raw_operation)
+                continue
+            operation = dict(raw_operation)
+            raw_operation_sketch_id = str(operation.get("sketch_id") or "").strip()
+            if raw_operation_sketch_id:
+                canonical_operation_sketch_id = sketch_store.resolve_sketch_id(raw_operation_sketch_id)
+                if canonical_operation_sketch_id and canonical_operation_sketch_id != raw_operation_sketch_id:
+                    operation["sketch_id"] = canonical_operation_sketch_id
+                    changed_operations = True
+            canonical_operations.append(operation)
+        if changed_operations:
+            cleaned["operations"] = canonical_operations
 
     raw_profile = cleaned.get("profile")
     if isinstance(raw_profile, str) and raw_profile.startswith(f"{raw_sketch_id}:"):
@@ -5086,8 +5106,20 @@ async def _execute_workflow_loop(
                 continue
 
             if tool_name in SKETCH_GEOMETRY_BATCH_FOLLOWUP_BLOCK_TOOLS:
-                followup_sketch_id = str(tool_input.get("sketch_id") or "").strip()
-                if followup_sketch_id and followup_sketch_id in sketch_geometry_batched_this_turn:
+                followup_sketch_id = next(
+                    (
+                        sketch_id
+                        for sketch_id in _sketch_geometry_batch_followup_sketch_ids(
+                            session_id,
+                            manager,
+                            tool_name,
+                            tool_input,
+                        )
+                        if sketch_id in sketch_geometry_batched_this_turn
+                    ),
+                    "",
+                )
+                if followup_sketch_id:
                     defer_text = (
                         f"Deferred '{tool_name}' after batched sketch geometry for sketch '{followup_sketch_id}'. "
                         "Wait for the next turn so the completed sketch geometry/profile state can be observed before downstream operations."
@@ -10573,6 +10605,39 @@ def _maybe_defer_face_sketch_followup(
         "This sketch was just created on a model face in the same turn. "
         "Wait for the next turn so orientation/bounds feedback can guide placement before adding geometry or extruding."
     )
+
+
+def _sketch_geometry_batch_followup_sketch_ids(
+    session_id: str,
+    manager: ConnectionManager,
+    tool_name: str,
+    tool_input: Mapping[str, Any],
+) -> Tuple[str, ...]:
+    sketch_store = _get_sketch_entity_store(session_id, manager)
+
+    def _canonical_sketch_id(value: Any) -> str:
+        sketch_id = str(value or "").strip()
+        if not sketch_id:
+            return ""
+        return sketch_store.resolve_sketch_id(sketch_id) or sketch_id
+
+    if tool_name == "create_loft":
+        raw_profile_ids = tool_input.get("profile_ids")
+        if not isinstance(raw_profile_ids, Sequence) or isinstance(raw_profile_ids, (str, bytes, bytearray)):
+            return ()
+        sketch_ids: List[str] = []
+        seen: Set[str] = set()
+        for raw_profile_id in raw_profile_ids:
+            sketch_id = _canonical_sketch_id(raw_profile_id)
+            if sketch_id and sketch_id not in seen:
+                seen.add(sketch_id)
+                sketch_ids.append(sketch_id)
+        return tuple(sketch_ids)
+
+    sketch_id = _canonical_sketch_id(tool_input.get("sketch_id"))
+    if not sketch_id:
+        return ()
+    return (sketch_id,)
 
 
 def _selected_extrude_profile_indices(tool_input: Mapping[str, Any]) -> Tuple[Optional[List[int]], Optional[str]]:
