@@ -666,6 +666,64 @@ TOOLS = [
         }
     },
     {
+        "name": "add_sketch_geometry_batch",
+        "description": "Add multiple independent line, arc, circle, or rectangle primitives to one existing sketch in a single Fusion execution. Use this for 2+ sketch primitives on the same already-created sketch. Do not include create_sketch, list_sketch_profiles, extrude/revolve/loft, holes, or feature operations.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "sketch_id": {
+                    "type": "string",
+                    "description": "ID of the existing sketch that all operations will modify."
+                },
+                "description": {
+                    "type": "string",
+                    "description": "Brief explanation of the grouped sketch geometry being added."
+                },
+                "operations": {
+                    "type": "array",
+                    "description": "Ordered independent sketch primitives. Every item must target the parent sketch_id and use operation add_line, add_arc, add_circle, or add_rectangle.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "operation": {
+                                "type": "string",
+                                "enum": ["add_line", "add_arc", "add_circle", "add_rectangle"],
+                                "description": "Primitive operation to execute."
+                            },
+                            "sketch_id": {
+                                "type": "string",
+                                "description": "Optional; when present, must match the parent sketch_id."
+                            },
+                            "start_u": {"type": "number", "description": "For add_line/add_arc: start U coordinate in cm."},
+                            "start_v": {"type": "number", "description": "For add_line/add_arc: start V coordinate in cm."},
+                            "end_u": {"type": "number", "description": "For add_line/add_arc: end U coordinate in cm."},
+                            "end_v": {"type": "number", "description": "For add_line/add_arc: end V coordinate in cm."},
+                            "center_u": {"type": "number", "description": "For add_circle/add_arc: center U coordinate in cm."},
+                            "center_v": {"type": "number", "description": "For add_circle/add_arc: center V coordinate in cm."},
+                            "radius": {"type": "number", "description": "For add_circle: radius in cm."},
+                            "corner1_u": {"type": "number", "description": "For add_rectangle: first corner U coordinate in cm."},
+                            "corner1_v": {"type": "number", "description": "For add_rectangle: first corner V coordinate in cm."},
+                            "corner2_u": {"type": "number", "description": "For add_rectangle: opposite corner U coordinate in cm."},
+                            "corner2_v": {"type": "number", "description": "For add_rectangle: opposite corner V coordinate in cm."},
+                            "line_id": {"type": "string", "description": "Optional stable alias for an add_line item."},
+                            "arc_id": {"type": "string", "description": "Optional stable alias for an add_arc item."},
+                            "circle_id": {"type": "string", "description": "Optional stable alias for an add_circle item."},
+                            "rectangle_id": {"type": "string", "description": "Optional stable alias for an add_rectangle item."},
+                            "description": {
+                                "type": "string",
+                                "description": "Optional item-level explanation."
+                            }
+                        },
+                        "required": ["operation"],
+                        "additionalProperties": False
+                    }
+                }
+            },
+            "required": ["sketch_id", "operations", "description"],
+            "additionalProperties": False
+        }
+    },
+    {
         "name": "list_sketch_profiles",
         "description": "List available closed profiles/regions in a sketch (Fusion 360 'profiles') so you can choose the correct profile_index/profile_indices for extrude/revolve.",
         "input_schema": {

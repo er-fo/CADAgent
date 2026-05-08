@@ -262,6 +262,7 @@ Prompt/tool cluster selection
   |     add_line
   |     add_arc
   |     add_rectangle
+  |     add_sketch_geometry_batch
   |     list_sketch_profiles
   |
   +-- construction
