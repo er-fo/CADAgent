@@ -19,6 +19,7 @@ from pathlib import Path
 import re
 import time
 from datetime import datetime, timezone
+from textwrap import indent
 from typing import Any, Dict, List, Mapping, NamedTuple, Optional, Sequence, Set, Tuple
 from uuid import uuid4
 
@@ -226,6 +227,15 @@ FEATURE_OPERATION_TOOLS = {
     "unsuppress_feature",
 }
 GEOMETRY_OPERATION_TOOLS = EDGE_OPERATION_TOOLS | FACE_OPERATION_TOOLS | BODY_OPERATION_TOOLS | FEATURE_OPERATION_TOOLS
+SKETCH_GEOMETRY_BATCH_TOOL = "add_sketch_geometry_batch"
+SKETCH_GEOMETRY_BATCH_OPERATION_TOOLS = {"add_line", "add_arc", "add_circle", "add_rectangle"}
+SKETCH_GEOMETRY_BATCH_FOLLOWUP_BLOCK_TOOLS = {
+    "list_sketch_profiles",
+    "extrude_profile",
+    "extrude",
+    "revolve_profile",
+    "create_loft",
+}
 
 # Tools that create or modify geometry and should trigger entity context refresh.
 # This ensures the LLM always has fresh entity refs (face_N, edge_N, body_N) after
@@ -3382,6 +3392,253 @@ async def _wait_for_matching_tool_result(
                 )
 
 
+def _coerce_sketch_geometry_batch_operations(tool_input: Mapping[str, Any]) -> Tuple[str, str, List[Dict[str, Any]]]:
+    """Normalize the public batch-tool shape into primitive tool calls."""
+    sketch_id = str(tool_input.get("sketch_id") or "").strip()
+    if not sketch_id:
+        raise SelectionToolCallError("add_sketch_geometry_batch requires a non-empty 'sketch_id'.")
+
+    description = str(tool_input.get("description") or "").strip()
+    raw_operations = tool_input.get("operations")
+    if not isinstance(raw_operations, Sequence) or isinstance(raw_operations, (str, bytes, bytearray)):
+        raise SelectionToolCallError("add_sketch_geometry_batch requires an 'operations' array.")
+    if not raw_operations:
+        raise SelectionToolCallError("add_sketch_geometry_batch requires at least one operation.")
+
+    operations: List[Dict[str, Any]] = []
+    for index, raw_operation in enumerate(raw_operations):
+        if not isinstance(raw_operation, Mapping):
+            raise SelectionToolCallError(f"Batch operation {index} must be an object.")
+        operation_name = str(raw_operation.get("operation") or raw_operation.get("tool_name") or "").strip()
+        if operation_name not in SKETCH_GEOMETRY_BATCH_OPERATION_TOOLS:
+            raise SelectionToolCallError(f"Unsupported batch operation '{operation_name}' at index {index}.")
+
+        operation_input = {
+            str(key): value
+            for key, value in raw_operation.items()
+            if key not in {"operation", "tool_name"}
+        }
+        item_sketch_id = str(operation_input.get("sketch_id") or sketch_id).strip()
+        if item_sketch_id != sketch_id:
+            raise SelectionToolCallError(
+                f"Batch operation {index} targets sketch '{item_sketch_id}', expected '{sketch_id}'."
+            )
+        operation_input["sketch_id"] = sketch_id
+        if description and not str(operation_input.get("description") or "").strip():
+            operation_input["description"] = description
+        operations.append({"name": operation_name, "input": operation_input})
+
+    return sketch_id, description, operations
+
+
+def _build_sketch_geometry_batch_code(prepared_operations: Sequence[Mapping[str, Any]], sketch_id: str) -> str:
+    """Build one Fusion Python payload that executes prepared sketch primitives in order."""
+    lines: List[str] = [
+        "# Batched sketch geometry operations",
+        "_batch_results = []",
+        "_batch_success_count = 0",
+    ]
+    for index, prepared in enumerate(prepared_operations):
+        operation_name = str(prepared.get("name") or "")
+        operation_code = str(prepared.get("code") or "").strip()
+        lines.extend(
+            [
+                f"# Batch item {index}: {operation_name}",
+                "try:",
+                indent(operation_code, "    "),
+                "    _op_result = dict(_result) if isinstance(_result, dict) else {\"message\": str(_result)}",
+                "    _op_success = bool(_op_result.get(\"success\", True))",
+                "    if _op_success:",
+                "        _batch_success_count += 1",
+                "    _batch_results.append({",
+                f"        \"index\": {index},",
+                f"        \"operation\": {json.dumps(operation_name)},",
+                "        \"success\": _op_success,",
+                "        \"result\": _op_result,",
+                "    })",
+                "except Exception as _exc:",
+                "    _batch_results.append({",
+                f"        \"index\": {index},",
+                f"        \"operation\": {json.dumps(operation_name)},",
+                "        \"success\": False,",
+                "        \"error\": str(_exc),",
+                "    })",
+            ]
+        )
+
+    batch_size = len(prepared_operations)
+    lines.extend(
+        [
+            f"_batch_size = {batch_size}",
+            "_result = {",
+            "    \"kind\": \"sketch_geometry_batch\",",
+            f"    \"sketch_id\": {json.dumps(sketch_id)},",
+            "    \"success\": _batch_success_count == _batch_size,",
+            "    \"batch_size\": _batch_size,",
+            "    \"success_count\": _batch_success_count,",
+            "    \"failure_count\": _batch_size - _batch_success_count,",
+            "    \"operations\": _batch_results,",
+            "}",
+            "",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _prepare_sketch_geometry_batch(
+    session_id: str,
+    manager: ConnectionManager,
+    tool_input: Mapping[str, Any],
+    ir_doc_state: IRDocumentState,
+    ir_attempt_history: Sequence[Any],
+    *,
+    metadata: Mapping[str, Any],
+) -> Tuple[str, str, List[Dict[str, Any]], str]:
+    """Validate and translate a batch request without mutating Fusion or committed IR state."""
+    sketch_id, description, operations = _coerce_sketch_geometry_batch_operations(tool_input)
+    prepared_operations: List[Dict[str, Any]] = []
+
+    for index, operation in enumerate(operations):
+        operation_name = str(operation["name"])
+        operation_input = dict(operation["input"])
+        operation_input = _canonicalize_sketch_tool_input(session_id, manager, operation_name, operation_input)
+
+        preflight_error = _preflight_face_sketch_uv_bounds(
+            session_id,
+            manager,
+            tool_name=operation_name,
+            tool_input=operation_input,
+        )
+        if preflight_error:
+            raise SelectionToolCallError(f"Batch operation {index} failed face-sketch preflight: {preflight_error}")
+
+        ir_tool_call = {
+            "name": operation_name,
+            "input": operation_input,
+        }
+        try:
+            ir_operation = map_tool_call_to_ir(
+                ir_tool_call,
+                ir_doc_state,
+                metadata=dict(metadata),
+                dependency_operations=_ir_dependency_lookup_operations(
+                    ir_doc_state,
+                    [*ir_attempt_history, *[item["ir_operation"] for item in prepared_operations]],
+                ),
+            )
+        except UnsupportedToolMappingError as exc:
+            raise SelectionToolCallError(str(exc)) from exc
+
+        validation_errors = validate_ir_candidate(ir_operation, ir_doc_state.operations)
+        if validation_errors:
+            raise SelectionToolCallError(
+                f"Batch operation {index} IR validation failed: " + "; ".join(validation_errors)
+            )
+
+        try:
+            operation_code = translate_tool_call(operation_name, operation_input)
+        except CodeGenerationError as exc:
+            raise SelectionToolCallError(f"Batch operation {index} code generation failed: {format_error_for_llm(exc)}") from exc
+
+        prepared_operations.append(
+            {
+                "name": operation_name,
+                "input": operation_input,
+                "ir_operation": ir_operation,
+                "code": operation_code,
+            }
+        )
+
+    return sketch_id, description, prepared_operations, _build_sketch_geometry_batch_code(prepared_operations, sketch_id)
+
+
+def _summarise_sketch_geometry_batch_result(result: Mapping[str, Any]) -> Tuple[bool, str]:
+    """Return a compact LLM-facing summary for a batched sketch execution result."""
+    success = bool(result.get("success", result.get("type") != "error"))
+    batch_size = int(result.get("batch_size") or 0)
+    success_count = int(result.get("success_count") or 0)
+    failure_count = int(result.get("failure_count") or max(batch_size - success_count, 0))
+    status = "succeeded" if success else "failed"
+    lines = [
+        f"Sketch geometry batch {status}: {success_count}/{batch_size} operations succeeded"
+        f" ({failure_count} failed)."
+    ]
+
+    operations = result.get("operations")
+    if isinstance(operations, list):
+        for item in operations:
+            if not isinstance(item, Mapping):
+                continue
+            index = item.get("index")
+            operation_name = item.get("operation")
+            item_success = bool(item.get("success", False))
+            if item_success:
+                raw_item_result = item.get("result")
+                alias = ""
+                if isinstance(raw_item_result, Mapping):
+                    alias = str(
+                        raw_item_result.get("line_id")
+                        or raw_item_result.get("arc_id")
+                        or raw_item_result.get("circle_id")
+                        or raw_item_result.get("rectangle_id")
+                        or ""
+                    ).strip()
+                suffix = f" ({alias})" if alias else ""
+                lines.append(f"- #{index} {operation_name}: ok{suffix}")
+            else:
+                error = str(item.get("error") or item.get("message") or "failed").strip()
+                lines.append(f"- #{index} {operation_name}: failed - {error}")
+
+    return success, "\n".join(lines)
+
+
+def _register_sketch_geometry_batch_results(
+    session_id: str,
+    manager: ConnectionManager,
+    result: Mapping[str, Any],
+) -> None:
+    operations = result.get("operations")
+    if not isinstance(operations, list):
+        return
+    fallback_sketch_id = str(result.get("sketch_id") or "").strip()
+    for item in operations:
+        if not isinstance(item, Mapping) or not bool(item.get("success", False)):
+            continue
+        operation_name = str(item.get("operation") or "").strip()
+        if operation_name not in SKETCH_GEOMETRY_BATCH_OPERATION_TOOLS:
+            continue
+        item_result = item.get("result")
+        if not isinstance(item_result, Mapping):
+            continue
+        registration_payload = dict(item_result)
+        if fallback_sketch_id and "sketch_id" not in registration_payload:
+            registration_payload["sketch_id"] = fallback_sketch_id
+        _register_sketch_result_entities(
+            session_id,
+            manager,
+            operation_name,
+            registration_payload,
+        )
+
+
+def _successful_batch_item_result(result: Mapping[str, Any], index: int) -> Optional[Mapping[str, Any]]:
+    operations = result.get("operations")
+    if not isinstance(operations, list):
+        return None
+    for item in operations:
+        if not isinstance(item, Mapping):
+            continue
+        try:
+            item_index = int(item.get("index"))
+        except (TypeError, ValueError):
+            continue
+        if item_index != index or not bool(item.get("success", False)):
+            continue
+        item_result = item.get("result")
+        return dict(item_result) if isinstance(item_result, Mapping) else dict(item)
+    return None
+
+
 async def _handle_list_features(
     session_id: str,
     manager: ConnectionManager,
@@ -4446,6 +4703,7 @@ async def _execute_workflow_loop(
         iteration_force_stop = False
         topology_mutation_executed = False
         face_sketches_created_this_turn: Set[str] = set()
+        sketch_geometry_batched_this_turn: Set[str] = set()
 
         # Clear per-iteration reasoning accumulator
         reasoning_buffer.clear()
@@ -4827,6 +5085,23 @@ async def _execute_workflow_loop(
                 )
                 continue
 
+            if tool_name in SKETCH_GEOMETRY_BATCH_FOLLOWUP_BLOCK_TOOLS:
+                followup_sketch_id = str(tool_input.get("sketch_id") or "").strip()
+                if followup_sketch_id and followup_sketch_id in sketch_geometry_batched_this_turn:
+                    defer_text = (
+                        f"Deferred '{tool_name}' after batched sketch geometry for sketch '{followup_sketch_id}'. "
+                        "Wait for the next turn so the completed sketch geometry/profile state can be observed before downstream operations."
+                    )
+                    messages.append(_tool_result_message(tool_use_id, defer_text))
+                    logger.warning(
+                        "Session %s deferred '%s' after sketch geometry batch for '%s' in iteration %d",
+                        session_id,
+                        tool_name,
+                        followup_sketch_id,
+                        iteration + 1,
+                    )
+                    continue
+
             if tool_name in TOPOLOGY_MUTATING_TOOLS:
                 if topology_mutation_executed:
                     defer_text = (
@@ -4842,6 +5117,159 @@ async def _execute_workflow_loop(
                     )
                     continue
                 topology_mutation_executed = True
+
+            if tool_name == SKETCH_GEOMETRY_BATCH_TOOL:
+                if execution_target == "build123d":
+                    unsupported_text = _unsupported_build123d_tool_text(tool_name)
+                    await _send_error(manager, session_id, "Unsupported build123d tool", unsupported_text)
+                    messages.append(_tool_result_message(tool_use_id, unsupported_text, is_error=True))
+                    iteration_had_failure = True
+                    if iteration_first_failure_intent is None:
+                        iteration_first_failure_intent = tool_intent_key
+                    continue
+
+                batch_sketch_id = str(tool_input.get("sketch_id") or "").strip()
+                if batch_sketch_id and batch_sketch_id in face_sketches_created_this_turn:
+                    defer_text = (
+                        f"Deferred '{tool_name}' for sketch '{batch_sketch_id}'. "
+                        "This sketch was just created on a model face in the same turn. "
+                        "Wait for the next turn so orientation/bounds feedback can guide placement before adding geometry."
+                    )
+                    messages.append(_tool_result_message(tool_use_id, defer_text))
+                    logger.warning(
+                        "Session %s deferred face-sketch batch '%s' in iteration %d",
+                        session_id,
+                        batch_sketch_id,
+                        iteration + 1,
+                    )
+                    continue
+
+                ir_metadata = {
+                    "source": "studio" if execution_target == "build123d" else "fusion",
+                    "request_id": str((request or {}).get("request_id") or ""),
+                    "iteration": iteration + 1,
+                }
+                try:
+                    sketch_id, batch_description, prepared_batch, batch_code = _prepare_sketch_geometry_batch(
+                        session_id,
+                        manager,
+                        tool_input,
+                        ir_doc_state,
+                        ir_attempt_history,
+                        metadata=ir_metadata,
+                    )
+                except SelectionToolCallError as exc:
+                    error_text = str(exc)
+                    await _send_error(manager, session_id, "Sketch geometry batch validation failed", error_text)
+                    messages.append(_tool_result_message(tool_use_id, error_text, is_error=True))
+                    iteration_had_failure = True
+                    if iteration_first_failure_intent is None:
+                        iteration_first_failure_intent = _build_failure_intent_key(
+                            tool_name,
+                            tool_input,
+                            error_text,
+                        )
+                    continue
+
+                for prepared in prepared_batch:
+                    ir_attempt_history.append(prepared["ir_operation"])
+
+                execute_payload = {
+                    "type": "execute_code",
+                    "code": batch_code,
+                    "operation": SKETCH_GEOMETRY_BATCH_TOOL,
+                    "tool_use_id": tool_use_id,
+                    "description": batch_description or description,
+                }
+                await _send_message_safe(manager, session_id, execute_payload)
+
+                try:
+                    result = await _wait_for_matching_tool_result(
+                        session_id,
+                        manager,
+                        tool_name=SKETCH_GEOMETRY_BATCH_TOOL,
+                        tool_use_id=tool_use_id,
+                        timeout=EXECUTION_TIMEOUT,
+                        wait_context="execute_code",
+                    )
+                except asyncio.TimeoutError:
+                    error_text = (
+                        f"Timed out waiting for Fusion to execute '{SKETCH_GEOMETRY_BATCH_TOOL}' "
+                        f"(tool_use_id={tool_use_id})."
+                    )
+                    await _send_error(manager, session_id, "Fusion execution timeout", error_text)
+                    messages.append(_tool_result_message(tool_use_id, error_text, is_error=True))
+                    iteration_had_failure = True
+                    if iteration_first_failure_intent is None:
+                        iteration_first_failure_intent = tool_intent_key
+                    logger.error("Session %s timed out waiting for sketch geometry batch result", session_id)
+                    continue
+
+                _register_sketch_geometry_batch_results(session_id, manager, result)
+                success, result_text = _summarise_sketch_geometry_batch_result(result)
+                messages.append(_tool_result_message(tool_use_id, result_text, is_error=not success))
+
+                committed_any_batch_operation = False
+                for index, prepared in enumerate(prepared_batch):
+                    item_raw_result = _successful_batch_item_result(result, index)
+                    if not item_raw_result:
+                        continue
+                    committed_op = _operation_with_target_result(
+                        prepared["ir_operation"],
+                        target="fusion",
+                        success=True,
+                        message=result_text,
+                        data={
+                            "tool_name": prepared["name"],
+                            "tool_input": dict(prepared["input"]),
+                            "batch_tool_use_id": tool_use_id,
+                            "batch_sketch_id": sketch_id,
+                        },
+                        raw_result=item_raw_result,
+                    )
+                    _append_committed_ir_operation(manager, session_id, ir_doc_state, committed_op)
+                    await _emit_committed_ir_operation(
+                        manager,
+                        session_id,
+                        target=execution_target,
+                        operation=committed_op,
+                    )
+                    committed_any_batch_operation = True
+
+                if success:
+                    iteration_had_success = True
+                    sketch_geometry_batched_this_turn.add(sketch_id)
+                    logger.info(
+                        "Session %s sketch geometry batch completed successfully with %d operations",
+                        session_id,
+                        len(prepared_batch),
+                    )
+                else:
+                    iteration_had_failure = True
+                    if committed_any_batch_operation:
+                        iteration_had_success = True
+                        sketch_geometry_batched_this_turn.add(sketch_id)
+                    if iteration_first_failure_intent is None:
+                        iteration_first_failure_intent = _build_failure_intent_key(
+                            tool_name,
+                            tool_input,
+                            result_text,
+                        )
+                    await _send_error(manager, session_id, "Sketch geometry batch execution failed", result_text)
+
+                if committed_any_batch_operation:
+                    await _capture_operation_checkpoint(
+                        session_id,
+                        manager,
+                        request=request,
+                        tool_name=SKETCH_GEOMETRY_BATCH_TOOL,
+                        tool_use_id=tool_use_id,
+                        description=batch_description or description,
+                        messages=messages,
+                        ir_doc_state=ir_doc_state,
+                        force_snapshot_refresh=False,
+                    )
+                continue
 
             if tool_name in IR_ROUTED_TOOLS or (
                 execution_target == "build123d" and tool_name in BUILD123D_FEATURE_IR_ROUTED_TOOLS

@@ -91,6 +91,13 @@ CAD_TOOL_CAPABILITIES: Dict[str, ToolCapability] = {
         build123d_status="supported",
         build123d_reason="Translated to build123d Rectangle on the active sketch plane.",
     ),
+    "add_sketch_geometry_batch": ToolCapability(
+        tool_name="add_sketch_geometry_batch",
+        ir_operation="add_line/add_arc/add_circle/add_rectangle",
+        category="sketch",
+        build123d_status="fusion_only",
+        build123d_reason="Batch tool is a Fusion execution optimization; portable IR still stores each primitive as its existing sketch operation.",
+    ),
     "list_sketch_profiles": ToolCapability(
         tool_name="list_sketch_profiles",
         ir_operation="list_sketch_profiles",

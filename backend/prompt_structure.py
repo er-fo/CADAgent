@@ -139,13 +139,13 @@ PROMPT VERSION: {PROMPT_VERSION}
 WORKING MODE:
 - You execute operations and observe results iteratively
 - After each step, you receive confirmation or an error message
-- **SKETCH BATCHING RULE**: When building sketch geometry, you SHOULD execute multiple sketch commands (add_line, add_circle, add_arc, add_rectangle) in a SINGLE response to construct complete profiles efficiently
-  - Example: To draw an L-profile, call add_line 6 times in one response (one call per line segment)
-  - Example: To create 4 circles for a pattern, call add_circle 4 times in one response
+- **SKETCH BATCHING RULE**: When building 2+ independent sketch primitives on an existing sketch, use `add_sketch_geometry_batch` to submit add_line/add_circle/add_arc/add_rectangle items in one tool call.
+  - Example: To draw an L-profile, call add_sketch_geometry_batch with 6 add_line items.
+  - Example: To create 4 circles for a pattern, call add_sketch_geometry_batch with 4 add_circle items.
   - This reduces iteration overhead and creates atomic sketch operations
   - **EXCEPTION - FACE SKETCHES (MANDATORY TWO-STEP FLOW)**: If `create_sketch` targets `face_N`, stop after `create_sketch` in that response.
     - Wait for the returned sketch orientation/plane feedback.
-    - In the NEXT response, place sketch geometry (`add_rectangle`/`add_circle`/etc.) and only then extrude/cut.
+    - In the NEXT response, place sketch geometry (`add_sketch_geometry_batch`, `add_rectangle`, `add_circle`, etc.) and only then extrude/cut.
     - Never batch `create_sketch(face_*)` + sketch geometry + `extrude_profile` in one turn.
   - **EXCEPTION - HOLES**: For holes (through-holes, counterbores, tapped holes), NEVER sketch circles. Use create_simple_hole, create_counterbore_hole, or create_tapped_hole instead.
 - **NON-SKETCH OPERATIONS**: For non-sketch operations (extrude, fillet, feature creation), execute one at a time and observe results
@@ -751,17 +751,17 @@ CLUSTER_TOOL_MAPPING = {
 - Final response: respond normally without a tool when ready to answer or ask one clarifying question."""
     },
     "sketch_tools": {
-        "tools": ["create_sketch", "add_circle", "add_line", "add_arc", "add_rectangle", "list_sketch_profiles"],
+        "tools": ["create_sketch", "add_circle", "add_line", "add_arc", "add_rectangle", "add_sketch_geometry_batch", "list_sketch_profiles"],
         "description": "2D sketch creation and geometry",
         "documentation": """
 SKETCH EXECUTION STRATEGY:
-- **BATCH SKETCH COMMANDS**: Execute multiple add_line/add_circle/add_arc/add_rectangle calls in a SINGLE response
-  - For complex profiles (L-shapes, polygons): Issue all add_line calls together (6 lines = 6 tool calls in one response)
-  - For multiple circular features (decorative rings, boss outlines): Issue all add_circle calls together
+- **BATCH SKETCH COMMANDS**: Use add_sketch_geometry_batch for 2+ independent add_line/add_circle/add_arc/add_rectangle primitives on the same existing sketch
+  - For complex profiles (L-shapes, polygons): one add_sketch_geometry_batch call with all line items
+  - For multiple circular features (decorative rings, boss outlines): one add_sketch_geometry_batch call with all circle items
   - This is MORE efficient and creates cleaner atomic operations
   - EXCEPTION: If `create_sketch` uses `face_N`, use TWO turns:
     1) turn A: only `create_sketch(face_N, ...)`
-    2) turn B: place geometry (`add_rectangle`/`add_circle`/...) after reviewing orientation feedback
+    2) turn B: place geometry (`add_sketch_geometry_batch`, `add_rectangle`, `add_circle`, ...) after reviewing orientation feedback
     - Do not batch face-sketch creation with geometry/extrude in the same turn.
 
 - **HOLES - DO NOT SKETCH**: For ANY hole (through, blind, counterbore, tapped), use hole tools (create_simple_hole, create_counterbore_hole, create_tapped_hole). NEVER sketch circles and extrude-cut for holes.
@@ -779,6 +779,7 @@ TOOL REFERENCE:
 - add_line: Use 2D sketch coordinates (u, v) in cm for start/end points, not 3D world coordinates
 - add_rectangle: Use 2D sketch coordinates (u, v) in cm for corner points, not 3D world coordinates
   - For wall cutouts/ports on `face_N`, keep rectangle corners inside the selected face bounds before extruding.
+- add_sketch_geometry_batch: Use only after the target sketch already exists; every operation must target the same sketch_id and must be add_line/add_arc/add_circle/add_rectangle.
 - list_sketch_profiles: Use after sketching overlapping primitives to see all profile indices/regions before extruding; then extrude with profile_indices=[0,1,...,N-1] to get the full combined shape.
   - If you use profile_indices, omit profile_index from the tool input entirely (do not include defaults or empty arrays)."""
     },
