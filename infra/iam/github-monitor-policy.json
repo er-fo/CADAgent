@@ -1,0 +1,24 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ReadBackendLegacyLogs",
+      "Effect": "Allow",
+      "Action": [
+        "logs:FilterLogEvents",
+        "logs:DescribeLogGroups",
+        "logs:DescribeLogStreams"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "ReadBackendLegacyDeployments",
+      "Effect": "Allow",
+      "Action": [
+        "codedeploy:GetDeployment",
+        "codedeploy:ListDeployments"
+      ],
+      "Resource": "*"
+    }
+  ]
+}
