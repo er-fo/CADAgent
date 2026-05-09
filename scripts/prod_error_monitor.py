@@ -314,7 +314,7 @@ class CodeDeployClient:
     def __init__(self, region: str):
         import boto3
 
-        self.client = boto3.client("deploy", region_name=region)
+        self.client = boto3.client("codedeploy", region_name=region)
 
     def related_updates(self, config: MonitorConfig, since: datetime, until: datetime) -> list[ProductionUpdate]:
         updates: list[ProductionUpdate] = []

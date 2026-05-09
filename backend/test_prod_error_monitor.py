@@ -134,6 +134,21 @@ def test_github_workflow_runs_are_converted_to_production_updates():
     ]
 
 
+def test_codedeploy_client_uses_boto3_codedeploy_service(monkeypatch):
+    calls = []
+
+    class FakeBoto3:
+        def client(self, service_name, region_name):
+            calls.append((service_name, region_name))
+            return object()
+
+    monkeypatch.setitem(__import__("sys").modules, "boto3", FakeBoto3())
+
+    monitor.CodeDeployClient("eu-north-1")
+
+    assert calls == [("codedeploy", "eu-north-1")]
+
+
 def test_warning_fingerprint_requires_three_new_occurrences():
     config = monitor.MonitorConfig()
 
