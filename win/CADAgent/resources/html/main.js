@@ -7602,9 +7602,9 @@ const REASONING_DEFAULTS = {
 // Keep this list in sync with any new model options.
 const MODEL_PROVIDER_MAP = {
     // OpenAI
-    'gpt-5': 'openai',
+    'gpt-5.5': 'openai',
     'gpt-5.4': 'openai',
-    'gpt-5-mini': 'openai',
+    'gpt-5.4-mini': 'openai',
     'o1': 'openai',
     'o1-mini': 'openai',
     'o3': 'openai',

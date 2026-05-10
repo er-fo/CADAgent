@@ -6,7 +6,7 @@
     "description": {
         "": "AI-powered CAD modeling assistant that executes natural language requests through a WebSocket backend connection."
     },
-    "version": "1.0.0",
+    "version": "1.1.2",
     "runOnStartup": true,
     "supportedOS": "windows|mac",
     "editEnabled": true

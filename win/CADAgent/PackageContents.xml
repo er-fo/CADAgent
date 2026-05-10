@@ -4,7 +4,7 @@
     AutodeskProduct="Fusion360"
     Name="CADAgent"
     Description="AI-powered CAD modeling assistant that executes natural language requests"
-    AppVersion="1.0.0"
+    AppVersion="1.1.2"
     ProductType="Application"
     Author="CADAgent Team"
     ProductCode="{CAD-AGENT-WIN-0001-BUNDLE}"
@@ -12,6 +12,6 @@
     <CompanyDetails Name="CADAgent" Url="https://github.com/er-fo/CADAgent" />
     <Components>
         <RuntimeRequirements OS="Win64" Platform="Fusion360" />
-        <ComponentEntry AppName="CADAgent" Version="1.0.0" ModuleName="./Contents/CADAgent.py"/>
+        <ComponentEntry AppName="CADAgent" Version="1.1.2" ModuleName="./Contents/CADAgent.py"/>
     </Components>
 </ApplicationPackage>
