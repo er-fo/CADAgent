@@ -24,6 +24,8 @@ import uuid
 import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+from urllib import error as urllib_error
+from urllib import request as urllib_request
 
 import adsk.core
 import adsk.fusion
@@ -835,6 +837,20 @@ class AgentController:
                 'build_plan_completed',
                 doc_id=doc_id,
                 data=message.get("data", {}),
+            )
+        elif message_type == "external_part_lookup_result":
+            payload = {key: value for key, value in message.items() if key != "type"}
+            self._palette_manager.send_message(
+                'external_part_lookup_result',
+                doc_id=doc_id,
+                **payload,
+            )
+        elif message_type == "external_part_correction_result":
+            payload = {key: value for key, value in message.items() if key != "type"}
+            self._palette_manager.send_message(
+                'external_part_correction_result',
+                doc_id=doc_id,
+                **payload,
             )
         elif message_type == "authentication_ack":
             # Forward authentication acknowledgment to palette with API keys status
@@ -3087,6 +3103,135 @@ class AgentController:
                         logger.warning(f"Failed to update API keys on connection: {e}")
 
         return success
+
+    def submit_external_part_correction(
+        self,
+        *,
+        part_id: str,
+        field: str,
+        value: Any,
+        reason: Optional[str] = None,
+        source: str = "fusion_addin",
+        context: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Submit an explicit external-part correction to the backend REST API."""
+        if not part_id:
+            raise ValueError("part_id is required")
+        if not field:
+            raise ValueError("field is required")
+
+        payload: Dict[str, Any] = {
+            "part_id": part_id,
+            "field": field,
+            "value": value,
+            "reason": reason or None,
+            "corrected_by": self.get_user_email(),
+            "source": source,
+            "context": context or {},
+        }
+
+        request_url = config.build_http_url("/external-parts/correct")
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        }
+
+        if self._auth_client:
+            token = self._auth_client.get_valid_access_token()
+            if token:
+                headers["Authorization"] = f"Bearer {token}"
+
+        body = json.dumps(payload).encode("utf-8")
+        request = urllib_request.Request(request_url, data=body, headers=headers, method="POST")
+
+        try:
+            with urllib_request.urlopen(request, timeout=20) as response:
+                response_body = response.read().decode("utf-8") if response else ""
+            data = json.loads(response_body) if response_body else {}
+            return {
+                "success": True,
+                "status": data.get("status", "corrected"),
+                "part": data.get("part"),
+                "message": "Correction submitted.",
+            }
+        except urllib_error.HTTPError as exc:
+            raw = exc.read().decode("utf-8", errors="replace") if hasattr(exc, "read") else ""
+            try:
+                data = json.loads(raw) if raw else {}
+            except Exception:
+                data = {}
+            detail = data.get("detail") if isinstance(data, dict) else None
+            return {
+                "success": False,
+                "message": detail or f"Correction request failed ({exc.code}).",
+            }
+        except Exception as exc:
+            logger.exception("External-part correction request failed")
+            return {
+                "success": False,
+                "message": f"Correction request failed: {exc}",
+            }
+
+    def lookup_external_part(
+        self,
+        *,
+        query: str,
+        required_fields: Optional[List[str]] = None,
+        context: Optional[str] = None,
+        source: str = "fusion_addin",
+        refresh: bool = False,
+    ) -> Dict[str, Any]:
+        """Call the backend REST lookup endpoint for external-part facts."""
+        if not query:
+            raise ValueError("query is required")
+
+        payload: Dict[str, Any] = {
+            "query": query,
+            "required_fields": required_fields or [],
+            "context": context,
+            "source": source,
+            "refresh": bool(refresh),
+        }
+
+        request_url = config.build_http_url("/external-parts/lookup")
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        }
+
+        if self._auth_client:
+            token = self._auth_client.get_valid_access_token()
+            if token:
+                headers["Authorization"] = f"Bearer {token}"
+
+        body = json.dumps(payload).encode("utf-8")
+        request = urllib_request.Request(request_url, data=body, headers=headers, method="POST")
+
+        try:
+            with urllib_request.urlopen(request, timeout=20) as response:
+                response_body = response.read().decode("utf-8") if response else ""
+            data = json.loads(response_body) if response_body else {}
+            data["success"] = True
+            return data
+        except urllib_error.HTTPError as exc:
+            raw = exc.read().decode("utf-8", errors="replace") if hasattr(exc, "read") else ""
+            try:
+                data = json.loads(raw) if raw else {}
+            except Exception:
+                data = {}
+            detail = data.get("detail") if isinstance(data, dict) else None
+            return {
+                "success": False,
+                "status": "error",
+                "message": detail or f"Lookup request failed ({exc.code}).",
+            }
+        except Exception as exc:
+            logger.exception("External-part lookup request failed")
+            return {
+                "success": False,
+                "status": "error",
+                "message": f"Lookup request failed: {exc}",
+            }
 
     def get_api_keys_for_backend(self) -> Dict[str, str]:
         """

@@ -8,6 +8,7 @@ core code.
 
 import os
 from pathlib import Path
+from urllib.parse import urlparse
 
 def _strip_inline_env_comment(value: str) -> str:
     """Strip inline comments from unquoted env values."""
@@ -101,6 +102,34 @@ def backend_label() -> str:
         scheme = "wss" if BACKEND_USE_SSL else "ws"
         port = f":{BACKEND_PORT}" if BACKEND_PORT else ""
         return f"{scheme}://{BACKEND_HOST}{port}"
+
+
+def build_http_base_url() -> str:
+    """Return the HTTP(S) base URL that corresponds to the configured backend."""
+    if BACKEND_URL:
+        raw = BACKEND_URL.format(session_id="session") if "{session_id}" in BACKEND_URL else BACKEND_URL
+        parsed = urlparse(raw)
+        if parsed.scheme and parsed.netloc:
+            scheme = "https" if parsed.scheme == "wss" else "http" if parsed.scheme == "ws" else parsed.scheme
+            return f"{scheme}://{parsed.netloc}"
+        base = raw.rstrip("/")
+        if base.endswith("/ws/session"):
+            base = base[: -len("/ws/session")]
+        elif base.endswith("/ws"):
+            base = base[: -len("/ws")]
+        return base
+
+    scheme = "https" if BACKEND_USE_SSL else "http"
+    port = ""
+    if BACKEND_PORT:
+        if not ((scheme == "https" and BACKEND_PORT in ("443", "")) or (scheme == "http" and BACKEND_PORT == "80")):
+            port = f":{BACKEND_PORT}"
+    return f"{scheme}://{BACKEND_HOST}{port}"
+
+
+def build_http_url(path: str) -> str:
+    """Build an HTTP(S) URL for REST endpoints on the configured backend."""
+    return f"{build_http_base_url().rstrip('/')}/{path.lstrip('/')}"
 
 # UI Configuration
 WORKSPACE_ID = "FusionSolidEnvironment"

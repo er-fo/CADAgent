@@ -340,6 +340,55 @@
     </div>
   </div>
 
+  <!-- External Part Correction Overlay -->
+  <div id="externalPartCorrectionModal" class="login-overlay api-keys-overlay hidden">
+    <div class="login-overlay-backdrop"></div>
+    <div class="login-panel api-keys-panel external-part-panel">
+      <div class="login-brand">
+        <div class="brand-container">
+          <span class="brand-name">Correct part fact</span>
+        </div>
+        <button type="button" id="closeExternalPartCorrectionBtn" class="close-modal-btn" aria-label="Close">
+          X
+        </button>
+      </div>
+
+      <div class="login-copy">
+        <h2 id="externalPartCorrectionTitle">Correct cached part data</h2>
+        <p class="lede">Use this only when the cached fact is wrong. Corrections are explicit, auditable, and sent to the backend.</p>
+      </div>
+
+      <form id="externalPartCorrectionForm" class="login-form" novalidate>
+        <div class="login-section">
+          <label class="field-label" for="externalPartNameInput">Part name</label>
+          <input type="text" id="externalPartNameInput" readonly class="key-input external-part-readonly" />
+        </div>
+
+        <div class="login-section">
+          <label class="field-label" for="externalPartFieldInput">Field</label>
+          <input type="text" id="externalPartFieldInput" placeholder="e.g. width_mm" class="key-input" />
+        </div>
+
+        <div class="login-section">
+          <label class="field-label" for="externalPartValueInput">Correct value</label>
+          <input type="text" id="externalPartValueInput" placeholder="Enter the correct value" class="key-input" />
+        </div>
+
+        <div class="login-section">
+          <label class="field-label" for="externalPartReasonInput">Reason (optional)</label>
+          <textarea id="externalPartReasonInput" rows="3" placeholder="Why is the cached fact wrong?"></textarea>
+        </div>
+
+        <div id="externalPartCorrectionStatus" class="login-status hidden" role="status" aria-live="polite"></div>
+
+        <div class="api-keys-actions external-part-actions">
+          <button type="button" id="cancelExternalPartCorrectionBtn" class="btn-secondary btn-block">Cancel</button>
+          <button type="submit" id="submitExternalPartCorrectionBtn" class="btn-primary btn-block">Submit correction</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
   <script>
     window.SPACE_BACKEND_CONFIG = null;
     window.SPACE_APP_VERSION = 'v0.1.0';

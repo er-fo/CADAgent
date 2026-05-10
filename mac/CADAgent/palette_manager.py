@@ -934,6 +934,53 @@ class HTMLEventHandler(adsk.core.HTMLEventHandler):
                         logger.warning("Cannot forward send_to_backend: backend not connected")
                         self._palette_manager.send_error('Backend not connected', doc_id=self._controller.get_active_doc_id())
 
+            elif action_name == 'submit_external_part_correction':
+                logger.info("← submit_external_part_correction request received")
+                correction = payload.get('correction')
+                if not isinstance(correction, dict):
+                    logger.warning("submit_external_part_correction missing correction payload")
+                    self._palette_manager.send_message(
+                        'external_part_correction_result',
+                        success=False,
+                        message='Invalid correction payload'
+                    )
+                else:
+                    def _do_submit_correction():
+                        result = self._controller.submit_external_part_correction(
+                            part_id=str(correction.get('part_id') or correction.get('fact_id') or ''),
+                            field=str(correction.get('field') or ''),
+                            value=correction.get('value'),
+                            reason=correction.get('reason'),
+                            context={"request_id": correction.get("request_id")},
+                        )
+                        self._palette_manager.send_message('external_part_correction_result', **result)
+
+                    threading.Thread(target=_do_submit_correction, daemon=True).start()
+
+            elif action_name == 'submit_external_part_lookup':
+                logger.info("← submit_external_part_lookup request received")
+                lookup = payload.get('lookup')
+                if not isinstance(lookup, dict):
+                    logger.warning("submit_external_part_lookup missing lookup payload")
+                    self._palette_manager.send_message(
+                        'external_part_lookup_result',
+                        success=False,
+                        status='error',
+                        message='Invalid lookup payload'
+                    )
+                else:
+                    def _do_submit_lookup():
+                        result = self._controller.lookup_external_part(
+                            query=str(lookup.get('query') or ''),
+                            required_fields=list(lookup.get('required_fields') or []),
+                            context=lookup.get('context'),
+                            source=str(lookup.get('source') or 'fusion_addin'),
+                            refresh=bool(lookup.get('refresh', False)),
+                        )
+                        self._palette_manager.send_message('external_part_lookup_result', **result)
+
+                    threading.Thread(target=_do_submit_lookup, daemon=True).start()
+
             elif action_name == 'send_magic_link':
                 email = payload.get('email', '').strip()
                 logger.info(f"← Send magic link request received (email={email})")
