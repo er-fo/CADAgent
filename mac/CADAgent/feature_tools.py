@@ -11,6 +11,7 @@ from __future__ import annotations
 import datetime
 import logging
 import math
+import re
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
 import adsk.core
@@ -3461,6 +3462,1069 @@ def _require_design(app: Optional[adsk.core.Application]) -> adsk.fusion.Design:
     return design
 
 
+def _native_if_proxy(entity: Any) -> Any:
+    try:
+        native = getattr(entity, "nativeObject", None)
+        return native or entity
+    except Exception:
+        return entity
+
+
+def _assembly_context(entity: Any) -> Optional[adsk.fusion.Occurrence]:
+    for obj in (entity, getattr(entity, "body", None)):
+        try:
+            occurrence = getattr(obj, "assemblyContext", None)
+            if occurrence:
+                return occurrence
+        except Exception:
+            continue
+    return None
+
+
+def _component_for_entity(entity: Any, root_component: adsk.fusion.Component) -> adsk.fusion.Component:
+    occurrence = _assembly_context(entity)
+    if occurrence and getattr(occurrence, "component", None):
+        return occurrence.component
+
+    body = getattr(entity, "body", None)
+    if body and getattr(body, "parentComponent", None):
+        return body.parentComponent
+
+    parent_component = getattr(entity, "parentComponent", None)
+    if parent_component:
+        return parent_component
+
+    return root_component
+
+
+def _same_occurrence(left: Any, right: Any) -> bool:
+    if left is right:
+        return True
+    if left is None or right is None:
+        return left is None and right is None
+    return bool(getattr(left, "entityToken", None)) and getattr(left, "entityToken", None) == getattr(right, "entityToken", None)
+
+
+def _resolve_entity_by_token(
+    design: adsk.fusion.Design,
+    token: str,
+    caster: Any,
+    label: str,
+) -> Any:
+    cleaned = str(token or "").strip()
+    if not cleaned:
+        raise FeatureOperationError(f"{label} token cannot be empty.")
+
+    try:
+        entities = design.findEntityByToken(cleaned)
+    except Exception as exc:
+        raise FeatureOperationError(f"Failed to resolve {label} token '{cleaned}': {exc}") from exc
+
+    if not entities or len(entities) == 0:
+        raise FeatureOperationError(f"{label} token '{cleaned}' was not found in the active design.")
+
+    entity = caster(entities[0]) if callable(caster) else entities[0]
+    if not entity:
+        object_type = getattr(entities[0], "objectType", type(entities[0]).__name__)
+        raise FeatureOperationError(
+            f"Token '{cleaned}' does not resolve to a supported {label}. Resolved object type: {object_type}."
+        )
+    return entity
+
+
+def _resolve_entities_with_shared_context(
+    design: adsk.fusion.Design,
+    tokens: Sequence[str],
+    caster: Any,
+    label: str,
+) -> Tuple[List[Any], adsk.fusion.Component]:
+    cleaned_tokens = [str(token).strip() for token in tokens if isinstance(token, str) and str(token).strip()]
+    if not cleaned_tokens:
+        raise FeatureOperationError(f"{label} token list cannot be empty.")
+
+    root_component = design.rootComponent
+    resolved: List[Any] = []
+    inferred_component: Optional[adsk.fusion.Component] = None
+    inferred_occurrence: Optional[adsk.fusion.Occurrence] = None
+
+    for cleaned in cleaned_tokens:
+        entity = _resolve_entity_by_token(design, cleaned, caster, label)
+        entity_for_feature = _native_if_proxy(entity)
+        candidate_component = _component_for_entity(entity, root_component)
+        candidate_occurrence = _assembly_context(entity)
+
+        if inferred_component is None:
+            inferred_component = candidate_component
+            inferred_occurrence = candidate_occurrence
+        else:
+            if candidate_component != inferred_component:
+                raise FeatureOperationError(
+                    f"{label.capitalize()} tokens span multiple components. Use one component per {label} operation."
+                )
+            if not _same_occurrence(candidate_occurrence, inferred_occurrence):
+                raise FeatureOperationError(
+                    f"{label.capitalize()} tokens span multiple occurrences. Use one occurrence per {label} operation."
+                )
+
+        resolved.append(entity_for_feature)
+
+    return resolved, inferred_component or root_component
+
+
+def _iter_components(root_component: adsk.fusion.Component) -> Sequence[adsk.fusion.Component]:
+    components: List[adsk.fusion.Component] = []
+    seen: Set[str] = set()
+    queue: List[adsk.fusion.Component] = [root_component]
+
+    while queue:
+        component = queue.pop(0)
+        key = str(getattr(component, "entityToken", None) or id(component))
+        if key in seen:
+            continue
+        seen.add(key)
+        components.append(component)
+
+        occurrences = getattr(component, "occurrences", None)
+        count = getattr(occurrences, "count", 0) if occurrences else 0
+        for index in range(count):
+            try:
+                occurrence = occurrences.item(index)
+            except Exception:
+                continue
+            child_component = getattr(occurrence, "component", None)
+            if child_component is not None:
+                queue.append(child_component)
+
+    return components
+
+
+def _name_matches(obj: Any, expected: str) -> bool:
+    for attr in ("name",):
+        try:
+            value = getattr(obj, attr, None)
+            if value == expected:
+                return True
+        except Exception:
+            continue
+
+    timeline_object = getattr(obj, "timelineObject", None)
+    if timeline_object:
+        try:
+            return getattr(timeline_object, "name", None) == expected
+        except Exception:
+            return False
+    return False
+
+
+def _resolve_named_construction_plane(
+    root_component: adsk.fusion.Component,
+    plane_ref: str,
+) -> Optional[adsk.fusion.ConstructionPlane]:
+    matches: List[adsk.fusion.ConstructionPlane] = []
+
+    for component in _iter_components(root_component):
+        planes = getattr(component, "constructionPlanes", None)
+        count = getattr(planes, "count", 0) if planes else 0
+        for index in range(count):
+            try:
+                plane = planes.item(index)
+            except Exception:
+                continue
+            if plane and _name_matches(plane, plane_ref):
+                matches.append(plane)
+
+    if len(matches) > 1:
+        raise FeatureOperationError(
+            f"Construction plane reference '{plane_ref}' is ambiguous. Use an exact token or unique plane id."
+        )
+    return matches[0] if matches else None
+
+
+def _is_planar_face(face: adsk.fusion.BRepFace) -> bool:
+    try:
+        return adsk.core.Plane.cast(getattr(face, "geometry", None)) is not None
+    except Exception:
+        return False
+
+
+def _resolve_plane_reference(
+    design: adsk.fusion.Design,
+    plane_ref: str,
+    *,
+    label: str,
+) -> Any:
+    cleaned = str(plane_ref or "").strip()
+    if not cleaned:
+        raise FeatureOperationError(f"{label} reference cannot be empty.")
+
+    root_component = design.rootComponent
+    datum_key = cleaned.upper()
+    if datum_key == "XY":
+        return root_component.xYConstructionPlane
+    if datum_key == "XZ":
+        return root_component.xZConstructionPlane
+    if datum_key == "YZ":
+        return root_component.yZConstructionPlane
+
+    try:
+        resolved = design.findEntityByToken(cleaned)
+    except Exception:
+        resolved = None
+
+    if resolved:
+        plane = adsk.fusion.ConstructionPlane.cast(resolved[0])
+        if plane:
+            return _native_if_proxy(plane)
+
+        face = adsk.fusion.BRepFace.cast(resolved[0])
+        if face:
+            face = _native_if_proxy(face)
+            if not _is_planar_face(face):
+                raise FeatureOperationError(
+                    f"{label} reference '{cleaned}' resolved to a non-planar face. A planar face or construction plane is required."
+                )
+            return face
+
+    named_plane = _resolve_named_construction_plane(root_component, cleaned)
+    if named_plane:
+        return named_plane
+
+    raise FeatureOperationError(
+        f"Unsupported {label} reference '{cleaned}'. Use XY/XZ/YZ, a planar face token, or an exact resolvable construction plane."
+    )
+
+
+def _resolve_sketch(root_component: adsk.fusion.Component, sketch_id: str) -> adsk.fusion.Sketch:
+    cleaned = str(sketch_id or "").strip()
+    if not cleaned:
+        raise FeatureOperationError("Sketch id cannot be empty.")
+
+    matches: List[adsk.fusion.Sketch] = []
+    for component in _iter_components(root_component):
+        sketches = getattr(component, "sketches", None)
+        count = getattr(sketches, "count", 0) if sketches else 0
+        for index in range(count):
+            try:
+                sketch = sketches.item(index)
+            except Exception:
+                continue
+            if sketch and _name_matches(sketch, cleaned):
+                matches.append(sketch)
+
+    if len(matches) > 1:
+        raise FeatureOperationError(f"Sketch id '{cleaned}' is ambiguous. Use a unique sketch id.")
+    if matches:
+        return matches[0]
+
+    index_match = re.fullmatch(r"sketch_(\d+)", cleaned)
+    if index_match:
+        sketch_index = int(index_match.group(1))
+        try:
+            sketches = root_component.sketches
+            if 0 <= sketch_index < sketches.count:
+                return sketches.item(sketch_index)
+        except Exception:
+            pass
+
+    raise FeatureOperationError(f"Sketch '{cleaned}' was not found in the active design.")
+
+
+def _same_sketch(left: Any, right: Any) -> bool:
+    if left is right:
+        return True
+    if left is None or right is None:
+        return False
+    if getattr(left, "name", None) and getattr(left, "name", None) == getattr(right, "name", None):
+        return True
+    left_timeline = getattr(getattr(left, "timelineObject", None), "name", None)
+    right_timeline = getattr(getattr(right, "timelineObject", None), "name", None)
+    if left_timeline and left_timeline == right_timeline:
+        return True
+    return False
+
+
+def _resolve_sketch_entities(
+    design: adsk.fusion.Design,
+    sketch: adsk.fusion.Sketch,
+    entity_refs: Sequence[str],
+) -> List[Any]:
+    resolved: List[Any] = []
+    for raw_ref in entity_refs:
+        entity = _resolve_entity_by_token(design, str(raw_ref), lambda obj: obj, "sketch entity")
+        parent_sketch = getattr(entity, "parentSketch", None)
+        if not _same_sketch(parent_sketch, sketch):
+            raise FeatureOperationError(
+                f"Sketch entity ref '{raw_ref}' does not belong to sketch '{getattr(sketch, 'name', '') or sketch}'."
+            )
+        resolved.append(_native_if_proxy(entity))
+    return resolved
+
+
+def _resolve_profile_reference(
+    root_component: adsk.fusion.Component,
+    splitting_tool_ref: str,
+) -> Optional[adsk.fusion.Profile]:
+    match = re.fullmatch(r"([^:]+):profile_(\d+)", str(splitting_tool_ref or "").strip())
+    if not match:
+        return None
+
+    sketch = _resolve_sketch(root_component, match.group(1).strip())
+    profile_index = int(match.group(2))
+    profiles = getattr(sketch, "profiles", None)
+    if profiles is None or profile_index < 0 or profile_index >= profiles.count:
+        raise FeatureOperationError(
+            f"Splitting tool ref '{splitting_tool_ref}' references missing profile_{profile_index}."
+        )
+    return profiles.item(profile_index)
+
+
+def _profile_to_curve_collection(profile: adsk.fusion.Profile) -> adsk.core.ObjectCollection:
+    collection = adsk.core.ObjectCollection.create()
+    profile_loops = getattr(profile, "profileLoops", None)
+    if not profile_loops or getattr(profile_loops, "count", 0) <= 0:
+        raise FeatureOperationError("Profile splitting tool has no profile loops to convert into sketch curves.")
+
+    for loop_index in range(profile_loops.count):
+        loop = profile_loops.item(loop_index)
+        profile_curves = getattr(loop, "profileCurves", None)
+        if not profile_curves:
+            continue
+        for curve_index in range(profile_curves.count):
+            profile_curve = profile_curves.item(curve_index)
+            sketch_entity = getattr(profile_curve, "sketchEntity", None)
+            if sketch_entity is None:
+                raise FeatureOperationError("Profile splitting tool contains a curve without a sketchEntity reference.")
+            collection.add(sketch_entity)
+
+    if collection.count <= 0:
+        raise FeatureOperationError("Profile splitting tool did not yield any sketch curves for face splitting.")
+    return collection
+
+
+def _resolve_splitting_tool(
+    design: adsk.fusion.Design,
+    splitting_tool_ref: str,
+    *,
+    for_faces: bool,
+) -> Any:
+    root_component = design.rootComponent
+    profile = _resolve_profile_reference(root_component, splitting_tool_ref)
+    if profile:
+        return _profile_to_curve_collection(profile) if for_faces else profile
+
+    cleaned = str(splitting_tool_ref or "").strip()
+    if not cleaned:
+        raise FeatureOperationError("Splitting tool reference cannot be empty.")
+
+    datum_key = cleaned.upper()
+    if datum_key == "XY":
+        return root_component.xYConstructionPlane
+    if datum_key == "XZ":
+        return root_component.xZConstructionPlane
+    if datum_key == "YZ":
+        return root_component.yZConstructionPlane
+
+    try:
+        resolved = design.findEntityByToken(cleaned)
+    except Exception:
+        resolved = None
+
+    if resolved:
+        plane = adsk.fusion.ConstructionPlane.cast(resolved[0])
+        if plane:
+            return _native_if_proxy(plane)
+        face = adsk.fusion.BRepFace.cast(resolved[0])
+        if face:
+            return _native_if_proxy(face)
+        body = adsk.fusion.BRepBody.cast(resolved[0])
+        if body:
+            return _native_if_proxy(body)
+
+    named_plane = _resolve_named_construction_plane(root_component, cleaned)
+    if named_plane:
+        return named_plane
+
+    raise FeatureOperationError(
+        f"Unsupported splitting_tool_ref '{cleaned}'. Use XY/XZ/YZ, a planar face token, a resolvable construction plane, a valid body token, or sketch_id:profile_N."
+    )
+
+
+def _sketch_point_from_entity(entity: Any) -> Optional[adsk.core.Point3D]:
+    point_entity = adsk.fusion.SketchPoint.cast(entity)
+    if point_entity:
+        try:
+            return point_entity.geometry
+        except Exception:
+            return None
+
+    for point_attr in ("centerSketchPoint", "startSketchPoint", "endSketchPoint"):
+        point = getattr(entity, point_attr, None)
+        if point:
+            try:
+                return point.geometry
+            except Exception:
+                continue
+
+    return None
+
+
+def _resolve_dimension_text_point(
+    sketch: adsk.fusion.Sketch,
+    entities: Sequence[Any],
+    placement: Any,
+) -> adsk.core.Point3D:
+    if placement is not None:
+        if isinstance(placement, Mapping):
+            raw_x = placement.get("x")
+            raw_y = placement.get("y")
+            raw_z = placement.get("z", 0.0)
+        elif isinstance(placement, (list, tuple)) and len(placement) in {2, 3}:
+            raw_x = placement[0]
+            raw_y = placement[1]
+            raw_z = placement[2] if len(placement) == 3 else 0.0
+        else:
+            raise FeatureOperationError("placement must be a mapping with x/y[/z] or a 2/3-item coordinate list.")
+
+        try:
+            model_point = _point_from_mm(float(raw_x), float(raw_y), float(raw_z))
+            return sketch.modelToSketchSpace(model_point)
+        except Exception as exc:
+            raise FeatureOperationError(f"Failed to resolve sketch dimension placement: {exc}") from exc
+
+    points: List[adsk.core.Point3D] = []
+    for entity in entities:
+        point = _sketch_point_from_entity(entity)
+        if point:
+            points.append(point)
+
+    if not points:
+        return adsk.core.Point3D.create(1.0, 1.0, 0.0)
+
+    min_x = min(point.x for point in points)
+    max_x = max(point.x for point in points)
+    min_y = min(point.y for point in points)
+    max_y = max(point.y for point in points)
+    offset = 0.5
+    return adsk.core.Point3D.create((min_x + max_x) * 0.5 + offset, (min_y + max_y) * 0.5 + offset, 0.0)
+
+
+def _set_sketch_dimension_value(
+    dimension: adsk.fusion.SketchDimension,
+    value: float,
+    value_unit: str,
+    dimension_type: str,
+) -> None:
+    unit_norm = str(value_unit or "").strip().lower()
+
+    if dimension_type == "angle":
+        if unit_norm not in _VALID_ANGLE_UNITS:
+            raise FeatureOperationError("Angle sketch dimensions require value_unit 'deg' or 'rad'.")
+        expression = f"{float(value)} {unit_norm}"
+        internal_value = math.radians(float(value)) if unit_norm == "deg" else float(value)
+    else:
+        if unit_norm not in {"mm", "cm", "in"}:
+            raise FeatureOperationError("Length sketch dimensions require value_unit 'mm', 'cm', or 'in'.")
+        expression = f"{float(value)} {unit_norm}"
+        if unit_norm == "mm":
+            internal_value = _mm_to_cm(float(value))
+        elif unit_norm == "cm":
+            internal_value = float(value)
+        else:
+            internal_value = _diameter_to_cm(float(value), unit_norm)
+
+    parameter = getattr(dimension, "parameter", None)
+    if parameter is not None and hasattr(parameter, "expression"):
+        try:
+            parameter.expression = expression
+            return
+        except Exception as exc:
+            raise FeatureOperationError(f"Failed to set sketch dimension expression '{expression}': {exc}") from exc
+
+    try:
+        dimension.value = internal_value
+    except Exception as exc:
+        raise FeatureOperationError(f"Failed to set sketch dimension value: {exc}") from exc
+
+
+def _set_dimension_parameter_name(
+    dimension: adsk.fusion.SketchDimension,
+    parameter_name: str,
+) -> Optional[str]:
+    cleaned = str(parameter_name or "").strip()
+    if not cleaned:
+        return None
+
+    parameter = getattr(dimension, "parameter", None)
+    if parameter is None:
+        raise FeatureOperationError(
+            f"Sketch dimension parameter '{cleaned}' cannot be assigned because Fusion did not expose an associated parameter."
+        )
+
+    try:
+        parameter.name = cleaned
+    except Exception as exc:
+        raise FeatureOperationError(f"Failed to name sketch dimension parameter '{cleaned}': {exc}") from exc
+    return cleaned
+
+
+def _feature_token(feature: Any) -> Optional[str]:
+    token = getattr(feature, "entityToken", None)
+    return token if isinstance(token, str) and token.strip() else None
+
+
+def create_countersink_hole(
+    app: adsk.core.Application,
+    face_token: str,
+    center_x: float,
+    center_y: float,
+    center_z: float,
+    hole_diameter: float,
+    hole_depth: float,
+    countersink_diameter: float,
+    countersink_angle: float,
+    diameter_unit: str,
+    angle_unit: str,
+    feature_name: str = "",
+) -> Dict[str, Any]:
+    if not str(face_token or "").strip():
+        raise FeatureOperationError("create_countersink_hole requires face_token.")
+    if float(hole_diameter) <= 0:
+        raise FeatureOperationError("create_countersink_hole requires hole_diameter > 0.")
+    if float(hole_depth) <= 0:
+        raise FeatureOperationError("create_countersink_hole requires hole_depth > 0.")
+    if float(countersink_diameter) <= float(hole_diameter):
+        raise FeatureOperationError("countersink_diameter must be greater than hole_diameter.")
+    if float(countersink_angle) <= 0:
+        raise FeatureOperationError("create_countersink_hole requires countersink_angle > 0.")
+
+    diameter_unit_norm = str(diameter_unit or "mm").strip().lower()
+    angle_unit_norm = str(angle_unit or "deg").strip().lower()
+    if diameter_unit_norm not in _VALID_DIAMETER_UNITS:
+        raise FeatureOperationError(
+            f"Invalid diameter unit '{diameter_unit}'. Must be one of {sorted(_VALID_DIAMETER_UNITS)}."
+        )
+    if angle_unit_norm not in _VALID_ANGLE_UNITS:
+        raise FeatureOperationError(
+            f"Invalid angle unit '{angle_unit}'. Must be one of {sorted(_VALID_ANGLE_UNITS)}."
+        )
+
+    design = _require_design(app)
+    root_component = design.rootComponent
+    face = _resolve_entity_by_token(design, face_token, adsk.fusion.BRepFace.cast, "face")
+    center_point = _point_from_mm(center_x, center_y, center_z)
+    _validate_hole_center_on_face(face, center_point, (center_x, center_y, center_z))
+
+    face_component = _component_for_entity(face, root_component)
+    holes = face_component.features.holeFeatures
+    temp_sketch = face_component.sketches.add(face)
+
+    try:
+        sketch_point = temp_sketch.sketchPoints.add(temp_sketch.modelToSketchSpace(center_point))
+        hole_input = holes.createCountersinkInput(
+            adsk.core.ValueInput.createByString(f"{hole_diameter} {diameter_unit_norm}"),
+            adsk.core.ValueInput.createByString(f"{countersink_diameter} {diameter_unit_norm}"),
+            adsk.core.ValueInput.createByString(f"{countersink_angle} {angle_unit_norm}"),
+        )
+        hole_input.setPositionBySketchPoint(sketch_point)
+        hole_input.setDistanceExtent(adsk.core.ValueInput.createByReal(_mm_to_cm(hole_depth)))
+
+        feature = holes.add(hole_input)
+        if not feature:
+            raise FeatureOperationError("Fusion returned no countersink hole feature.")
+        if str(feature_name or "").strip():
+            feature.name = str(feature_name).strip()
+        try:
+            temp_sketch.isVisible = False
+        except Exception:
+            logger.debug("Could not hide countersink positioning sketch")
+    except FeatureOperationError:
+        raise
+    except Exception as exc:
+        raise FeatureOperationError(f"Failed to create countersink hole: {exc}") from exc
+
+    return {
+        "success": True,
+        "message": (
+            f"Created countersink hole: {hole_diameter} {diameter_unit_norm} hole x {hole_depth} mm deep, "
+            f"{countersink_diameter} {diameter_unit_norm} countersink at {countersink_angle} {angle_unit_norm}."
+        ),
+        "hole_diameter": float(hole_diameter),
+        "hole_depth": float(hole_depth),
+        "countersink_diameter": float(countersink_diameter),
+        "countersink_angle": float(countersink_angle),
+        "diameter_unit": diameter_unit_norm,
+        "angle_unit": angle_unit_norm,
+        "feature_name": str(feature_name or "").strip() or getattr(feature, "name", ""),
+        "feature_token": _feature_token(feature),
+    }
+
+
+def apply_draft(
+    app: adsk.core.Application,
+    entity_tokens: Sequence[str],
+    neutral_plane_ref: str,
+    draft_angle: float,
+    angle_unit: str = "deg",
+    feature_name: str = "",
+) -> Dict[str, Any]:
+    if float(draft_angle) == 0:
+        raise FeatureOperationError("apply_draft requires a non-zero draft_angle.")
+
+    angle_unit_norm = str(angle_unit or "deg").strip().lower()
+    if angle_unit_norm not in _VALID_ANGLE_UNITS:
+        raise FeatureOperationError(f"Invalid angle unit '{angle_unit}'. Must be 'deg' or 'rad'.")
+
+    design = _require_design(app)
+    faces, feature_component = _resolve_entities_with_shared_context(
+        design,
+        entity_tokens,
+        adsk.fusion.BRepFace.cast,
+        "face",
+    )
+    neutral_plane = _resolve_plane_reference(design, neutral_plane_ref, label="neutral plane")
+
+    try:
+        draft_features = feature_component.features.draftFeatures
+        draft_input = draft_features.createInput(faces, neutral_plane, True)
+        draft_input.setSingleAngle(
+            False,
+            adsk.core.ValueInput.createByString(f"{float(draft_angle)} {angle_unit_norm}"),
+        )
+        feature = draft_features.add(draft_input)
+        if not feature:
+            raise FeatureOperationError("Fusion returned no draft feature.")
+        if str(feature_name or "").strip():
+            feature.name = str(feature_name).strip()
+    except FeatureOperationError:
+        raise
+    except Exception as exc:
+        raise FeatureOperationError(f"Failed to apply draft: {exc}") from exc
+
+    return {
+        "success": True,
+        "message": f"Applied draft of {draft_angle} {angle_unit_norm} to {len(faces)} face(s).",
+        "draft_angle": float(draft_angle),
+        "angle_unit": angle_unit_norm,
+        "entity_count": len(faces),
+        "feature_name": str(feature_name or "").strip() or getattr(feature, "name", ""),
+        "feature_token": _feature_token(feature),
+    }
+
+
+def mirror_entities(
+    app: adsk.core.Application,
+    entity_tokens: Sequence[str],
+    mirror_plane_ref: str,
+    feature_name: str = "",
+) -> Dict[str, Any]:
+    design = _require_design(app)
+    cleaned_tokens = [str(token).strip() for token in entity_tokens if isinstance(token, str) and str(token).strip()]
+    if not cleaned_tokens:
+        raise FeatureOperationError("mirror_entities requires at least one entity token.")
+
+    root_component = design.rootComponent
+    mirror_plane = _resolve_plane_reference(design, mirror_plane_ref, label="mirror plane")
+    resolved_entities = adsk.core.ObjectCollection.create()
+    entity_kind: Optional[str] = None
+    feature_component: Optional[adsk.fusion.Component] = None
+
+    for cleaned in cleaned_tokens:
+        raw_entity = _resolve_entity_by_token(design, cleaned, lambda obj: obj, "mirror entity")
+        entity_for_feature = _native_if_proxy(raw_entity)
+        body = adsk.fusion.BRepBody.cast(raw_entity)
+        face = adsk.fusion.BRepFace.cast(raw_entity)
+        feature = adsk.fusion.Feature.cast(raw_entity)
+
+        if body:
+            current_kind = "body"
+            candidate_component = _component_for_entity(body, root_component)
+            entity_for_feature = _native_if_proxy(body)
+        elif face:
+            current_kind = "face"
+            candidate_component = _component_for_entity(face, root_component)
+            entity_for_feature = _native_if_proxy(face)
+        elif feature:
+            current_kind = "feature"
+            candidate_component = getattr(feature, "parentComponent", None) or root_component
+            entity_for_feature = _native_if_proxy(feature)
+        else:
+            object_type = getattr(raw_entity, "objectType", type(raw_entity).__name__)
+            raise FeatureOperationError(f"Unsupported mirror entity token '{cleaned}'. Resolved object type: {object_type}.")
+
+        if entity_kind is None:
+            entity_kind = current_kind
+            feature_component = candidate_component
+        else:
+            if current_kind != entity_kind:
+                raise FeatureOperationError("mirror_entities requires all input entities to be the same kind.")
+            if candidate_component != feature_component:
+                raise FeatureOperationError("mirror_entities cannot mirror entities from multiple components in one feature.")
+
+        resolved_entities.add(entity_for_feature)
+
+    try:
+        mirror_features = (feature_component or root_component).features.mirrorFeatures
+        mirror_input = mirror_features.createInput(resolved_entities, mirror_plane)
+        if entity_kind == "feature":
+            mirror_input.patternComputeOption = adsk.fusion.PatternComputeOptions.AdjustPatternCompute
+        feature = mirror_features.add(mirror_input)
+        if not feature:
+            raise FeatureOperationError("Fusion returned no mirror feature.")
+        if str(feature_name or "").strip():
+            feature.name = str(feature_name).strip()
+    except FeatureOperationError:
+        raise
+    except Exception as exc:
+        raise FeatureOperationError(f"Failed to mirror entities: {exc}") from exc
+
+    return {
+        "success": True,
+        "message": f"Mirrored {resolved_entities.count} {entity_kind}(s).",
+        "entity_kind": entity_kind,
+        "entity_count": resolved_entities.count,
+        "feature_name": str(feature_name or "").strip() or getattr(feature, "name", ""),
+        "feature_token": _feature_token(feature),
+    }
+
+
+def combine_bodies(
+    app: adsk.core.Application,
+    target_body_token: str,
+    tool_body_tokens: Sequence[str],
+    operation: str,
+    keep_tools: bool = False,
+    feature_name: str = "",
+) -> Dict[str, Any]:
+    operation_norm = str(operation or "").strip().lower()
+    operation_map = {
+        "join": adsk.fusion.FeatureOperations.JoinFeatureOperation,
+        "cut": adsk.fusion.FeatureOperations.CutFeatureOperation,
+        "intersect": adsk.fusion.FeatureOperations.IntersectFeatureOperation,
+    }
+    if operation_norm not in operation_map:
+        raise FeatureOperationError("combine_bodies operation must be one of: join, cut, intersect.")
+
+    design = _require_design(app)
+    root_component = design.rootComponent
+    target_body = _resolve_entity_by_token(design, target_body_token, adsk.fusion.BRepBody.cast, "target body")
+    feature_component = _component_for_entity(target_body, root_component)
+    tool_bodies, tool_component = _resolve_entities_with_shared_context(
+        design,
+        tool_body_tokens,
+        adsk.fusion.BRepBody.cast,
+        "tool body",
+    )
+    if tool_component != feature_component:
+        raise FeatureOperationError("combine_bodies requires target and tool bodies to belong to the same component.")
+
+    tool_collection = adsk.core.ObjectCollection.create()
+    for tool_body in tool_bodies:
+        if getattr(tool_body, "entityToken", None) == getattr(target_body, "entityToken", None):
+            raise FeatureOperationError("combine_bodies target body cannot also appear in tool_body_tokens.")
+        tool_collection.add(tool_body)
+
+    try:
+        combine_features = feature_component.features.combineFeatures
+        combine_input = combine_features.createInput(_native_if_proxy(target_body), tool_collection)
+        combine_input.operation = operation_map[operation_norm]
+        combine_input.isKeepToolBodies = bool(keep_tools)
+        feature = combine_features.add(combine_input)
+        if not feature:
+            raise FeatureOperationError("Fusion returned no combine feature.")
+        if str(feature_name or "").strip():
+            feature.name = str(feature_name).strip()
+    except FeatureOperationError:
+        raise
+    except Exception as exc:
+        raise FeatureOperationError(f"Failed to combine bodies: {exc}") from exc
+
+    return {
+        "success": True,
+        "message": f"Combined bodies with operation '{operation_norm}'.",
+        "operation": operation_norm,
+        "tool_body_count": tool_collection.count,
+        "keep_tools": bool(keep_tools),
+        "feature_name": str(feature_name or "").strip() or getattr(feature, "name", ""),
+        "feature_token": _feature_token(feature),
+    }
+
+
+def split_body(
+    app: adsk.core.Application,
+    target_body_token: str,
+    splitting_tool_ref: str,
+    extend_splitting_tool: bool = True,
+    feature_name: str = "",
+) -> Dict[str, Any]:
+    design = _require_design(app)
+    root_component = design.rootComponent
+    target_body = _resolve_entity_by_token(design, target_body_token, adsk.fusion.BRepBody.cast, "target body")
+    feature_component = _component_for_entity(target_body, root_component)
+    splitting_tool = _resolve_splitting_tool(design, splitting_tool_ref, for_faces=False)
+
+    try:
+        split_features = feature_component.features.splitBodyFeatures
+        split_input = split_features.createInput(
+            _native_if_proxy(target_body),
+            splitting_tool,
+            bool(extend_splitting_tool),
+        )
+        feature = split_features.add(split_input)
+        if not feature:
+            raise FeatureOperationError("Fusion returned no split body feature.")
+        if str(feature_name or "").strip():
+            feature.name = str(feature_name).strip()
+    except FeatureOperationError:
+        raise
+    except Exception as exc:
+        raise FeatureOperationError(f"Failed to split body: {exc}") from exc
+
+    return {
+        "success": True,
+        "message": "Split body created successfully.",
+        "extend_splitting_tool": bool(extend_splitting_tool),
+        "feature_name": str(feature_name or "").strip() or getattr(feature, "name", ""),
+        "feature_token": _feature_token(feature),
+    }
+
+
+def split_face(
+    app: adsk.core.Application,
+    face_tokens: Sequence[str],
+    splitting_tool_ref: str,
+    extend_splitting_tool: bool = True,
+    feature_name: str = "",
+) -> Dict[str, Any]:
+    design = _require_design(app)
+    faces, feature_component = _resolve_entities_with_shared_context(
+        design,
+        face_tokens,
+        adsk.fusion.BRepFace.cast,
+        "face",
+    )
+    face_collection = adsk.core.ObjectCollection.create()
+    for face in faces:
+        face_collection.add(face)
+    splitting_tool = _resolve_splitting_tool(design, splitting_tool_ref, for_faces=True)
+
+    try:
+        split_features = feature_component.features.splitFaceFeatures
+        split_input = split_features.createInput(
+            face_collection,
+            splitting_tool,
+            bool(extend_splitting_tool),
+        )
+        feature = split_features.add(split_input)
+        if not feature:
+            raise FeatureOperationError("Fusion returned no split face feature.")
+        if str(feature_name or "").strip():
+            feature.name = str(feature_name).strip()
+    except FeatureOperationError:
+        raise
+    except Exception as exc:
+        raise FeatureOperationError(f"Failed to split face: {exc}") from exc
+
+    return {
+        "success": True,
+        "message": f"Split {face_collection.count} face(s) successfully.",
+        "face_count": face_collection.count,
+        "extend_splitting_tool": bool(extend_splitting_tool),
+        "feature_name": str(feature_name or "").strip() or getattr(feature, "name", ""),
+        "feature_token": _feature_token(feature),
+    }
+
+
+def add_sketch_dimension(
+    app: adsk.core.Application,
+    sketch_id: str,
+    dimension_type: str,
+    entity_refs: Sequence[str],
+    value: float,
+    value_unit: str = "mm",
+    placement: Any = None,
+    parameter_name: str = "",
+) -> Dict[str, Any]:
+    if float(value) <= 0:
+        raise FeatureOperationError("add_sketch_dimension requires value > 0.")
+
+    design = _require_design(app)
+    sketch = _resolve_sketch(design.rootComponent, sketch_id)
+    entities = _resolve_sketch_entities(design, sketch, entity_refs)
+    dimension_type_norm = str(dimension_type or "").strip().lower()
+    text_point = _resolve_dimension_text_point(sketch, entities, placement)
+    dimensions = sketch.sketchDimensions
+
+    try:
+        if dimension_type_norm == "distance":
+            if len(entities) != 2:
+                raise FeatureOperationError("Distance sketch dimensions require exactly 2 sketch point refs.")
+            point_one = adsk.fusion.SketchPoint.cast(entities[0])
+            point_two = adsk.fusion.SketchPoint.cast(entities[1])
+            if not point_one or not point_two:
+                raise FeatureOperationError("Distance sketch dimensions require sketch point refs, not curves.")
+            dimension = dimensions.addDistanceDimension(
+                point_one,
+                point_two,
+                adsk.fusion.DimensionOrientations.AlignedDimensionOrientation,
+                text_point,
+                True,
+            )
+        elif dimension_type_norm == "diameter":
+            if len(entities) != 1:
+                raise FeatureOperationError("Diameter sketch dimensions require exactly 1 circle or arc ref.")
+            curve = adsk.fusion.SketchCurve.cast(entities[0])
+            if not curve:
+                raise FeatureOperationError("Diameter sketch dimensions require a sketch curve ref.")
+            dimension = dimensions.addDiameterDimension(curve, text_point, True)
+        elif dimension_type_norm == "radius":
+            if len(entities) != 1:
+                raise FeatureOperationError("Radius sketch dimensions require exactly 1 circle or arc ref.")
+            curve = adsk.fusion.SketchCurve.cast(entities[0])
+            if not curve:
+                raise FeatureOperationError("Radius sketch dimensions require a sketch curve ref.")
+            dimension = dimensions.addRadialDimension(curve, text_point, True)
+        elif dimension_type_norm == "angle":
+            if len(entities) != 2:
+                raise FeatureOperationError("Angle sketch dimensions require exactly 2 sketch line refs.")
+            line_one = adsk.fusion.SketchLine.cast(entities[0])
+            line_two = adsk.fusion.SketchLine.cast(entities[1])
+            if not line_one or not line_two:
+                raise FeatureOperationError("Angle sketch dimensions require sketch line refs.")
+            dimension = dimensions.addAngularDimension(line_one, line_two, text_point, True)
+        else:
+            raise FeatureOperationError("dimension_type must be one of: distance, diameter, radius, angle.")
+
+        if not dimension:
+            raise FeatureOperationError("Fusion returned no sketch dimension.")
+        _set_sketch_dimension_value(dimension, float(value), value_unit, dimension_type_norm)
+        assigned_parameter_name = _set_dimension_parameter_name(dimension, parameter_name)
+    except FeatureOperationError:
+        raise
+    except Exception as exc:
+        raise FeatureOperationError(f"Failed to add sketch dimension: {exc}") from exc
+
+    return {
+        "success": True,
+        "message": f"Added {dimension_type_norm} sketch dimension to sketch '{sketch_id}'.",
+        "dimension_type": dimension_type_norm,
+        "value": float(value),
+        "value_unit": str(value_unit or "").strip().lower(),
+        "parameter_name": assigned_parameter_name,
+    }
+
+
+def add_sketch_constraint(
+    app: adsk.core.Application,
+    sketch_id: str,
+    constraint_type: str,
+    entity_refs: Sequence[str],
+) -> Dict[str, Any]:
+    design = _require_design(app)
+    sketch = _resolve_sketch(design.rootComponent, sketch_id)
+    entities = _resolve_sketch_entities(design, sketch, entity_refs)
+    constraint_type_norm = str(constraint_type or "").strip().lower()
+    constraints = sketch.geometricConstraints
+
+    try:
+        if constraint_type_norm == "coincident":
+            if len(entities) != 2:
+                raise FeatureOperationError("Coincident constraints require exactly 2 sketch entity refs.")
+            point = adsk.fusion.SketchPoint.cast(entities[0])
+            other = entities[1]
+            if not point:
+                point = adsk.fusion.SketchPoint.cast(entities[1])
+                other = entities[0]
+            if not point:
+                raise FeatureOperationError("Coincident constraints require one sketch point ref.")
+            constraint = constraints.addCoincident(point, other)
+        elif constraint_type_norm == "horizontal":
+            if len(entities) == 1:
+                line = adsk.fusion.SketchLine.cast(entities[0])
+                if not line:
+                    raise FeatureOperationError("Horizontal constraints require a sketch line when one ref is provided.")
+                constraint = constraints.addHorizontal(line)
+            elif len(entities) == 2 and hasattr(constraints, "addHorizontalPoints"):
+                point_one = adsk.fusion.SketchPoint.cast(entities[0])
+                point_two = adsk.fusion.SketchPoint.cast(entities[1])
+                if not point_one or not point_two:
+                    raise FeatureOperationError("Horizontal point constraints require 2 sketch point refs.")
+                constraint = constraints.addHorizontalPoints(point_one, point_two)
+            else:
+                raise FeatureOperationError("Horizontal constraints require 1 sketch line or 2 sketch point refs.")
+        elif constraint_type_norm == "vertical":
+            if len(entities) == 1:
+                line = adsk.fusion.SketchLine.cast(entities[0])
+                if not line:
+                    raise FeatureOperationError("Vertical constraints require a sketch line when one ref is provided.")
+                constraint = constraints.addVertical(line)
+            elif len(entities) == 2:
+                point_one = adsk.fusion.SketchPoint.cast(entities[0])
+                point_two = adsk.fusion.SketchPoint.cast(entities[1])
+                if not point_one or not point_two:
+                    raise FeatureOperationError("Vertical point constraints require 2 sketch point refs.")
+                constraint = constraints.addVerticalPoints(point_one, point_two)
+            else:
+                raise FeatureOperationError("Vertical constraints require 1 sketch line or 2 sketch point refs.")
+        elif constraint_type_norm == "parallel":
+            if len(entities) != 2:
+                raise FeatureOperationError("Parallel constraints require exactly 2 sketch line refs.")
+            line_one = adsk.fusion.SketchLine.cast(entities[0])
+            line_two = adsk.fusion.SketchLine.cast(entities[1])
+            if not line_one or not line_two:
+                raise FeatureOperationError("Parallel constraints require sketch line refs.")
+            constraint = constraints.addParallel(line_one, line_two)
+        elif constraint_type_norm == "perpendicular":
+            if len(entities) != 2:
+                raise FeatureOperationError("Perpendicular constraints require exactly 2 sketch line refs.")
+            line_one = adsk.fusion.SketchLine.cast(entities[0])
+            line_two = adsk.fusion.SketchLine.cast(entities[1])
+            if not line_one or not line_two:
+                raise FeatureOperationError("Perpendicular constraints require sketch line refs.")
+            constraint = constraints.addPerpendicular(line_one, line_two)
+        elif constraint_type_norm == "tangent":
+            if len(entities) != 2:
+                raise FeatureOperationError("Tangent constraints require exactly 2 sketch curve refs.")
+            curve_one = adsk.fusion.SketchCurve.cast(entities[0])
+            curve_two = adsk.fusion.SketchCurve.cast(entities[1])
+            if not curve_one or not curve_two:
+                raise FeatureOperationError("Tangent constraints require sketch curve refs.")
+            constraint = constraints.addTangent(curve_one, curve_two)
+        elif constraint_type_norm == "equal":
+            if len(entities) != 2:
+                raise FeatureOperationError("Equal constraints require exactly 2 sketch curve refs.")
+            curve_one = adsk.fusion.SketchCurve.cast(entities[0])
+            curve_two = adsk.fusion.SketchCurve.cast(entities[1])
+            if not curve_one or not curve_two:
+                raise FeatureOperationError("Equal constraints require sketch curve refs.")
+            constraint = constraints.addEqual(curve_one, curve_two)
+        elif constraint_type_norm == "concentric":
+            if len(entities) != 2:
+                raise FeatureOperationError("Concentric constraints require exactly 2 sketch curve refs.")
+            curve_one = adsk.fusion.SketchCurve.cast(entities[0])
+            curve_two = adsk.fusion.SketchCurve.cast(entities[1])
+            if not curve_one or not curve_two:
+                raise FeatureOperationError("Concentric constraints require sketch curve refs.")
+            constraint = constraints.addConcentric(curve_one, curve_two)
+        else:
+            raise FeatureOperationError(
+                "constraint_type must be one of: coincident, horizontal, vertical, parallel, perpendicular, tangent, equal, concentric."
+            )
+
+        if not constraint:
+            raise FeatureOperationError("Fusion returned no sketch constraint.")
+    except FeatureOperationError:
+        raise
+    except Exception as exc:
+        raise FeatureOperationError(f"Failed to add sketch constraint: {exc}") from exc
+
+    return {
+        "success": True,
+        "message": f"Added {constraint_type_norm} sketch constraint to sketch '{sketch_id}'.",
+        "constraint_type": constraint_type_norm,
+        "entity_count": len(entities),
+    }
+
+
 def create_pattern_feature(
     app: Optional[adsk.core.Application],
     pattern_type: str,
@@ -3712,8 +4776,16 @@ __all__ = [
     "FeatureOperationError",
     "apply_fillet",
     "apply_chamfer",
+    "apply_draft",
+    "mirror_entities",
+    "combine_bodies",
+    "split_body",
+    "split_face",
+    "add_sketch_dimension",
+    "add_sketch_constraint",
     "create_simple_hole",
     "create_counterbore_hole",
+    "create_countersink_hole",
     "create_tapped_hole",
     "create_external_thread",
     "create_pattern_feature",

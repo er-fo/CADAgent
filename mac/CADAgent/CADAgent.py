@@ -484,6 +484,7 @@ class AgentController:
                 "timeline_feature_delete": True,
                 "timeline_feature_suppression": True,
                 "timeline_feature_parameter_edit": True,
+                "mechanical_feature_operations_v1": True,
             },
         }
 
@@ -1983,6 +1984,338 @@ class AgentController:
                 })
                 log_level = 'success'
                 self._palette_manager.send_log(log_level, message_text, doc_id=doc_id)
+
+            elif operation == "create_countersink_hole":
+                face_token = message.get("face_token") or params.get("face_token")
+                center_x = message.get("center_x") if message.get("center_x") is not None else params.get("center_x")
+                center_y = message.get("center_y") if message.get("center_y") is not None else params.get("center_y")
+                center_z = message.get("center_z") if message.get("center_z") is not None else params.get("center_z")
+                hole_diameter = message.get("hole_diameter") if message.get("hole_diameter") is not None else params.get("hole_diameter")
+                hole_depth = message.get("hole_depth") if message.get("hole_depth") is not None else params.get("hole_depth")
+                countersink_diameter = message.get("countersink_diameter") if message.get("countersink_diameter") is not None else params.get("countersink_diameter")
+                countersink_angle = message.get("countersink_angle") if message.get("countersink_angle") is not None else params.get("countersink_angle")
+                diameter_unit = message.get("diameter_unit") or params.get("diameter_unit") or "mm"
+                angle_unit = message.get("angle_unit") or params.get("angle_unit") or "deg"
+                feature_name = message.get("feature_name") or params.get("feature_name") or ""
+
+                if not face_token:
+                    raise feature_tools.FeatureOperationError("create_countersink_hole requires face_token.")
+                if center_x is None or center_y is None or center_z is None:
+                    raise feature_tools.FeatureOperationError("create_countersink_hole requires center coordinates.")
+                if hole_diameter is None:
+                    raise feature_tools.FeatureOperationError("create_countersink_hole requires hole_diameter.")
+                if hole_depth is None:
+                    raise feature_tools.FeatureOperationError("create_countersink_hole requires hole_depth.")
+                if countersink_diameter is None:
+                    raise feature_tools.FeatureOperationError("create_countersink_hole requires countersink_diameter.")
+                if countersink_angle is None:
+                    raise feature_tools.FeatureOperationError("create_countersink_hole requires countersink_angle.")
+
+                result = feature_tools.create_countersink_hole(
+                    self._app,
+                    str(face_token),
+                    float(center_x),
+                    float(center_y),
+                    float(center_z),
+                    float(hole_diameter),
+                    float(hole_depth),
+                    float(countersink_diameter),
+                    float(countersink_angle),
+                    str(diameter_unit),
+                    str(angle_unit),
+                    str(feature_name),
+                )
+                success = True
+                message_text = result.get("message", "Countersink hole created successfully.")
+                payload.update({
+                    "success": success,
+                    "message": message_text,
+                    "hole_diameter": result.get("hole_diameter"),
+                    "hole_depth": result.get("hole_depth"),
+                    "countersink_diameter": result.get("countersink_diameter"),
+                    "countersink_angle": result.get("countersink_angle"),
+                    "diameter_unit": result.get("diameter_unit"),
+                    "angle_unit": result.get("angle_unit"),
+                    "feature_token": result.get("feature_token"),
+                })
+                self._palette_manager.send_log('success', message_text, doc_id=doc_id)
+
+            elif operation == "apply_draft":
+                entity_tokens = (
+                    message.get("entity_tokens")
+                    or params.get("entity_tokens")
+                    or message.get("face_refs")
+                    or params.get("face_refs")
+                    or []
+                )
+                neutral_plane_ref = message.get("neutral_plane_ref") or params.get("neutral_plane_ref")
+                draft_angle = message.get("draft_angle") if message.get("draft_angle") is not None else params.get("draft_angle")
+                angle_unit = message.get("angle_unit") or params.get("angle_unit") or "deg"
+                is_tangent_chain = message.get("is_tangent_chain", params.get("is_tangent_chain", True))
+                feature_name = message.get("feature_name") or params.get("feature_name") or ""
+
+                if not entity_tokens:
+                    raise feature_tools.FeatureOperationError("apply_draft requires entity_tokens.")
+                if not neutral_plane_ref:
+                    raise feature_tools.FeatureOperationError("apply_draft requires neutral_plane_ref.")
+                if draft_angle is None:
+                    raise feature_tools.FeatureOperationError("apply_draft requires draft_angle.")
+                if not bool(is_tangent_chain):
+                    raise feature_tools.FeatureOperationError("apply_draft currently supports only tangent-chain=True requests.")
+
+                result = feature_tools.apply_draft(
+                    self._app,
+                    entity_tokens,
+                    str(neutral_plane_ref),
+                    float(draft_angle),
+                    str(angle_unit),
+                    str(feature_name),
+                )
+                success = True
+                message_text = result.get("message", "Draft applied successfully.")
+                payload.update({
+                    "success": success,
+                    "message": message_text,
+                    "draft_angle": result.get("draft_angle"),
+                    "angle_unit": result.get("angle_unit"),
+                    "entity_count": result.get("entity_count"),
+                    "feature_token": result.get("feature_token"),
+                })
+                self._palette_manager.send_log('success', message_text, doc_id=doc_id)
+
+            elif operation == "mirror_entities":
+                entity_tokens = (
+                    message.get("entity_tokens")
+                    or params.get("entity_tokens")
+                    or message.get("entity_refs")
+                    or params.get("entity_refs")
+                    or message.get("body_refs")
+                    or params.get("body_refs")
+                    or message.get("face_refs")
+                    or params.get("face_refs")
+                    or message.get("feature_refs")
+                    or params.get("feature_refs")
+                    or []
+                )
+                mirror_plane_ref = message.get("mirror_plane_ref") or params.get("mirror_plane_ref")
+                feature_name = message.get("feature_name") or params.get("feature_name") or ""
+
+                if not entity_tokens:
+                    raise feature_tools.FeatureOperationError("mirror_entities requires entity_tokens.")
+                if not mirror_plane_ref:
+                    raise feature_tools.FeatureOperationError("mirror_entities requires mirror_plane_ref.")
+
+                result = feature_tools.mirror_entities(
+                    self._app,
+                    entity_tokens,
+                    str(mirror_plane_ref),
+                    str(feature_name),
+                )
+                success = True
+                message_text = result.get("message", "Entities mirrored successfully.")
+                payload.update({
+                    "success": success,
+                    "message": message_text,
+                    "entity_kind": result.get("entity_kind"),
+                    "entity_count": result.get("entity_count"),
+                    "feature_token": result.get("feature_token"),
+                })
+                self._palette_manager.send_log('success', message_text, doc_id=doc_id)
+
+            elif operation == "combine_bodies":
+                target_body_token = (
+                    message.get("target_body_token")
+                    or params.get("target_body_token")
+                    or message.get("target_body_ref")
+                    or params.get("target_body_ref")
+                )
+                tool_body_tokens = (
+                    message.get("tool_body_tokens")
+                    or params.get("tool_body_tokens")
+                    or message.get("tool_body_refs")
+                    or params.get("tool_body_refs")
+                    or []
+                )
+                combine_operation = message.get("operation_name") or params.get("operation_name") or message.get("combine_operation") or params.get("combine_operation")
+                if not combine_operation:
+                    combine_operation = params.get("operation") if operation == "combine_bodies" else None
+                keep_tools = message.get("keep_tools", params.get("keep_tools", False))
+                feature_name = message.get("feature_name") or params.get("feature_name") or ""
+
+                if not target_body_token:
+                    raise feature_tools.FeatureOperationError("combine_bodies requires target_body_token.")
+                if not tool_body_tokens:
+                    raise feature_tools.FeatureOperationError("combine_bodies requires tool_body_tokens.")
+                if not combine_operation:
+                    raise feature_tools.FeatureOperationError("combine_bodies requires operation.")
+
+                result = feature_tools.combine_bodies(
+                    self._app,
+                    str(target_body_token),
+                    tool_body_tokens,
+                    str(combine_operation),
+                    bool(keep_tools),
+                    str(feature_name),
+                )
+                success = True
+                message_text = result.get("message", "Bodies combined successfully.")
+                payload.update({
+                    "success": success,
+                    "message": message_text,
+                    "operation": result.get("operation"),
+                    "tool_body_count": result.get("tool_body_count"),
+                    "keep_tools": result.get("keep_tools"),
+                    "feature_token": result.get("feature_token"),
+                })
+                self._palette_manager.send_log('success', message_text, doc_id=doc_id)
+
+            elif operation == "split_body":
+                body_tokens = (
+                    message.get("entity_tokens")
+                    or params.get("entity_tokens")
+                    or message.get("body_refs")
+                    or params.get("body_refs")
+                    or []
+                )
+                splitting_tool_ref = message.get("splitting_tool_ref") or params.get("splitting_tool_ref")
+                extend_splitting_tool = message.get("extend_splitting_tool", params.get("extend_splitting_tool", True))
+                feature_name = message.get("feature_name") or params.get("feature_name") or ""
+
+                if not body_tokens:
+                    raise feature_tools.FeatureOperationError("split_body requires one target body token.")
+                if len(body_tokens) != 1:
+                    raise feature_tools.FeatureOperationError("split_body currently supports exactly one target body token.")
+                if not splitting_tool_ref:
+                    raise feature_tools.FeatureOperationError("split_body requires splitting_tool_ref.")
+
+                result = feature_tools.split_body(
+                    self._app,
+                    str(body_tokens[0]),
+                    str(splitting_tool_ref),
+                    bool(extend_splitting_tool),
+                    str(feature_name),
+                )
+                success = True
+                message_text = result.get("message", "Body split successfully.")
+                payload.update({
+                    "success": success,
+                    "message": message_text,
+                    "extend_splitting_tool": result.get("extend_splitting_tool"),
+                    "feature_token": result.get("feature_token"),
+                })
+                self._palette_manager.send_log('success', message_text, doc_id=doc_id)
+
+            elif operation == "split_face":
+                face_tokens = (
+                    message.get("entity_tokens")
+                    or params.get("entity_tokens")
+                    or message.get("face_refs")
+                    or params.get("face_refs")
+                    or []
+                )
+                splitting_tool_ref = message.get("splitting_tool_ref") or params.get("splitting_tool_ref")
+                extend_splitting_tool = message.get("extend_splitting_tool", params.get("extend_splitting_tool", True))
+                feature_name = message.get("feature_name") or params.get("feature_name") or ""
+
+                if not face_tokens:
+                    raise feature_tools.FeatureOperationError("split_face requires face_tokens.")
+                if not splitting_tool_ref:
+                    raise feature_tools.FeatureOperationError("split_face requires splitting_tool_ref.")
+
+                result = feature_tools.split_face(
+                    self._app,
+                    face_tokens,
+                    str(splitting_tool_ref),
+                    bool(extend_splitting_tool),
+                    str(feature_name),
+                )
+                success = True
+                message_text = result.get("message", "Face split successfully.")
+                payload.update({
+                    "success": success,
+                    "message": message_text,
+                    "face_count": result.get("face_count"),
+                    "extend_splitting_tool": result.get("extend_splitting_tool"),
+                    "feature_token": result.get("feature_token"),
+                })
+                self._palette_manager.send_log('success', message_text, doc_id=doc_id)
+
+            elif operation == "add_sketch_dimension":
+                sketch_id = message.get("sketch_id") or params.get("sketch_id")
+                dimension_type = message.get("dimension_type") or params.get("dimension_type")
+                entity_refs = message.get("entity_refs") or params.get("entity_refs") or []
+                value = message.get("value") if message.get("value") is not None else params.get("value")
+                value_unit = message.get("value_unit") or params.get("value_unit") or message.get("unit") or params.get("unit") or "mm"
+                placement = message.get("placement") if message.get("placement") is not None else params.get("placement")
+                parameter_name = (
+                    message.get("parameter_name")
+                    or params.get("parameter_name")
+                    or message.get("feature_name")
+                    or params.get("feature_name")
+                    or ""
+                )
+                orientation = message.get("orientation") or params.get("orientation")
+
+                if not sketch_id:
+                    raise feature_tools.FeatureOperationError("add_sketch_dimension requires sketch_id.")
+                if not dimension_type:
+                    raise feature_tools.FeatureOperationError("add_sketch_dimension requires dimension_type.")
+                if not entity_refs:
+                    raise feature_tools.FeatureOperationError("add_sketch_dimension requires entity_refs.")
+                if value is None:
+                    raise feature_tools.FeatureOperationError("add_sketch_dimension requires value.")
+                if orientation and str(orientation).strip().lower() != "aligned":
+                    raise feature_tools.FeatureOperationError("add_sketch_dimension currently supports only aligned distance orientation.")
+
+                result = feature_tools.add_sketch_dimension(
+                    self._app,
+                    str(sketch_id),
+                    str(dimension_type),
+                    entity_refs,
+                    float(value),
+                    str(value_unit),
+                    placement,
+                    str(parameter_name),
+                )
+                success = True
+                message_text = result.get("message", "Sketch dimension added successfully.")
+                payload.update({
+                    "success": success,
+                    "message": message_text,
+                    "dimension_type": result.get("dimension_type"),
+                    "value": result.get("value"),
+                    "value_unit": result.get("value_unit"),
+                    "parameter_name": result.get("parameter_name"),
+                })
+                self._palette_manager.send_log('success', message_text, doc_id=doc_id)
+
+            elif operation == "add_sketch_constraint":
+                sketch_id = message.get("sketch_id") or params.get("sketch_id")
+                constraint_type = message.get("constraint_type") or params.get("constraint_type")
+                entity_refs = message.get("entity_refs") or params.get("entity_refs") or []
+
+                if not sketch_id:
+                    raise feature_tools.FeatureOperationError("add_sketch_constraint requires sketch_id.")
+                if not constraint_type:
+                    raise feature_tools.FeatureOperationError("add_sketch_constraint requires constraint_type.")
+                if not entity_refs:
+                    raise feature_tools.FeatureOperationError("add_sketch_constraint requires entity_refs.")
+
+                result = feature_tools.add_sketch_constraint(
+                    self._app,
+                    str(sketch_id),
+                    str(constraint_type),
+                    entity_refs,
+                )
+                success = True
+                message_text = result.get("message", "Sketch constraint added successfully.")
+                payload.update({
+                    "success": success,
+                    "message": message_text,
+                    "constraint_type": result.get("constraint_type"),
+                    "entity_count": result.get("entity_count"),
+                })
+                self._palette_manager.send_log('success', message_text, doc_id=doc_id)
 
             elif operation == "create_tapped_hole":
                 face_token = params.get("face_token") or message.get("face_token")
