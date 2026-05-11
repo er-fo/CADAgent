@@ -4018,6 +4018,18 @@ def create_countersink_hole(
     holes = face_component.features.holeFeatures
     temp_sketch = face_component.sketches.add(face)
 
+    def _cleanup_temp_sketch() -> None:
+        if not temp_sketch:
+            return
+        try:
+            temp_sketch.isVisible = False
+        except Exception:
+            logger.debug("Could not hide countersink positioning sketch during cleanup")
+        try:
+            temp_sketch.deleteMe()
+        except Exception:
+            logger.debug("Could not delete countersink positioning sketch during cleanup")
+
     try:
         sketch_point = temp_sketch.sketchPoints.add(temp_sketch.modelToSketchSpace(center_point))
         hole_input = holes.createCountersinkInput(
@@ -4038,8 +4050,10 @@ def create_countersink_hole(
         except Exception:
             logger.debug("Could not hide countersink positioning sketch")
     except FeatureOperationError:
+        _cleanup_temp_sketch()
         raise
     except Exception as exc:
+        _cleanup_temp_sketch()
         raise FeatureOperationError(f"Failed to create countersink hole: {exc}") from exc
 
     return {

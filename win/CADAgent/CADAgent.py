@@ -122,6 +122,18 @@ _controller: Optional["AgentController"] = None
 SELECTION_PREVIEW_LIMIT = 6
 
 
+def _coerce_strict_bool(value: Any, field_name: str) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized == "true":
+            return True
+        if normalized == "false":
+            return False
+    raise feature_tools.FeatureOperationError(f"{field_name} must be a boolean.")
+
+
 class PlanApprovalEventHandler(adsk.core.CustomEventHandler):
     """Handles plan approval on the main UI thread via CustomEvent."""
 
@@ -1854,8 +1866,7 @@ class AgentController:
                 if thickness_unit_norm not in {"mm", "cm", "m", "in"}:
                     raise feature_tools.FeatureOperationError("thickness_unit must be one of ['mm', 'cm', 'm', 'in'].")
 
-                if not isinstance(is_tangent_chain, bool):
-                    raise feature_tools.FeatureOperationError("is_tangent_chain must be a boolean.")
+                is_tangent_chain = _coerce_strict_bool(is_tangent_chain, "is_tangent_chain")
 
                 shell_type_norm = (str(shell_type or "sharp")).strip().lower()
                 if shell_type_norm not in {"sharp", "rounded"}:
@@ -2060,7 +2071,8 @@ class AgentController:
                     raise feature_tools.FeatureOperationError("apply_draft requires neutral_plane_ref.")
                 if draft_angle is None:
                     raise feature_tools.FeatureOperationError("apply_draft requires draft_angle.")
-                if not bool(is_tangent_chain):
+                is_tangent_chain = _coerce_strict_bool(is_tangent_chain, "is_tangent_chain")
+                if not is_tangent_chain:
                     raise feature_tools.FeatureOperationError("apply_draft currently supports only tangent-chain=True requests.")
 
                 result = feature_tools.apply_draft(
@@ -2148,13 +2160,14 @@ class AgentController:
                     raise feature_tools.FeatureOperationError("combine_bodies requires tool_body_tokens.")
                 if not combine_operation:
                     raise feature_tools.FeatureOperationError("combine_bodies requires operation.")
+                keep_tools = _coerce_strict_bool(keep_tools, "keep_tools")
 
                 result = feature_tools.combine_bodies(
                     self._app,
                     str(target_body_token),
                     tool_body_tokens,
                     str(combine_operation),
-                    bool(keep_tools),
+                    keep_tools,
                     str(feature_name),
                 )
                 success = True
@@ -2170,6 +2183,12 @@ class AgentController:
                 self._palette_manager.send_log('success', message_text, doc_id=doc_id)
 
             elif operation == "split_body":
+                target_body_token = (
+                    message.get("target_body_token")
+                    or params.get("target_body_token")
+                    or message.get("target_body_ref")
+                    or params.get("target_body_ref")
+                )
                 body_tokens = (
                     message.get("entity_tokens")
                     or params.get("entity_tokens")
@@ -2181,18 +2200,27 @@ class AgentController:
                 extend_splitting_tool = message.get("extend_splitting_tool", params.get("extend_splitting_tool", True))
                 feature_name = message.get("feature_name") or params.get("feature_name") or ""
 
-                if not body_tokens:
-                    raise feature_tools.FeatureOperationError("split_body requires one target body token.")
-                if len(body_tokens) != 1:
+                if target_body_token and body_tokens:
+                    raise feature_tools.FeatureOperationError(
+                        "split_body accepts either target_body_token/target_body_ref or one entity_tokens/body_refs entry, not both."
+                    )
+                if not target_body_token:
+                    if not body_tokens:
+                        raise feature_tools.FeatureOperationError("split_body requires one target body token.")
+                    if len(body_tokens) != 1:
+                        raise feature_tools.FeatureOperationError("split_body currently supports exactly one target body token.")
+                    target_body_token = body_tokens[0]
+                extend_splitting_tool = _coerce_strict_bool(extend_splitting_tool, "extend_splitting_tool")
+                if not target_body_token:
                     raise feature_tools.FeatureOperationError("split_body currently supports exactly one target body token.")
                 if not splitting_tool_ref:
                     raise feature_tools.FeatureOperationError("split_body requires splitting_tool_ref.")
 
                 result = feature_tools.split_body(
                     self._app,
-                    str(body_tokens[0]),
+                    str(target_body_token),
                     str(splitting_tool_ref),
-                    bool(extend_splitting_tool),
+                    extend_splitting_tool,
                     str(feature_name),
                 )
                 success = True
@@ -2221,12 +2249,13 @@ class AgentController:
                     raise feature_tools.FeatureOperationError("split_face requires face_tokens.")
                 if not splitting_tool_ref:
                     raise feature_tools.FeatureOperationError("split_face requires splitting_tool_ref.")
+                extend_splitting_tool = _coerce_strict_bool(extend_splitting_tool, "extend_splitting_tool")
 
                 result = feature_tools.split_face(
                     self._app,
                     face_tokens,
                     str(splitting_tool_ref),
-                    bool(extend_splitting_tool),
+                    extend_splitting_tool,
                     str(feature_name),
                 )
                 success = True
