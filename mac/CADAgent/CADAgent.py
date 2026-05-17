@@ -389,7 +389,7 @@ class AgentController:
         request_text: str,
         planning_mode: bool,
         include_visual_context: bool = False,
-        model_name: str = "gpt-5.4-mini",
+        model_name: str = "gpt-5.4",
         request_id: Optional[str] = None,
         image_data: Optional[str] = None,
         image_format: str = "png",

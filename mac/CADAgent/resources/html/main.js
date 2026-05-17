@@ -82,7 +82,7 @@ let state = {
     visualContextEnabled: false,
     captureRunLogs: false,
     activeRun: null,
-    selectedModel: 'gpt-5.4-mini',
+    selectedModel: 'gpt-5.4',
     reasoningEffort: 'medium',
     reasoning: {
         activeSession: null,

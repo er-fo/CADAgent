@@ -799,7 +799,7 @@ class HTMLEventHandler(adsk.core.HTMLEventHandler):
                 request = payload.get('request', '').strip()
                 planning_mode = payload.get('planning_mode', True)
                 include_visual_context = bool(payload.get('include_visual_context', False))
-                model_name = payload.get('model_name', 'gpt-5.4-mini')
+                model_name = payload.get('model_name', 'gpt-5.4')
                 reasoning_effort = payload.get('reasoning_effort')
                 request_id = payload.get('request_id')  # Extract request_id for checkpoint correlation
 
