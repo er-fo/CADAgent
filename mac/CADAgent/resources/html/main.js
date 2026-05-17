@@ -82,8 +82,8 @@ let state = {
     visualContextEnabled: false,
     captureRunLogs: false,
     activeRun: null,
-    selectedModel: 'minimax.minimax-m2.5',
-    reasoningEffort: 'off',
+    selectedModel: 'gpt-5.4-mini',
+    reasoningEffort: 'medium',
     reasoning: {
         activeSession: null,
         sessionCounter: 0

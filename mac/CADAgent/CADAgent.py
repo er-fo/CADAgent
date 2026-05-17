@@ -389,7 +389,7 @@ class AgentController:
         request_text: str,
         planning_mode: bool,
         include_visual_context: bool = False,
-        model_name: str = "claude-sonnet-4.5",
+        model_name: str = "gpt-5.4-mini",
         request_id: Optional[str] = None,
         image_data: Optional[str] = None,
         image_format: str = "png",
@@ -3014,6 +3014,8 @@ class AgentController:
         Returns:
             True if authenticated, False otherwise
         """
+        if self._auth_bypass:
+            return True
         if not self._auth_client:
             return False
         return self._auth_client.is_authenticated()
@@ -3029,6 +3031,8 @@ class AgentController:
         Returns:
             User email or None if not authenticated
         """
+        if self._auth_bypass:
+            return "local-codex-lb@cadagent.dev" if config.LOCAL_CODEX_LB else None
         if not self._auth_client:
             return None
         return self._auth_client.get_user_email()
@@ -3045,6 +3049,13 @@ class AgentController:
         Raises:
             PermissionError: If not authenticated
         """
+        if config.LOCAL_CODEX_LB and self._auth_bypass:
+            return {
+                "anthropic": {"configured": False, "masked": None, "value": ""},
+                "openai": {"configured": True, "masked": "codex-lb-local", "value": ""},
+                "google": {"configured": False, "masked": None, "value": ""},
+            }
+
         if not self.is_authenticated():
             raise PermissionError("Authentication required to get API keys status")
         api_key_manager = get_api_key_manager()

@@ -58,6 +58,7 @@ DEBUG = os.environ.get("CADAGENT_DEBUG", "False").lower() == "true"
 TESTING_MODE = os.environ.get("CADAGENT_TESTING_MODE", "False").lower() == "true"
 TEST_EMAIL = os.environ.get("CADAGENT_TEST_EMAIL", "").strip().lower()
 TEST_PASSWORD = os.environ.get("CADAGENT_TEST_PASSWORD", "")
+LOCAL_CODEX_LB = os.environ.get("CADAGENT_LOCAL_CODEX_LB", "false").lower() in ("1", "true", "yes", "on")
 
 # Company and add-in identification
 COMPANY_NAME = "CADAgent"
