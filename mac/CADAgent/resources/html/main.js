@@ -6386,6 +6386,10 @@ const REASONING_OPTIONS = {
     ],
     managed_bedrock: [
         { value: 'off', label: 'COT: Off' },
+        { value: 'low', label: 'COT: Low' },
+        { value: 'medium', label: 'COT: Medium' },
+        { value: 'high', label: 'COT: High' },
+        { value: 'xhigh', label: 'COT: Extra High' },
     ],
 };
 
