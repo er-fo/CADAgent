@@ -6408,9 +6408,9 @@ const MODEL_PROVIDER_MAP = {
     'o3': 'openai',
     'o3-mini': 'openai',
     'o4': 'openai',
-    // Anthropic
-    'claude-sonnet-4.6': 'anthropic',
-    'claude-opus-4.7': 'anthropic',
+    // CADAgent managed Bedrock models
+    'claude-sonnet-4.6': 'managed_bedrock',
+    'claude-opus-4.8': 'managed_bedrock',
     // CADAgent free managed models
     'minimax.minimax-m2.5': 'minimax',
     'moonshotai.kimi-k2.5': 'managed_bedrock',
