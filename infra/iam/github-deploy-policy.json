@@ -10,7 +10,7 @@
         "s3:GetObjectVersion"
       ],
       "Resource": [
-        "arn:aws:s3:::cadagent-backend-legacy-deploy-598566032640/backend-legacy/*"
+        "arn:aws:s3:::cadagent-backend-legacy-deploy-<AWS_ACCOUNT_ID>/backend-legacy/*"
       ]
     },
     {

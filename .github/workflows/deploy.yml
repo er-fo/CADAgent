@@ -4,6 +4,13 @@ on:
   push:
     branches:
       - main
+    paths:
+      - "backend/**"
+      - "scripts/**"
+      - "appspec.yml"
+      - "requirements*.txt"
+      - "start_backend.py"
+      - ".github/workflows/deploy.yml"
   workflow_dispatch:
 
 permissions:
@@ -12,7 +19,7 @@ permissions:
 
 env:
   AWS_REGION: eu-north-1
-  S3_BUCKET: cadagent-backend-legacy-deploy-598566032640
+  S3_BUCKET: ${{ vars.DEPLOY_S3_BUCKET }}
   S3_KEY_PREFIX: backend-legacy
   CODEDEPLOY_APPLICATION: cadagent-backend-legacy
   CODEDEPLOY_DEPLOYMENT_GROUP: cadagent-backend-legacy-ec2
@@ -33,7 +40,7 @@ jobs:
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: arn:aws:iam::598566032640:role/github-actions-cadagent-backend-legacy-deploy-role
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Install dependencies

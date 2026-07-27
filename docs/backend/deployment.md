@@ -62,12 +62,12 @@ GitHub permissions:
 
 AWS identity:
 
-- Role: `arn:aws:iam::598566032640:role/github-actions-cadagent-backend-legacy-deploy-role`
+- Role: `arn:aws:iam::<AWS_ACCOUNT_ID>:role/github-actions-cadagent-backend-legacy-deploy-role`
 - Region: `eu-north-1`
 
 Deploy artifact:
 
-- Bucket: `cadagent-backend-legacy-deploy-598566032640`
+- Bucket: `cadagent-backend-legacy-deploy-<AWS_ACCOUNT_ID>`
 - Prefix: `backend-legacy`
 - Object pattern: `backend-legacy/deployment-${GITHUB_SHA}.zip`
 
@@ -148,7 +148,7 @@ GitHub permissions:
 AWS identity:
 
 - Role variable: `AWS_MONITOR_ROLE_ARN`
-- Current role: `arn:aws:iam::598566032640:role/github-actions-cadagent-backend-legacy-monitor-role`
+- Current role: `arn:aws:iam::<AWS_ACCOUNT_ID>:role/github-actions-cadagent-backend-legacy-monitor-role`
 - Inline policy: `cadagent-backend-legacy-monitor-read-policy`
 - Policy source: `infra/iam/github-monitor-policy.json`
 
