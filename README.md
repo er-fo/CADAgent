@@ -7,8 +7,8 @@ This repository holds the whole product:
 | Part | Where | What it does |
 |---|---|---|
 | Fusion 360 add-in | `mac/CADAgent/`, `win/CADAgent/` | Runs inside Fusion. Sends your request to the backend over a websocket and applies the returned CAD operations. |
-| Backend | `backend/` | FastAPI service that turns natural-language requests into tool calls the add-in executes. Runs in production at `ws.cadagentpro.com`. |
-| Deploy pipeline | `.github/workflows/`, `infra/`, `appspec.yml`, `scripts/` | GitHub Actions → S3 → CodeDeploy → EC2 for the backend; a manual release workflow packages the add-in. |
+| Backend | `backend/` | FastAPI service that turns natural-language requests into tool calls the add-in executes. Self-hosted: run it locally or on your own server. |
+| Infra templates | `infra/`, `appspec.yml`, `scripts/` | Reference AWS deploy setup (GitHub Actions → S3 → CodeDeploy → EC2) from when the backend ran as a hosted service. |
 
 ## Install the add-in
 
@@ -33,7 +33,7 @@ cp .env.example .env   # fill in the keys you need
 python start_backend.py
 ```
 
-The service listens on `ws://localhost:8000/ws/{session_id}` with a health check at `/health`. `.env.example` documents every variable; the add-in can point at a local backend via `BACKEND_HOST` in its `.env.cadagent`.
+The service listens on `ws://localhost:8000/ws/{session_id}` with a health check at `/health`. `.env.example` documents every variable; point the add-in at your backend via `BACKEND_HOST` in its `.env.cadagent`. The hosted backend at `ws.cadagentpro.com` is shut down — running your own backend is the supported path.
 
 ## Documentation
 
