@@ -1,0 +1,13 @@
+{
+  "ec2TagSet": {
+    "ec2TagSetList": [
+      [
+        {
+          "Key": "CodeDeployDeployment",
+          "Value": "cadagent-backend-legacy",
+          "Type": "KEY_AND_VALUE"
+        }
+      ]
+    ]
+  }
+}
