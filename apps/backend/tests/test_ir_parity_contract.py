@@ -8,35 +8,20 @@ from typing import Any, Dict, List, Tuple
 
 import pytest
 
-try:
-    from .backends.build123d.translator import Build123dCapabilityError, translate_ir_document_to_build123d
-    from .backends.fusion.translator import translate_ir_to_fusion_tool_call
-    from .ir.capabilities import (
-        CAD_TOOL_CAPABILITIES,
-        NON_CAD_AGENT_TOOLS,
-        SUPPORTED_BUILD123D_IR_OPERATIONS,
-        missing_capability_rows,
-    )
-    from .ir.document import IRDocumentState
-    from .ir.mapper import map_tool_call_to_ir
-    from .ir.types import AddRectangleParams, CreateSketchParams, ExtrudeParams, IRDocument, IROperation, SimpleHoleParams
-    from .ir.validator import validate_operation
-except ImportError:  # pragma: no cover
-    from backend.backend.backends.build123d.translator import Build123dCapabilityError, translate_ir_document_to_build123d
-    from backend.backend.backends.fusion.translator import translate_ir_to_fusion_tool_call
-    from backend.backend.ir.capabilities import (
-        CAD_TOOL_CAPABILITIES,
-        NON_CAD_AGENT_TOOLS,
-        SUPPORTED_BUILD123D_IR_OPERATIONS,
-        missing_capability_rows,
-    )
-    from backend.backend.ir.document import IRDocumentState
-    from backend.backend.ir.mapper import map_tool_call_to_ir
-    from backend.backend.ir.types import AddRectangleParams, CreateSketchParams, ExtrudeParams, IRDocument, IROperation, SimpleHoleParams
-    from backend.backend.ir.validator import validate_operation
+from backend.backends.build123d.translator import Build123dCapabilityError, translate_ir_document_to_build123d
+from backend.backends.fusion.translator import translate_ir_to_fusion_tool_call
+from backend.ir.capabilities import (
+    CAD_TOOL_CAPABILITIES,
+    NON_CAD_AGENT_TOOLS,
+    SUPPORTED_BUILD123D_IR_OPERATIONS,
+    missing_capability_rows,
+)
+from backend.ir.document import IRDocumentState
+from backend.ir.mapper import map_tool_call_to_ir
+from backend.ir.types import AddRectangleParams, CreateSketchParams, ExtrudeParams, IRDocument, IROperation, SimpleHoleParams
+from backend.ir.validator import validate_operation
 
-
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parents[1] / "backend"
 LLM_CLIENT = ROOT / "llm_client.py"
 
 

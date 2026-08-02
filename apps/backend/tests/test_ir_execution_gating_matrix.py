@@ -6,13 +6,8 @@ from typing import Any, Dict, List, Optional
 
 import pytest
 
-try:
-    from . import agent_workflow
-    from .backends.base import TargetExecutionResult
-except ImportError:  # pragma: no cover
-    from backend.backend import agent_workflow
-    from backend.backend.backends.base import TargetExecutionResult
-
+from backend import agent_workflow
+from backend.backends.base import TargetExecutionResult
 
 @dataclass
 class _FakeReasoningContext:

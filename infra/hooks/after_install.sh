@@ -16,7 +16,7 @@ if [ ! -d "$RUNTIME_VENV" ]; then
 fi
 
 "$RUNTIME_VENV/bin/pip" install --upgrade pip
-"$RUNTIME_VENV/bin/pip" install -r "$APP_DIR/requirements.txt"
+"$RUNTIME_VENV/bin/pip" install -r "$APP_DIR/apps/backend/requirements.txt"
 
 find "$APP_DIR" -name '__pycache__' -type d -prune -exec rm -rf {} +
 find "$APP_DIR" -name '*.pyc' -delete

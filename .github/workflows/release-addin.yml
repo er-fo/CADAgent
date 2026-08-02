@@ -82,10 +82,10 @@ jobs:
 
           for platform in mac win; do
             for path in \
-              "$platform/CADAgent/CADAgent.py" \
-              "$platform/CADAgent/CADAgent.manifest" \
-              "$platform/CADAgent/PackageContents.xml" \
-              "$platform/CADAgent/.env.cadagent"; do
+              "apps/addin/$platform/CADAgent/CADAgent.py" \
+              "apps/addin/$platform/CADAgent/CADAgent.manifest" \
+              "apps/addin/$platform/CADAgent/PackageContents.xml" \
+              "apps/addin/$platform/CADAgent/.env.cadagent"; do
               test -f "$path" || {
                 echo "Missing required file: $path" >&2
                 exit 1
@@ -101,8 +101,8 @@ jobs:
           rm -rf release-staging dist
           mkdir -p release-staging/mac release-staging/win dist
 
-          cp -R mac/CADAgent release-staging/mac/CADAgent
-          cp -R win/CADAgent release-staging/win/CADAgent
+          cp -R apps/addin/mac/CADAgent release-staging/mac/CADAgent
+          cp -R apps/addin/win/CADAgent release-staging/win/CADAgent
 
           find release-staging -name ".DS_Store" -delete
           find release-staging -name "__pycache__" -type d -prune -exec rm -rf {} +

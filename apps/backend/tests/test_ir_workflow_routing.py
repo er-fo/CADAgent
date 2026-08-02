@@ -5,15 +5,9 @@ from typing import Any, Dict, List, Optional
 
 import pytest
 
-try:
-    from . import agent_workflow
-    from .backends.base import TargetExecutionResult
-    from .entity_store import EntityStore
-except ImportError:  # pragma: no cover
-    from backend.backend import agent_workflow
-    from backend.backend.backends.base import TargetExecutionResult
-    from backend.backend.entity_store import EntityStore
-
+from backend import agent_workflow
+from backend.backends.base import TargetExecutionResult
+from backend.entity_store import EntityStore
 
 @dataclass
 class _FakeReasoningContext:

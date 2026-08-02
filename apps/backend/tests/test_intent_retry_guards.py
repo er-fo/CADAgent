@@ -1,18 +1,10 @@
 """Regression tests for failure-intent retry guards and extrude diagnostics."""
 
-try:
-    from .agent_workflow import (
-        _build_failure_intent_key,
-        _summarise_execution_result,
-    )
-    from .code_generator import translate_tool_call
-except ImportError:  # pragma: no cover
-    from backend.backend.agent_workflow import (
-        _build_failure_intent_key,
-        _summarise_execution_result,
-    )
-    from backend.backend.code_generator import translate_tool_call
-
+from backend.agent_workflow import (
+    _build_failure_intent_key,
+    _summarise_execution_result,
+)
+from backend.code_generator import translate_tool_call
 
 def _cut_extrude_input(distance: float, operation: str = "Cut"):
     return {

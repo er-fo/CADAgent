@@ -1,6 +1,6 @@
 import pytest
 
-from scripts.sync_brevo_users import (
+from ops.sync_brevo_users import (
     ReconciliationPlan,
     SyncError,
     assert_removal_guardrail,

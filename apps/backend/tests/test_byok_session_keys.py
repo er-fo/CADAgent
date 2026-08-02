@@ -4,11 +4,7 @@ from starlette.websockets import WebSocketDisconnect
 
 from backend.websocket_manager import ConnectionManager
 
-try:
-    from . import main
-except ImportError:  # pragma: no cover
-    from backend import main
-
+from backend import main
 
 def _configure_main_for_ws_test(monkeypatch: pytest.MonkeyPatch) -> ConnectionManager:
     manager = main.ConnectionManager()

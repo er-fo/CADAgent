@@ -4,69 +4,36 @@ from pathlib import Path
 
 import pytest
 
-try:
-    from .backends.build123d import Build123dTargetExecutor
-    from .backends.build123d.translator import Build123dCapabilityError, translate_ir_document_to_build123d
-    from .backends.fusion.executor import FusionTargetExecutor
-    from .backends.fusion.translator import translate_ir_to_fusion_tool_call
-    from .entity_store import EntityStore
-    from .ir.types import (
-        AddArcParams,
-        ChamferParams,
-        AddCircleParams,
-        AddLineParams,
-        AddRectangleParams,
-        CounterboreHoleParams,
-        CreateConstructionPlaneParams,
-        CreateSketchParams,
-        DeleteFeatureParams,
-        ExtrudeParams,
-        ExternalThreadParams,
-        FeatureParameterEditParams,
-        FeatureSuppressionParams,
-        FilletParams,
-        IRDocument,
-        IROperation,
-        LoftParams,
-        PatternFeatureParams,
-        RevolveParams,
-        SelectEntitiesParams,
-        ShellParams,
-        SimpleHoleParams,
-        TappedHoleParams,
-    )
-except ImportError:  # pragma: no cover
-    from backend.backend.backends.build123d import Build123dTargetExecutor
-    from backend.backend.backends.build123d.translator import Build123dCapabilityError, translate_ir_document_to_build123d
-    from backend.backend.backends.fusion.executor import FusionTargetExecutor
-    from backend.backend.backends.fusion.translator import translate_ir_to_fusion_tool_call
-    from backend.backend.entity_store import EntityStore
-    from backend.backend.ir.types import (
-        AddArcParams,
-        ChamferParams,
-        AddCircleParams,
-        AddLineParams,
-        AddRectangleParams,
-        CounterboreHoleParams,
-        CreateConstructionPlaneParams,
-        CreateSketchParams,
-        DeleteFeatureParams,
-        ExtrudeParams,
-        ExternalThreadParams,
-        FeatureParameterEditParams,
-        FeatureSuppressionParams,
-        FilletParams,
-        IRDocument,
-        IROperation,
-        LoftParams,
-        PatternFeatureParams,
-        RevolveParams,
-        SelectEntitiesParams,
-        ShellParams,
-        SimpleHoleParams,
-        TappedHoleParams,
-    )
-
+from backend.backends.build123d import Build123dTargetExecutor
+from backend.backends.build123d.translator import Build123dCapabilityError, translate_ir_document_to_build123d
+from backend.backends.fusion.executor import FusionTargetExecutor
+from backend.backends.fusion.translator import translate_ir_to_fusion_tool_call
+from backend.entity_store import EntityStore
+from backend.ir.types import (
+    AddArcParams,
+    ChamferParams,
+    AddCircleParams,
+    AddLineParams,
+    AddRectangleParams,
+    CounterboreHoleParams,
+    CreateConstructionPlaneParams,
+    CreateSketchParams,
+    DeleteFeatureParams,
+    ExtrudeParams,
+    ExternalThreadParams,
+    FeatureParameterEditParams,
+    FeatureSuppressionParams,
+    FilletParams,
+    IRDocument,
+    IROperation,
+    LoftParams,
+    PatternFeatureParams,
+    RevolveParams,
+    SelectEntitiesParams,
+    ShellParams,
+    SimpleHoleParams,
+    TappedHoleParams,
+)
 
 try:
     import build123d  # noqa: F401

@@ -21,18 +21,18 @@ permissions:
 
 hooks:
   BeforeInstall:
-    - location: scripts/before_install.sh
+    - location: infra/hooks/before_install.sh
       timeout: 300
       runas: root
   AfterInstall:
-    - location: scripts/after_install.sh
+    - location: infra/hooks/after_install.sh
       timeout: 1200
       runas: root
   ApplicationStart:
-    - location: scripts/start_server.sh
+    - location: infra/hooks/start_server.sh
       timeout: 300
       runas: root
   ValidateService:
-    - location: scripts/validate_service.sh
+    - location: infra/hooks/validate_service.sh
       timeout: 300
       runas: root

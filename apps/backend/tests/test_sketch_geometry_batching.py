@@ -7,17 +7,10 @@ from typing import Any, Dict, List, Mapping, Optional
 
 import pytest
 
-try:
-    from . import agent_workflow
-    from .entity_store import EntityStore
-    from .ir import IRDocumentState, map_tool_call_to_ir
-    from .prompt_structure import get_cluster_tools
-except ImportError:  # pragma: no cover
-    from backend.backend import agent_workflow
-    from backend.backend.entity_store import EntityStore
-    from backend.backend.ir import IRDocumentState, map_tool_call_to_ir
-    from backend.backend.prompt_structure import get_cluster_tools
-
+from backend import agent_workflow
+from backend.entity_store import EntityStore
+from backend.ir import IRDocumentState, map_tool_call_to_ir
+from backend.prompt_structure import get_cluster_tools
 
 @dataclass
 class _FakeReasoningContext:

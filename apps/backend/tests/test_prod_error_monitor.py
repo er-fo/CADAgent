@@ -2,7 +2,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from scripts import prod_error_monitor as monitor
+from ops import prod_error_monitor as monitor
 
 
 NOW = datetime(2026, 5, 10, 12, 0, tzinfo=timezone.utc)

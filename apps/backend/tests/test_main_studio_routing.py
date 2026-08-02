@@ -1,11 +1,7 @@
 import pytest
 from fastapi.testclient import TestClient
 
-try:
-    from . import main
-except ImportError:  # pragma: no cover
-    from backend.backend import main
-
+from backend import main
 
 pytestmark = pytest.mark.xfail(
     reason="The legacy production backend does not route studio_* websocket messages.",

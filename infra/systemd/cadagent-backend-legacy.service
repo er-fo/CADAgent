@@ -4,9 +4,9 @@ After=network.target
 
 [Service]
 Type=simple
-WorkingDirectory=/opt/backend-legacy
+WorkingDirectory=/opt/backend-legacy/apps/backend
 Environment=PYTHONUNBUFFERED=1
-EnvironmentFile=-/opt/backend-legacy/.env
+EnvironmentFile=-/opt/backend-legacy/apps/backend/.env
 ExecStart=/opt/backend/.venv/bin/uvicorn backend.main:app --host 0.0.0.0 --port 8001 --log-level info
 Restart=on-failure
 RestartSec=5

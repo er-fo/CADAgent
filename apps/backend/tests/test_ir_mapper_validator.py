@@ -2,39 +2,21 @@ from dataclasses import replace
 
 import pytest
 
-try:
-    from .ir.document import IRDocumentState
-    from .ir.mapper import UnsupportedToolMappingError, map_tool_call_to_ir
-    from .ir.types import (
-        AddLineParams,
-        ExtrudeParams,
-        ExternalThreadParams,
-        FeatureParameterEditParams,
-        FeatureSuppressionParams,
-        IROperation,
-        ListFeaturesParams,
-        PatternFeatureParams,
-        SimpleHoleParams,
-        TappedHoleParams,
-    )
-    from .ir.validator import validate_ir_candidate, validate_ir_sequence, validate_operation
-except ImportError:  # pragma: no cover
-    from backend.backend.ir.document import IRDocumentState
-    from backend.backend.ir.mapper import UnsupportedToolMappingError, map_tool_call_to_ir
-    from backend.backend.ir.types import (
-        AddLineParams,
-        ExtrudeParams,
-        ExternalThreadParams,
-        FeatureParameterEditParams,
-        FeatureSuppressionParams,
-        IROperation,
-        ListFeaturesParams,
-        PatternFeatureParams,
-        SimpleHoleParams,
-        TappedHoleParams,
-    )
-    from backend.backend.ir.validator import validate_ir_candidate, validate_ir_sequence, validate_operation
-
+from backend.ir.document import IRDocumentState
+from backend.ir.mapper import UnsupportedToolMappingError, map_tool_call_to_ir
+from backend.ir.types import (
+    AddLineParams,
+    ExtrudeParams,
+    ExternalThreadParams,
+    FeatureParameterEditParams,
+    FeatureSuppressionParams,
+    IROperation,
+    ListFeaturesParams,
+    PatternFeatureParams,
+    SimpleHoleParams,
+    TappedHoleParams,
+)
+from backend.ir.validator import validate_ir_candidate, validate_ir_sequence, validate_operation
 
 def test_mapper_converts_rectangle_and_extrude_to_shared_ir():
     state = IRDocumentState()

@@ -1,10 +1,6 @@
 """Tests for session context extraction metadata and flattened counts."""
 
-try:
-    from .session_logger import _extract_session_context
-except ImportError:  # pragma: no cover
-    from backend.backend.session_logger import _extract_session_context
-
+from backend.session_logger import _extract_session_context
 
 def test_extract_session_context_includes_capture_phase_and_state_counts():
     context = _extract_session_context(

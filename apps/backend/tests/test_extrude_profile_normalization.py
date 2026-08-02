@@ -1,11 +1,7 @@
 import pytest
 
-try:
-    # When collected as part of the `backend` package (pytest default for this repo layout).
-    from .code_generator import CodeGenerationError, translate_tool_call
-except ImportError:  # pragma: no cover - fallback for alternate import contexts
-    from backend.backend.code_generator import CodeGenerationError, translate_tool_call
-
+# When collected as part of the `backend` package (pytest default for this repo layout).
+from backend.code_generator import CodeGenerationError, translate_tool_call
 
 def test_extrude_profile_empty_profile_indices_is_rejected():
     with pytest.raises(CodeGenerationError) as exc:
@@ -87,10 +83,7 @@ def _import_enricher():
     """Import the enricher function, setting a dummy API key if needed."""
     import os
     os.environ.setdefault("OPENAI_API_KEY", "test-key-not-used")
-    try:
-        from .agent_workflow import _enrich_list_sketch_profiles_result
-    except ImportError:
-        from backend.backend.agent_workflow import _enrich_list_sketch_profiles_result
+    from backend.agent_workflow import _enrich_list_sketch_profiles_result
     return _enrich_list_sketch_profiles_result
 
 

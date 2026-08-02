@@ -62,7 +62,7 @@ jobs:
             list_id="${{ inputs.list_id }}"
           fi
 
-          python scripts/sync_brevo_users.py \
+          python apps/backend/ops/sync_brevo_users.py \
             --list-id "${list_id}" \
             --waitlist-list-id "${BREVO_WAITLIST_LIST_ID}" \
             --max-removals "${BREVO_USERS_SYNC_MAX_REMOVALS}" \
