@@ -4,8 +4,8 @@ Date: 2026-05-05
 
 ## What Changed
 
-- Added a Phase 0 parity contract for the Fusion-visible CAD tool surface in `backend/ir/capabilities.py`.
-- Added Phase 1 golden tests in `backend/test_ir_parity_contract.py`.
+- Added a Phase 0 parity contract for the Fusion-visible CAD tool surface in `apps/backend/backend/ir/capabilities.py`.
+- Added Phase 1 golden tests in `apps/backend/backend/test_ir_parity_contract.py`.
 - Changed the build123d translator to raise a typed capability error for unsupported IR operations.
 
 ## Why

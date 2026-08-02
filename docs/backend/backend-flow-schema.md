@@ -628,11 +628,11 @@ Filesystem
   |     STEP exports
   |
   +-- deployment bundle files
-        appspec.yml
-        backend/
-        requirements.txt
-        start_backend.py
-        scripts/
+        infra/appspec.yml
+        infra/hooks/
+        apps/backend/backend/
+        apps/backend/requirements.txt
+        apps/backend/start_backend.py
 
 Supabase
   |
@@ -695,25 +695,25 @@ Health checks
 
 ## Source Anchors
 
-- `backend/main.py`: FastAPI routes, WebSocket message dispatch, auth gate.
-- `backend/websocket_manager.py`: session stores, queues, connection lifecycle.
-- `backend/agent_workflow.py`: execute/planning/revert/resume workflows.
-- `backend/attachments.py`: attachment normalization and prompt context.
-- `backend/vision_translator.py`: image/sketch-to-text translation.
-- `backend/prompt_router.py`: request-to-cluster routing.
-- `backend/prompt_builder.py`: prompt and tool assembly.
-- `backend/prompt_structure.py`: cluster docs and tool usage contract.
-- `backend/llm_client.py`: provider selection, streaming, response normalization.
-- `backend/supabase_client.py`: usage-gateway client.
+- `apps/backend/backend/main.py`: FastAPI routes, WebSocket message dispatch, auth gate.
+- `apps/backend/backend/websocket_manager.py`: session stores, queues, connection lifecycle.
+- `apps/backend/backend/agent_workflow.py`: execute/planning/revert/resume workflows.
+- `apps/backend/backend/attachments.py`: attachment normalization and prompt context.
+- `apps/backend/backend/vision_translator.py`: image/sketch-to-text translation.
+- `apps/backend/backend/prompt_router.py`: request-to-cluster routing.
+- `apps/backend/backend/prompt_builder.py`: prompt and tool assembly.
+- `apps/backend/backend/prompt_structure.py`: cluster docs and tool usage contract.
+- `apps/backend/backend/llm_client.py`: provider selection, streaming, response normalization.
+- `apps/backend/backend/supabase_client.py`: usage-gateway client.
 - `supabase/functions/api-generate/index.ts`: quota-enforced managed model gateway.
-- `backend/code_generator.py`: legacy Fusion Python code generation.
-- `backend/ir/`: shared target-independent IR types, mapper, validator.
-- `backend/backends/fusion/`: Fusion target adapter.
-- `backend/backends/build123d/`: build123d target adapter and STEP export.
-- `backend/entity_store.py`: short ref to Fusion token mapping.
-- `backend/session_logger.py`: session/API-call logging.
-- `scripts/sync_brevo_users.py`: Supabase Auth to Brevo operational list sync.
+- `apps/backend/backend/code_generator.py`: legacy Fusion Python code generation.
+- `apps/backend/backend/ir/`: shared target-independent IR types, mapper, validator.
+- `apps/backend/backend/backends/fusion/`: Fusion target adapter.
+- `apps/backend/backend/backends/build123d/`: build123d target adapter and STEP export.
+- `apps/backend/backend/entity_store.py`: short ref to Fusion token mapping.
+- `apps/backend/backend/session_logger.py`: session/API-call logging.
+- `apps/backend/ops/sync_brevo_users.py`: Supabase Auth to Brevo operational list sync.
 - `.github/workflows/deploy.yml`: CI/CD path to EC2 production.
-- `CADAgent/mac/CADAgent/websocket_client.py`: add-in WebSocket transport.
-- `CADAgent/mac/CADAgent/CADAgent.py`: add-in request assembly and message handling.
-- `CADAgent/mac/CADAgent/code_executor.py`: Fusion-side Python execution.
+- `apps/addin/mac/CADAgent/websocket_client.py`: add-in WebSocket transport.
+- `apps/addin/mac/CADAgent/CADAgent.py`: add-in request assembly and message handling.
+- `apps/addin/mac/CADAgent/code_executor.py`: Fusion-side Python execution.

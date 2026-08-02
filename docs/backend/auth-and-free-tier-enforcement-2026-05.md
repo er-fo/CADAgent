@@ -19,8 +19,8 @@ limits with Supabase.
 
 Relevant files:
 
-- `CADAgent/mac/CADAgent/supabase_auth.py`
-- `CADAgent/mac/CADAgent/websocket_client.py`
+- `apps/addin/mac/CADAgent/supabase_auth.py`
+- `apps/addin/mac/CADAgent/websocket_client.py`
 
 ### Legacy backend
 
@@ -35,20 +35,20 @@ Relevant files:
 
 Relevant files:
 
-- `backend/main.py`
-- `backend/websocket_manager.py`
-- `backend/agent_workflow.py`
+- `apps/backend/backend/main.py`
+- `apps/backend/backend/websocket_manager.py`
+- `apps/backend/backend/agent_workflow.py`
 
 ## Current quota/enforcement state
 
-- `backend/rate_limiter.py` provides per-user request throttling in process memory.
+- `apps/backend/backend/rate_limiter.py` provides per-user request throttling in process memory.
 - That module also defines a daily token quota abstraction, but it is **not** the
   durable production free-tier entitlement system.
 - In-memory quota state resets on process restart and cannot be treated as billing
   or subscription truth.
 - The durable quota path is the **Supabase Edge Function gateway** used by
-  `backend/supabase_client.py`.
-- `backend/llm_client.py` already routes authenticated LLM calls through
+  `apps/backend/backend/supabase_client.py`.
+- `apps/backend/backend/llm_client.py` already routes authenticated LLM calls through
   `functions/v1/api-generate`, which is intended to perform:
   - authentication
   - quota enforcement

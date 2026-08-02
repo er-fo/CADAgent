@@ -2,7 +2,7 @@
 
 ## What Changed
 
-- Added `scripts/sync_brevo_users.py` to reconcile confirmed Supabase Auth users into the Brevo operational users list.
+- Added `apps/backend/ops/sync_brevo_users.py` to reconcile confirmed Supabase Auth users into the Brevo operational users list.
 - Added `.github/workflows/sync-brevo-users.yml` for scheduled reconciliation and explicit manual dry-run/apply runs.
 - Added unit tests for email normalization, reconciliation planning, and destructive-change guardrails.
 
@@ -36,11 +36,11 @@ GitHub Actions requires these secrets:
 Manual apply example:
 
 ```bash
-python scripts/sync_brevo_users.py --list-id 5 --apply
+python apps/backend/ops/sync_brevo_users.py --list-id 5 --apply
 ```
 
 Dry-run example:
 
 ```bash
-python scripts/sync_brevo_users.py --list-id 5 --dry-run
+python apps/backend/ops/sync_brevo_users.py --list-id 5 --dry-run
 ```

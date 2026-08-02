@@ -31,7 +31,7 @@ Reference commands:
 ```bash
 python3.11 -m venv .venv311
 source .venv311/bin/activate
-pip install -r requirements-dev.txt
+pip install -r apps/backend/requirements-dev.txt
 pytest -q
 
 gh run list --repo er-fo/cadagent-backend-legacy --workflow deploy.yml --limit 5
@@ -81,7 +81,7 @@ Workflow steps:
 1. Checkout repository.
 2. Install Python `3.11`.
 3. Assume the GitHub deploy IAM role through OIDC.
-4. Install `requirements-dev.txt`.
+4. Install `apps/backend/requirements-dev.txt`.
 5. Run `pytest` with `PYTHONPATH=.`.
 6. Build `deployment.zip`.
 7. Upload the bundle to S3.
@@ -93,26 +93,26 @@ Workflow steps:
 
 The deploy bundle contains only runtime files:
 
-- `appspec.yml`
-- `backend/`
-- `requirements.txt`
-- `start_backend.py`
-- `scripts/`
+- `infra/appspec.yml` (must sit at the bundle root when the bundle is assembled)
+- `apps/backend/backend/`
+- `apps/backend/requirements.txt`
+- `apps/backend/start_backend.py`
+- `infra/hooks/`
 
 CodeDeploy copies the bundle root to `/opt/backend-legacy` and runs these hooks:
 
-- `BeforeInstall`: `scripts/before_install.sh`
+- `BeforeInstall`: `infra/hooks/before_install.sh`
   - Ensures `/opt/backend-legacy`, `/opt/backend-legacy/.deploy-backups`, and `/opt/deploy` exist.
-  - Backs up the previous `backend/` and `requirements.txt` when present.
-- `AfterInstall`: `scripts/after_install.sh`
+  - Backs up the previous `/opt/backend-legacy/apps/backend/backend/` and its `requirements.txt` when present.
+- `AfterInstall`: `infra/hooks/after_install.sh`
   - Uses Python 3 to create or reuse `/opt/backend/.venv`.
-  - Installs `requirements.txt` into that venv.
+  - Installs `/opt/backend-legacy/apps/backend/requirements.txt` into that venv.
   - Removes Python cache files.
   - Sets `/opt/backend-legacy` ownership to `www-data:www-data`.
-- `ApplicationStart`: `scripts/start_server.sh`
+- `ApplicationStart`: `infra/hooks/start_server.sh`
   - Runs `systemctl daemon-reload`.
   - Restarts `cadagent-backend-legacy.service`.
-- `ValidateService`: `scripts/validate_service.sh`
+- `ValidateService`: `infra/hooks/validate_service.sh`
   - Polls `http://127.0.0.1:8001/health` up to 30 times.
   - Dumps systemd status and recent journal logs when validation fails.
 
@@ -159,9 +159,9 @@ Configured log sources:
 
 Monitor implementation:
 
-- Script: `scripts/prod_error_monitor.py`
+- Script: `apps/backend/ops/prod_error_monitor.py`
 - Config: `infra/monitoring/prod-error-monitor.json`
-- Dependencies: `requirements-monitor.txt`
+- Dependencies: `apps/backend/requirements-monitor.txt`
 
 Detection defaults:
 
@@ -220,9 +220,9 @@ Use nonzero anomalies as an investigation signal, not as proof that the monitor 
 
 ## Versioned but not enforced templates
 
-- `infra/systemd/cadagent-backend-legacy.service`, `infra/nginx/cadagent-backend-legacy.conf`, and `.env.example`
+- `infra/systemd/cadagent-backend-legacy.service`, `infra/nginx/cadagent-backend-legacy.conf`, and `apps/backend/.env.example`
   are versioned reference templates.
-- Current `deploy.yml` deployment bundle does **not** ship `infra/` or `.env.example`, so live host config can diverge
+- Current `deploy.yml` deployment bundle does **not** ship `infra/` or `apps/backend/.env.example`, so live host config can diverge
   unless manually synchronized.
 
 ## Why the deploy scripts use `/opt/backend/.venv`
@@ -239,7 +239,7 @@ environment under `/opt/backend-legacy/.venv` and update the deploy hooks accord
 
 - Systemd unit template: `infra/systemd/cadagent-backend-legacy.service` (includes `EnvironmentFile=-/opt/backend-legacy/.env`)
 - Nginx site template: `infra/nginx/cadagent-backend-legacy.conf` (minimal HTTP proxy template; add TLS/443/cert config for production)
-- Example env contract to seed `/opt/backend-legacy/.env`: `.env.example`
+- Example env contract to seed `/opt/backend-legacy/apps/backend/.env`: `apps/backend/.env.example`
 
 ## Python/runtime version
 
@@ -250,7 +250,7 @@ environment under `/opt/backend-legacy/.venv` and update the deploy hooks accord
 
 ## Known limits
 
-- `infra/`, `.env.example`, docs, and reference templates are versioned in GitHub but are not copied to `/opt/backend-legacy`.
+- `infra/`, `apps/backend/.env.example`, docs, and reference templates are versioned in GitHub but are not copied to `/opt/backend-legacy`.
 - Live nginx, systemd, and environment configuration can diverge from the templates unless manually synchronized.
 - The monitor currently reads `/cadagent/ec2/syslog` and `/cadagent/nginx/error`; nginx access logs are not part of anomaly detection.
 - Scheduled monitoring depends on GitHub Actions availability, GitHub issue permissions, CloudWatch log ingestion, and the dedicated monitor IAM role.

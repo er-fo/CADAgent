@@ -10,7 +10,7 @@ Reconciled `cadagent-backend-legacy` against forensic evidence from `backend-fro
 
 ### WebSocket BYOK path (`update_api_keys`)
 
-- Added behavior-level WebSocket tests on `/ws/{session_id}` in `backend/test_byok_session_keys.py`.
+- Added behavior-level WebSocket tests on `/ws/{session_id}` in `apps/backend/backend/test_byok_session_keys.py`.
 - Covered both payload keys:
   - `llm_api_keys`
   - `api_keys` (alias compatibility)
@@ -18,7 +18,7 @@ Reconciled `cadagent-backend-legacy` against forensic evidence from `backend-fro
 - Verified pre-auth policy:
   - `update_api_keys` is allowed pre-auth.
   - `execute_request` is still rejected pre-auth with `authentication_error` and close code `1008`.
-- Added ack emission in `backend/main.py`:
+- Added ack emission in `apps/backend/backend/main.py`:
   - `{"type":"api_keys_updated"}`
 
 ### BYOK test naming/coverage cleanup
@@ -33,7 +33,7 @@ Reconciled `cadagent-backend-legacy` against forensic evidence from `backend-fro
 
 - Chosen model: **asyncio-only test execution is intentional** for this backend.
 - Why: backend runtime and manager internals are asyncio-native (`asyncio.Queue`, FastAPI/uvicorn flow).
-- Change: constrained AnyIO backend in `backend/test_reasoning_context.py`:
+- Change: constrained AnyIO backend in `apps/backend/backend/test_reasoning_context.py`:
   - `anyio_backend` fixture now returns `"asyncio"`.
 - `requirements-dev.txt` intentionally remains without `trio`.
 
@@ -74,7 +74,7 @@ python3 -m pytest -q
 Observed:
 
 - Python `3.9.6`
-- `backend/test_byok_session_keys.py`: `3 passed`
+- `apps/backend/backend/test_byok_session_keys.py`: `3 passed`
 - Full suite: `125 passed, 2 xfailed`
 
 #### Managed project environment used for verification
@@ -90,7 +90,7 @@ Commands:
 Observed:
 
 - Python `3.12.13`
-- `backend/test_byok_session_keys.py`: `3 passed`
+- `apps/backend/backend/test_byok_session_keys.py`: `3 passed`
 - Full suite: `125 passed, 2 xfailed`
 - Warnings: `11` third-party deprecation warnings
 
@@ -113,7 +113,7 @@ Commands:
 Observed:
 
 - Python `3.11.15`
-- `backend/test_byok_session_keys.py`: `3 passed`
+- `apps/backend/backend/test_byok_session_keys.py`: `3 passed`
 - Full suite: `125 passed, 2 xfailed`
 - Warnings: `11` third-party deprecation warnings
 

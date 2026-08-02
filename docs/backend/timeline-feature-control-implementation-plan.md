@@ -21,9 +21,9 @@ inspect, rename/edit supported parameters, suppress, unsuppress, and delete feat
 
 ## Backend Tasks
 
-1. Add tool schemas for `suppress_feature` and `unsuppress_feature` in `backend/llm_client.py`.
-2. Add backend validation and payload construction in `backend/agent_workflow.py`.
-3. Update prompt routing/docs in `backend/prompt_structure.py` so edit/delete/suppress requests select timeline tools.
+1. Add tool schemas for `suppress_feature` and `unsuppress_feature` in `apps/backend/backend/llm_client.py`.
+2. Add backend validation and payload construction in `apps/backend/backend/agent_workflow.py`.
+3. Update prompt routing/docs in `apps/backend/backend/prompt_structure.py` so edit/delete/suppress requests select timeline tools.
 4. Ensure successful timeline mutations clear or refresh cached feature snapshots.
 5. Add focused tests for validation, routing, stale-token messaging, and result formatting.
 

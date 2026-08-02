@@ -28,7 +28,7 @@ Remaining important gaps:
 
 Phase 3/4/5 review note (2026-05-05):
 
-- Contract coverage in `backend/test_ir_parity_contract.py` and workflow/validator coverage in `backend/test_ir_mapper_validator.py` plus `backend/test_ir_workflow_routing.py` verifies the supported portable build123d subset while preserving explicit unsupported/fusion-only behavior for non-portable pattern seeds and lifecycle/timeline semantics.
+- Contract coverage in `apps/backend/backend/test_ir_parity_contract.py` and workflow/validator coverage in `apps/backend/backend/test_ir_mapper_validator.py` plus `apps/backend/backend/test_ir_workflow_routing.py` verifies the supported portable build123d subset while preserving explicit unsupported/fusion-only behavior for non-portable pattern seeds and lifecycle/timeline semantics.
 
 ### Current Post-Widening Matrix
 
@@ -71,15 +71,15 @@ This meant CADAgent could not yet plan, validate, replay, export, compare, or re
 
 Primary code points audited:
 
-- `backend/ir/types.py`: IR operation types and parameter dataclasses.
-- `backend/ir/mapper.py`: planner/runtime tool call to IR mapping.
-- `backend/ir/validator.py`: IR validation and committed dependency checks.
-- `backend/backends/fusion/translator.py`: IR to Fusion tool call translation.
-- `backend/backends/build123d/translator.py`: IR document to build123d code translation.
-- `backend/agent_workflow.py`: execution routing, IR gating, feature-operation handling, entity refresh.
-- `backend/code_generator.py`: code-generated Fusion operation templates and parameter validation.
-- `backend/llm_client.py`: full LLM-visible Fusion tool schemas.
-- `backend/prompt_structure.py`: routed tool clusters and documented CAD behavior.
+- `apps/backend/backend/ir/types.py`: IR operation types and parameter dataclasses.
+- `apps/backend/backend/ir/mapper.py`: planner/runtime tool call to IR mapping.
+- `apps/backend/backend/ir/validator.py`: IR validation and committed dependency checks.
+- `apps/backend/backend/backends/fusion/translator.py`: IR to Fusion tool call translation.
+- `apps/backend/backend/backends/build123d/translator.py`: IR document to build123d code translation.
+- `apps/backend/backend/agent_workflow.py`: execution routing, IR gating, feature-operation handling, entity refresh.
+- `apps/backend/backend/code_generator.py`: code-generated Fusion operation templates and parameter validation.
+- `apps/backend/backend/llm_client.py`: full LLM-visible Fusion tool schemas.
+- `apps/backend/backend/prompt_structure.py`: routed tool clusters and documented CAD behavior.
 
 ## Layer Definitions
 
@@ -87,8 +87,8 @@ Primary code points audited:
 
 The Fusion layer is the operational surface exposed to the model. It has two execution paths:
 
-- Code-generated Python operations handled by `backend/code_generator.py`.
-- Feature-operation payloads sent through `backend/agent_workflow.py` to the Fusion add-in.
+- Code-generated Python operations handled by `apps/backend/backend/code_generator.py`.
+- Feature-operation payloads sent through `apps/backend/backend/agent_workflow.py` to the Fusion add-in.
 
 This layer knows about Fusion-specific refs, entity tokens, sketches, profiles, feature tokens, timeline indices, and add-in feature operations.
 
