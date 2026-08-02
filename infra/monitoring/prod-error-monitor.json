@@ -1,0 +1,16 @@
+{
+  "window_minutes": 30,
+  "related_update_lookback_hours": 36,
+  "warning_new_min_count": 3,
+  "error_new_min_count": 1,
+  "spike_multiplier": 3.0,
+  "spike_min_delta": 3,
+  "comment_cooldown_seconds": 3600,
+  "sample_limit": 3,
+  "region": "eu-north-1",
+  "repository": "er-fo/cadagent-backend-legacy",
+  "codedeploy_application": "cadagent-backend-legacy",
+  "codedeploy_deployment_group": "cadagent-backend-legacy-ec2",
+  "labels": ["prod-monitor", "prod-anomaly", "automated"],
+  "failure_labels": ["prod-monitor", "prod-monitor-failure", "automated"]
+}

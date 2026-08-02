@@ -1,9 +1,26 @@
+# OS / editor
 .DS_Store
-*.pyc
-__pycache__/
-.env
-.env.*
 .claude/
 
-# Allow checked-in CADAgent runtime env files
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.venv/
+.venv*/
+
+# Env files — examples and the add-in runtime env stay tracked
+.env
+.env.*
+!.env.example
 !**/.env.cadagent
+
+# Backend ops artifacts
+deployment.zip
+cadagent*.log
+runs/
+supabase/.temp/
+backend-from-aws/
+latest-addin/

@@ -1,0 +1,31 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ReadDeploymentArtifacts",
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetObject",
+        "s3:GetObjectVersion"
+      ],
+      "Resource": [
+        "arn:aws:s3:::cadagent-backend-legacy-deploy-<AWS_ACCOUNT_ID>/backend-legacy/*"
+      ]
+    },
+    {
+      "Sid": "ListDeploymentBucket",
+      "Effect": "Allow",
+      "Action": [
+        "s3:ListBucket"
+      ],
+      "Resource": "arn:aws:s3:::cadagent-backend-legacy-deploy-<AWS_ACCOUNT_ID>",
+      "Condition": {
+        "StringLike": {
+          "s3:prefix": [
+            "backend-legacy/*"
+          ]
+        }
+      }
+    }
+  ]
+}

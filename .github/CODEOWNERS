@@ -1,0 +1,12 @@
+# Code owners for the CADAgent monorepo.
+# Order matters: the LAST matching pattern wins, so broad defaults go first
+# and narrow per-app paths go last.
+# https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
+
+*                       @er-fo
+
+/apps/addin/            @er-fo
+/apps/backend/          @er-fo
+/infra/                 @er-fo
+/supabase/              @er-fo
+/.github/               @er-fo

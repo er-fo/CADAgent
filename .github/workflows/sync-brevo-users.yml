@@ -1,0 +1,76 @@
+name: Sync Brevo Users List
+
+on:
+  workflow_dispatch:
+    inputs:
+      apply:
+        description: "Apply changes to Brevo. Leave false for dry-run."
+        required: true
+        type: boolean
+        default: false
+      list_id:
+        description: "Brevo operational users list ID. Must not be the waitlist list."
+        required: true
+        type: number
+        default: 5
+      max_removals:
+        description: "Maximum contacts to remove from the users list in one run."
+        required: true
+        type: number
+        default: 10
+  schedule:
+    - cron: "17 5 * * *"
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+      BREVO_API_KEY: ${{ secrets.BREVO_API_KEY }}
+      BREVO_WAITLIST_LIST_ID: "2"
+      BREVO_USERS_SYNC_MAX_REMOVALS: ${{ github.event_name == 'workflow_dispatch' && inputs.max_removals || 10 }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install httpx
+
+      - name: Run Brevo users sync
+        run: |
+          mode="--apply"
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" && "${{ inputs.apply }}" == "true" ]]; then
+            mode="--apply"
+          elif [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            mode="--dry-run"
+          fi
+
+          list_id="5"
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            list_id="${{ inputs.list_id }}"
+          fi
+
+          python apps/backend/ops/sync_brevo_users.py \
+            --list-id "${list_id}" \
+            --waitlist-list-id "${BREVO_WAITLIST_LIST_ID}" \
+            --max-removals "${BREVO_USERS_SYNC_MAX_REMOVALS}" \
+            --summary-file brevo-users-sync-summary.json \
+            "${mode}"
+
+      - name: Upload audit summary
+        uses: actions/upload-artifact@v4
+        with:
+          name: brevo-users-sync-summary
+          path: brevo-users-sync-summary.json

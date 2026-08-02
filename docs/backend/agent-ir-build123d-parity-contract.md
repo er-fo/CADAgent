@@ -1,0 +1,78 @@
+# Agent IR build123d Parity Contract
+
+Date: 2026-05-05
+
+## What Changed
+
+- Added a Phase 0 parity contract for the Fusion-visible CAD tool surface in `apps/backend/backend/ir/capabilities.py`.
+- Added Phase 1 golden tests in `apps/backend/backend/test_ir_parity_contract.py`.
+- Changed the build123d translator to raise a typed capability error for unsupported IR operations.
+
+## Why
+
+The agent input → IR path already models the broad Fusion CAD tool surface, but build123d translation still supports only the sketch/extrude subset. Without a contract, new Fusion tools can silently widen the gap and make build123d replay unreliable.
+
+## Architectural Decisions
+
+- The parity matrix is static and explicit. Every Fusion-visible CAD tool must be classified as build123d `supported`, `unsupported`, or `fusion_only`.
+- Planning/conversation tools are excluded from CAD parity because they do not represent persistent CAD operations.
+- Unsupported build123d operations now fail through `Build123dCapabilityError` with the operation type and reason.
+- Phase 1 tests verify tool-call mapping, IR validation, Fusion translation preservation, and build123d capability behavior.
+
+## Current build123d Supported Surface
+
+- `create_sketch`
+- `add_rectangle`
+- `add_circle`
+- `add_line`
+- `add_arc`
+- `list_sketch_profiles`
+- `extrude_profile`
+- portable `create_construction_plane` datum/offset modes
+- portable solid `revolve_profile` using construction axes and full/angle extents
+- portable solid `create_loft` across ordered sketch/profile sections
+- selector-resolved `apply_fillet` and `apply_chamfer`
+- selector-resolved `create_shell`
+- selector-resolved `create_simple_hole` and `create_counterbore_hole`
+- selector-resolved `create_tapped_hole` as pilot geometry plus thread metadata
+- selector-resolved `create_external_thread` as thread metadata
+- `create_pattern_feature` for explicit committed simple-hole, counterbore-hole, and tapped-hole seed refs
+
+## Phase 3/4/5 Review Status
+
+### Phase 3: build123d solid feature parity
+
+- The parity contract and golden tests now cover portable construction planes, solid revolve, solid loft, selector-resolved finishing, shell, and hole/thread operations in the build123d translator.
+- `revolve_profile` supports construction-axis full/angle solid revolves. Non-portable edge/face axes and to-entity extents still fail closed with typed capability errors.
+- `create_loft` supports ordered solid loft sections that can be rebuilt from sketch/profile refs. Surface loft policy and guide/rail semantics remain outside the current portable contract.
+- `apply_fillet`, `apply_chamfer`, `create_shell`, `create_simple_hole`, `create_counterbore_hole`, `create_tapped_hole`, and `create_external_thread` now require resolved build123d selector refs and fail closed when refs are missing or stale.
+- Tapped holes use pilot-hole geometry plus thread metadata; external threads are metadata-only and do not claim modeled helical thread geometry.
+
+### Phase 4: entity registry and selectors
+
+- Edge/face/body selection tools are classified as `fusion_only` in the static capability matrix because they manipulate Fusion UI/session state rather than persistent build123d geometry.
+- The backend now persists IR selector/effect/target-result metadata and IR entity registry data through checkpoint restore.
+- build123d extraction now returns deterministic body/face/edge metadata for selector validation and replay.
+- The remaining build123d gap is feature-level replay across lifecycle/timeline edits.
+
+### Phase 5: feature lifecycle and timeline semantics
+
+- `create_pattern_feature` now replays explicit committed hole-like seed features for rectangular global-axis and circular global-origin-Z patterns.
+- Pattern refs such as `auto_last`, raw Fusion feature tokens, non-hole seeds, oriented axes, and target-derived seed selection remain non-portable and fail closed instead of pretending to be replayable build123d state.
+- `list_features`, `delete_feature`, `adjust_feature_parameters`, `suppress_feature`, `unsuppress_feature`, and `jump_to_timeline_position` are all modeled in shared IR and validated for Fusion execution.
+- Those lifecycle/timeline operations remain intentionally unsupported for build123d replay until document revision/truncation semantics and feature-registry replay exist on the build123d side.
+- The review confirmed that current workflow tests preserve the existing Fusion behavior while build123d fails closed with explicit capability reasons.
+
+## Verification
+
+- `python3 -m pytest -q backend/test_ir_parity_contract.py backend/test_ir_mapper_validator.py backend/test_ir_workflow_routing.py`
+- `python3 -m compileall backend`
+
+## Remaining Work
+
+- Widen build123d feature-pattern replay beyond explicit committed hole-like seed refs.
+- Define replay/revision semantics for Fusion timeline and feature lifecycle operations.
+
+## Breaking Changes
+
+None intended. Existing `ValueError` expectations still work because `Build123dCapabilityError` subclasses `ValueError`.

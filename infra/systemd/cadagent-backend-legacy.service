@@ -1,0 +1,17 @@
+[Unit]
+Description=CADAgent Legacy Backend (FastAPI)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/backend-legacy/apps/backend
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=-/opt/backend-legacy/apps/backend/.env
+ExecStart=/opt/backend/.venv/bin/uvicorn backend.main:app --host 0.0.0.0 --port 8001 --log-level info
+Restart=on-failure
+RestartSec=5
+User=www-data
+Group=www-data
+
+[Install]
+WantedBy=multi-user.target

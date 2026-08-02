@@ -1,0 +1,38 @@
+version: 0.0
+os: linux
+
+files:
+  - source: /
+    destination: /opt/backend-legacy
+
+permissions:
+  - object: /opt/backend-legacy
+    owner: www-data
+    group: www-data
+    mode: 755
+    type:
+      - directory
+  - object: /opt/backend-legacy
+    owner: www-data
+    group: www-data
+    mode: 644
+    type:
+      - file
+
+hooks:
+  BeforeInstall:
+    - location: infra/hooks/before_install.sh
+      timeout: 300
+      runas: root
+  AfterInstall:
+    - location: infra/hooks/after_install.sh
+      timeout: 1200
+      runas: root
+  ApplicationStart:
+    - location: infra/hooks/start_server.sh
+      timeout: 300
+      runas: root
+  ValidateService:
+    - location: infra/hooks/validate_service.sh
+      timeout: 300
+      runas: root
