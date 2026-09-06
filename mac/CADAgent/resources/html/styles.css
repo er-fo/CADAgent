@@ -9,6 +9,8 @@
 
   --accent-primary: #3b82f6; /* Refined Blue */
   --accent-glow: rgba(59, 130, 246, 0.15);
+  --operator-accent: #f59e0b;
+  --operator-accent-soft: rgba(245, 158, 11, 0.16);
 
   --border-subtle: rgba(255, 255, 255, 0.12);
   --border-focus: rgba(255, 255, 255, 0.25);
@@ -88,6 +90,23 @@ body {
 }
 .brand-name .agent { font-weight: 300; color: var(--fg-secondary); }
 
+.operator-badge {
+  display: inline-flex;
+  align-items: center;
+  height: 18px;
+  padding: 0 7px;
+  border: 1px solid rgba(245, 158, 11, 0.38);
+  border-radius: var(--radius-full);
+  background: var(--operator-accent-soft);
+  color: #ffd899;
+  font-family: var(--font-mono);
+  font-size: 8px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  line-height: 1;
+  text-transform: uppercase;
+}
+
 .header-controls { display: flex; align-items: center; gap: 8px; }
 
 .version-badge {
@@ -161,6 +180,43 @@ body {
 }
 .thought-italic { font-family: 'Playfair Display', serif; font-style: italic; color: var(--fg-secondary); }
 .description { color: var(--fg-secondary); font-size: 12px; font-weight: 300; line-height: 1.4; }
+
+.operator-kicker {
+  margin-bottom: 8px;
+  color: #ffd899;
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+
+.operator-callout {
+  margin-top: 14px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 10px;
+  border: 1px solid rgba(245, 158, 11, 0.28);
+  border-radius: var(--radius-full);
+  background: linear-gradient(135deg, rgba(245, 158, 11, 0.16), rgba(59, 130, 246, 0.08));
+  box-shadow: 0 10px 35px rgba(0, 0, 0, 0.12);
+}
+
+.operator-callout-label {
+  color: #ffd899;
+  font-family: var(--font-mono);
+  font-size: 8px;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.operator-callout-value {
+  color: var(--fg-primary);
+  font-family: var(--font-mono);
+  font-size: 10px;
+}
 
 .session-pill {
   margin-top: 16px;

@@ -82,8 +82,8 @@ let state = {
     visualContextEnabled: false,
     captureRunLogs: false,
     activeRun: null,
-    selectedModel: 'gpt-5.4',
-    reasoningEffort: 'medium',  // Default for OpenAI; 'off' for Anthropic
+    selectedModel: 'claude-sonnet-4.6',
+    reasoningEffort: 'on',  // Operator defaults to Anthropic to avoid GPT token usage.
     reasoning: {
         activeSession: null,
         sessionCounter: 0
@@ -5697,7 +5697,7 @@ const REASONING_OPTIONS = {
 
 const REASONING_DEFAULTS = {
     openai: 'medium',
-    anthropic: 'off',
+    anthropic: 'on',
 };
 
 // Explicit provider mapping to avoid misclassifying non-gpt OpenAI models (e.g., o1/o3).

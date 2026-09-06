@@ -60,8 +60,8 @@ TEST_EMAIL = os.environ.get("CADAGENT_TEST_EMAIL", "").strip().lower()
 TEST_PASSWORD = os.environ.get("CADAGENT_TEST_PASSWORD", "")
 
 # Company and add-in identification
-COMPANY_NAME = "CADAgent"
-ADDIN_NAME = "CADAgent"
+COMPANY_NAME = "CADAgentOperator"
+ADDIN_NAME = "Operator"
 
 # WebSocket backend configuration
 # Defaults point to the production backend WebSocket endpoint.
@@ -72,35 +72,86 @@ BACKEND_PORT = os.environ.get("BACKEND_PORT", "")
 BACKEND_USE_SSL = os.environ.get("BACKEND_USE_SSL", "true").lower() == "true"
 # Optional full URL override, e.g. BACKEND_URL="ws://localhost:8000/ws/{session_id}"
 BACKEND_URL = os.environ.get("BACKEND_URL")
+LOCAL_BACKEND_URL = os.environ.get("LOCAL_BACKEND_URL", "ws://localhost:8000/ws/{session_id}")
+PROD_BACKEND_HOST = os.environ.get("PROD_BACKEND_HOST", "ws.cadagentpro.com")
+PROD_BACKEND_PORT = os.environ.get("PROD_BACKEND_PORT", "")
+PROD_BACKEND_USE_SSL = os.environ.get("PROD_BACKEND_USE_SSL", "true").lower() == "true"
+PROD_BACKEND_URL = os.environ.get("PROD_BACKEND_URL")
 
 
-def build_ws_url(session_id: str) -> str:
-    """Return the full WebSocket URL for a given session id."""
-    if BACKEND_URL:
-        # Allow templated or base URL
-        if "{session_id}" in BACKEND_URL:
-            return BACKEND_URL.format(session_id=session_id)
-        base = BACKEND_URL.rstrip("/")
-        return f"{base}/{session_id}"
+def default_backend_target() -> dict:
+    """Return the default production backend target derived from the environment."""
+    return {"mode": "prod"}
 
-    scheme = "wss" if BACKEND_USE_SSL else "ws"
-    # Only include port if explicitly provided and non-default
+
+def normalize_backend_target(target: dict | None) -> dict:
+    """Return a normalized backend target payload."""
+    target = target or {}
+    mode = str(target.get("mode") or "prod").strip().lower()
+
+    if mode == "prod":
+        return {"mode": "prod"}
+
+    if mode == "local":
+        return {"mode": "local", "url": str(target.get("url") or LOCAL_BACKEND_URL).strip()}
+
+    if mode == "custom":
+        url = str(target.get("url") or "").strip()
+        if not url:
+            raise ValueError("Custom backend target requires a non-empty 'url'")
+        return {"mode": "custom", "url": url}
+
+    raise ValueError(f"Unsupported backend target mode '{mode}'")
+
+
+def _build_ws_url_from_base(session_id: str, base_url: str) -> str:
+    """Build a session-specific WebSocket URL from a caller-provided base/template URL."""
+    if "{session_id}" in base_url:
+        return base_url.format(session_id=session_id)
+    base = base_url.rstrip("/")
+    return f"{base}/{session_id}"
+
+
+def _build_host_port_ws_url(session_id: str, host: str, port_value: str, use_ssl: bool) -> str:
+    scheme = "wss" if use_ssl else "ws"
     port = ""
-    if BACKEND_PORT:
-        if not ((scheme == "wss" and BACKEND_PORT in ("443", "")) or (scheme == "ws" and BACKEND_PORT == "80")):
-            port = f":{BACKEND_PORT}"
+    if port_value:
+        if not ((scheme == "wss" and port_value in ("443", "")) or (scheme == "ws" and port_value == "80")):
+            port = f":{port_value}"
+    return f"{scheme}://{host}{port}/ws/{session_id}"
 
-    return f"{scheme}://{BACKEND_HOST}{port}/ws/{session_id}"
+
+def build_ws_url(session_id: str, backend_target: dict | None = None) -> str:
+    """Return the full WebSocket URL for a given session id."""
+    if backend_target is None:
+        if BACKEND_URL:
+            return _build_ws_url_from_base(session_id, BACKEND_URL)
+        return _build_host_port_ws_url(session_id, BACKEND_HOST, BACKEND_PORT, BACKEND_USE_SSL)
+
+    target = normalize_backend_target(backend_target)
+    if target.get("mode") in {"local", "custom"}:
+        return _build_ws_url_from_base(session_id, str(target.get("url") or ""))
+    if PROD_BACKEND_URL:
+        return _build_ws_url_from_base(session_id, PROD_BACKEND_URL)
+    return _build_host_port_ws_url(session_id, PROD_BACKEND_HOST, PROD_BACKEND_PORT, PROD_BACKEND_USE_SSL)
 
 
-def backend_label() -> str:
+def backend_label(backend_target: dict | None = None) -> str:
     """Human-friendly label for palette/status logging."""
     try:
-        return build_ws_url("<session>")
+        return build_ws_url("<session>", backend_target=backend_target)
     except Exception:
-        scheme = "wss" if BACKEND_USE_SSL else "ws"
-        port = f":{BACKEND_PORT}" if BACKEND_PORT else ""
-        return f"{scheme}://{BACKEND_HOST}{port}"
+        if backend_target is None:
+            scheme = "wss" if BACKEND_USE_SSL else "ws"
+            port = f":{BACKEND_PORT}" if BACKEND_PORT else ""
+            return f"{scheme}://{BACKEND_HOST}{port}"
+
+        target = normalize_backend_target(backend_target)
+        if target.get("mode") in {"local", "custom"}:
+            return str(target.get("url") or "")
+        scheme = "wss" if PROD_BACKEND_USE_SSL else "ws"
+        port = f":{PROD_BACKEND_PORT}" if PROD_BACKEND_PORT else ""
+        return f"{scheme}://{PROD_BACKEND_HOST}{port}"
 
 # UI Configuration
 WORKSPACE_ID = "FusionSolidEnvironment"

@@ -42,6 +42,7 @@ from . import camera_tools
 from . import spatial_analyzer
 from . import general_utils
 from .selection_extractor import extract_selection_context
+from .operator_runtime import OperatorRuntime
 import time
 
 # Configure logging based on config settings
@@ -157,6 +158,20 @@ class _InboundMessageEventHandler(adsk.core.CustomEventHandler):
             logger.exception("Failed to process inbound messages on main thread: %s", exc)
 
 
+class _OperatorDispatchEventHandler(adsk.core.CustomEventHandler):
+    """Dispatch local operator HTTP actions on Fusion's main thread."""
+
+    def __init__(self, controller: "AgentController"):
+        super().__init__()
+        self._controller = controller
+
+    def notify(self, args: adsk.core.CustomEventArgs) -> None:
+        try:
+            self._controller.process_pending_operator_actions()
+        except Exception as exc:
+            logger.exception("Failed to process operator action on main thread: %s", exc)
+
+
 class AgentController:
     """
     Coordinates the add-in components and routes messages between them.
@@ -182,7 +197,7 @@ class AgentController:
             logger.debug("Deferring design resolution until document activation: %s", exc)
         
         # Per-document session management
-        # doc_id -> { 'session_id': str, 'ws_client': FusionWebSocketClient, 'created_at': float, 'last_active': float, 'doc_name': str }
+        # doc_id -> { 'session_id': str, 'ws_client': FusionWebSocketClient, 'created_at': float, 'last_active': float, 'doc_name': str, 'backend_target': dict, 'ws_url': str }
         self._sessions: Dict[str, Dict[str, Any]] = {}
         self._active_doc_id: Optional[str] = None
         self._synthetic_ids: Dict[int, str] = {}
@@ -192,10 +207,21 @@ class AgentController:
         self._code_executor = CodeExecutor(app)
         self._palette_manager = PaletteManager(app, self)
         self._incoming_messages: "queue.Queue[Tuple[str, Dict[str, Any]]]" = queue.Queue()
+        self._main_thread_ident = threading.get_ident()
+        self._operator_actions: "queue.Queue[Any]" = queue.Queue()
+        self._operator_runtime: Optional[OperatorRuntime] = None
         self._event_handlers: List[Any] = []
         self._running = False
         self._plan_chunks: Dict[str, List[str]] = {}
         self._pending_plan_full: Dict[str, str] = {}
+        self._latest_operator_state: Dict[str, Any] = {
+            "questions": None,
+            "designs": None,
+            "build_plan": None,
+            "last_backend_message": None,
+            "last_execution_result": None,
+            "last_error": None,
+        }
 
         self._auth_bypass = (
             os.environ.get("CADAGENT_AUTH_BYPASS", os.environ.get("AUTH_BYPASS", "false")).lower()
@@ -249,6 +275,14 @@ class AgentController:
         self._inbound_handler = _InboundMessageEventHandler(self)
         self._inbound_event.add(self._inbound_handler)
         self._event_handlers.append(self._inbound_handler)
+
+        # Custom event for local operator HTTP actions. The HTTP server runs on
+        # background threads, while Fusion APIs must be touched on the UI thread.
+        self._operator_event_id = f"{config.COMPANY_NAME}_{config.ADDIN_NAME}_OperatorDispatch"
+        self._operator_event = app.registerCustomEvent(self._operator_event_id)
+        self._operator_handler = _OperatorDispatchEventHandler(self)
+        self._operator_event.add(self._operator_handler)
+        self._event_handlers.append(self._operator_handler)
 
         logger.info("AgentController initialized (per-document sessions)")
 
@@ -333,6 +367,24 @@ class AgentController:
         except Exception as e:
             logger.debug(f"[api_keys] startup status push failed: {e}")
 
+        # Start the local operator control server for terminal-driven E2E tests.
+        try:
+            if not self._operator_runtime:
+                operator_port = int(os.environ.get("CADAGENT_OPERATOR_PORT", "8765"))
+                self._operator_runtime = OperatorRuntime(
+                    self,
+                    self._dispatch_operator_on_main_thread,
+                    port=operator_port,
+                )
+            operator_status = self._operator_runtime.start()
+            logger.info("CADAgent operator runtime started at %s", operator_status.get("runtime", {}).get("url"))
+            try:
+                self._app.log(f"[CADAgent Operator] {self._operator_runtime.get_url()}")
+            except Exception:
+                pass
+        except Exception as e:
+            logger.error(f"Failed to start operator runtime: {e}", exc_info=True)
+
         logger.info("=" * 70)
         logger.info("CADAGENT CONTROLLER READY")
         logger.info("=" * 70)
@@ -353,6 +405,17 @@ class AgentController:
         """Stop the controller and clean up resources."""
         logger.info("Stopping CADAgent controller")
         self._running = False
+
+        # Stop local operator runtime first so no new terminal commands arrive
+        # while websocket and palette resources are being torn down.
+        try:
+            if self._operator_runtime:
+                self._operator_runtime.stop()
+                logger.info("Operator runtime stopped")
+        except Exception as e:
+            logger.error(f"Failed to stop operator runtime: {e}")
+        finally:
+            self._operator_runtime = None
 
         # Stop all WebSocket connections
         try:
@@ -377,6 +440,8 @@ class AgentController:
                 self._app.unregisterCustomEvent('CADAgentPlanApproval')
             if self._inbound_event_id:
                 self._app.unregisterCustomEvent(self._inbound_event_id)
+            if getattr(self, "_operator_event_id", None):
+                self._app.unregisterCustomEvent(self._operator_event_id)
         except Exception as e:
             logger.error(f"Failed to unregister custom event: {e}")
 
@@ -389,7 +454,7 @@ class AgentController:
         request_text: str,
         planning_mode: bool,
         include_visual_context: bool = False,
-        model_name: str = "claude-sonnet-4.5",
+        model_name: str = "claude-sonnet-4.6",
         request_id: Optional[str] = None,
         image_data: Optional[str] = None,
         image_format: str = "png",
@@ -564,6 +629,13 @@ class AgentController:
         """Expose the currently active document id."""
         return self._active_doc_id
 
+    def get_active_backend_target(self) -> Dict[str, Any]:
+        """Return the backend target for the active document session."""
+        info = self._get_session_info_by_doc(self._active_doc_id)
+        if info and info.get("backend_target"):
+            return dict(info["backend_target"])
+        return config.default_backend_target()
+
     def handle_reconnect_request(self) -> None:
         """Handle manual reconnection request from the UI."""
         logger.info("Manual reconnection requested")
@@ -648,9 +720,339 @@ class AgentController:
                 logger.exception(f"Failed to handle message: {message}")
                 general_utils.log_error("Message handling error", e)
 
+    def _dispatch_operator_on_main_thread(self, action: Any) -> None:
+        """Schedule an operator action for Fusion's UI thread."""
+        if threading.get_ident() == self._main_thread_ident:
+            action()
+            return
+
+        self._operator_actions.put(action)
+        try:
+            self._app.fireCustomEvent(self._operator_event_id, "{}")
+        except Exception as exc:
+            logger.exception("Failed to signal operator dispatch event: %s", exc)
+            try:
+                action()
+            except Exception:
+                logger.exception("Direct fallback for operator action failed")
+
+    def process_pending_operator_actions(self) -> None:
+        """Run queued terminal/operator commands on Fusion's main thread."""
+        while not self._operator_actions.empty():
+            action = self._operator_actions.get()
+            try:
+                action()
+            except Exception as exc:
+                logger.exception("Operator action failed: %s", exc)
+
+    def handle_operator_action(self, action: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Handle a local operator HTTP action on Fusion's main thread."""
+        logger.info("Operator action received: %s", action)
+
+        if action == "status_snapshot":
+            return self._operator_status_snapshot()
+        if action == "document_new":
+            return self._operator_create_document(payload)
+        if action == "prompt":
+            return self._operator_submit_prompt(payload, planning_mode=False)
+        if action == "planning_prompt":
+            return self._operator_submit_prompt(payload, planning_mode=True)
+        if action == "planning_approve":
+            return self._operator_plan_approval(payload)
+        if action == "questions":
+            return self._operator_questions()
+        if action == "question_answer":
+            return self._operator_answer_questions(payload)
+        if action == "designs":
+            return self._operator_designs()
+        if action == "design_select":
+            return self._operator_select_design(payload)
+        if action == "camera_view":
+            return self._operator_set_camera_view(payload)
+        if action == "screenshot":
+            return self._operator_capture_screenshot(payload)
+        if action in {"run_start", "run_end"}:
+            return {"handled": True, "action": action, "active_doc_id": self._active_doc_id}
+
+        raise ValueError(f"Unsupported operator action: {action}")
+
+    def _operator_status_snapshot(self) -> Dict[str, Any]:
+        """Return a secret-free status snapshot for terminal automation."""
+        backend_target = self.get_active_backend_target()
+        doc_name = None
+        if self._active_doc_id and self._active_doc_id in self._sessions:
+            doc_name = self._sessions[self._active_doc_id].get("doc_name")
+        if not doc_name:
+            try:
+                doc_name = getattr(self._app.activeDocument, "name", None)
+            except Exception:
+                doc_name = None
+
+        session_file_present = False
+        try:
+            session_file = getattr(self._auth_client, "session_file", None)
+            session_file_present = bool(session_file and session_file.exists())
+        except Exception:
+            session_file_present = False
+
+        return {
+            "addin_loaded": True,
+            "fusion_available": bool(self._app),
+            "active_document_id": self._active_doc_id,
+            "active_document_name": doc_name,
+            "active_session_id": self.get_session_id(),
+            "backend_target": backend_target,
+            "backend_url": config.backend_label(backend_target),
+            "backend_connected": self.is_connected(),
+            "authenticated": self.is_authenticated() or self.is_auth_bypass(),
+            "auth_bypass": self.is_auth_bypass(),
+            "session_file_present": session_file_present,
+            "user_email": self.get_user_email(),
+            "operator_state": self._latest_operator_state,
+        }
+
+    def _operator_create_document(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        backend_target = self._normalize_backend_target_from_payload(payload)
+        requested_name = str(payload.get("name") or payload.get("document_name") or "").strip()
+
+        documents = getattr(self._app, "documents", None)
+        if documents is None:
+            raise RuntimeError("Fusion document manager is unavailable")
+
+        doc_type = getattr(adsk.core.DocumentTypes, "FusionDesignDocumentType", None)
+        if doc_type is None:
+            raise RuntimeError("Fusion design document type is unavailable")
+
+        doc = documents.add(doc_type)
+        if not doc:
+            raise RuntimeError("Fusion did not return a new document")
+
+        if requested_name:
+            try:
+                setattr(doc, "name", requested_name)
+            except Exception:
+                logger.info("New Fusion document name could not be set immediately: %s", requested_name)
+
+        self._switch_to_document(doc, requested_backend_target=backend_target, force_refresh=True)
+        status = self._operator_status_snapshot()
+        return {
+            "ok": True,
+            "created": True,
+            "requested_name": requested_name or None,
+            "active_document_id": status.get("active_document_id"),
+            "active_document_name": status.get("active_document_name"),
+            "active_session_id": status.get("active_session_id"),
+            "backend_target": status.get("backend_target"),
+            "backend_url": status.get("backend_url"),
+            "backend_connected": status.get("backend_connected"),
+        }
+
+    def _operator_submit_prompt(self, payload: Dict[str, Any], planning_mode: bool) -> Dict[str, Any]:
+        prompt = str(payload.get("prompt") or payload.get("text") or payload.get("request") or "").strip()
+        if not prompt and not payload.get("image_data"):
+            raise ValueError("Operator prompt request requires 'prompt' or 'image_data'")
+
+        request_id = str(payload.get("request_id") or f"operator-{uuid.uuid4()}")
+        self.submit_user_request(
+            prompt,
+            planning_mode=planning_mode,
+            include_visual_context=bool(payload.get("include_visual_context", payload.get("visual_context", False))),
+            model_name=str(payload.get("model_name") or payload.get("model") or "claude-sonnet-4.6"),
+            request_id=request_id,
+            image_data=payload.get("image_data"),
+            image_format=str(payload.get("image_format") or "png"),
+            reasoning_effort=payload.get("reasoning_effort") or payload.get("reasoning"),
+        )
+        return {
+            "accepted": True,
+            "planning_mode": planning_mode,
+            "request_id": request_id,
+            "active_document_id": self._active_doc_id,
+            "session_id": self.get_session_id(),
+        }
+
+    def _operator_plan_approval(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        approved = bool(payload.get("approved", True))
+        doc_id = payload.get("doc_id") or self._active_doc_id
+        session_info = self._get_session_info_by_doc(doc_id)
+        if not session_info:
+            raise ValueError("No active document session available for plan approval")
+        client = session_info.get("ws_client")
+        if not client or not client.is_connected():
+            raise ValueError("Backend websocket is not connected")
+
+        full_plan = self._pending_plan_full.get(doc_id or "", "")
+        plan_text = str(payload.get("plan_text") or payload.get("plan") or full_plan or "")
+        message = str(payload.get("message") or ("" if approved else "Plan rejected by operator"))
+        outbound = {
+            "type": "plan_approval",
+            "session_id": session_info.get("session_id"),
+            "approved": approved,
+            "plan_text": plan_text if approved else "",
+            "message": message,
+        }
+        client.send_json(outbound)
+        self._pending_plan_full.pop(doc_id or "", None)
+        self._palette_manager.send_log(
+            "success" if approved else "warning",
+            "Plan approved by operator" if approved else "Plan rejected by operator",
+            doc_id=doc_id,
+        )
+        return {"sent": True, "approved": approved, "doc_id": doc_id}
+
+    def _operator_questions(self) -> Dict[str, Any]:
+        data = self._latest_operator_state.get("questions") or {}
+        return {
+            "pending": bool(data),
+            "data": data,
+            "questions": data.get("questions", []) if isinstance(data, dict) else [],
+        }
+
+    def _operator_answer_questions(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        answers = payload.get("answers")
+        if answers is None:
+            answers = payload.get("answer")
+        if not isinstance(answers, dict):
+            raise ValueError("Question answer request requires an 'answers' object")
+        outbound = {
+            "type": "question_tree_completed",
+            "answers": answers,
+        }
+        return self._operator_send_to_backend(outbound, "question_tree_completed")
+
+    def _operator_designs(self) -> Dict[str, Any]:
+        data = self._latest_operator_state.get("designs") or {}
+        return {
+            "pending": bool(data),
+            "data": data,
+            "designs": data.get("designs", []) if isinstance(data, dict) else [],
+        }
+
+    def _operator_select_design(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        design_id = payload.get("design_id")
+        if design_id is None and "index" in payload:
+            designs_data = self._latest_operator_state.get("designs") or {}
+            designs = designs_data.get("designs", []) if isinstance(designs_data, dict) else []
+            index = int(payload.get("index"))
+            if 1 <= index <= len(designs):
+                index = index - 1
+            elif index < 0 or index >= len(designs):
+                raise ValueError("Design index is out of range")
+            design_id = designs[index].get("id") if isinstance(designs[index], dict) else None
+        if not design_id:
+            raise ValueError("Design selection requires 'design_id' or valid 'index'")
+        outbound = {
+            "type": "design_selected",
+            "design_id": str(design_id),
+        }
+        return self._operator_send_to_backend(outbound, "design_selected")
+
+    def _operator_send_to_backend(self, message: Dict[str, Any], action_name: str) -> Dict[str, Any]:
+        client = self._get_active_ws_client()
+        if not client or not client.is_connected():
+            raise ValueError("Backend websocket is not connected")
+        client.send_json(message)
+        return {
+            "sent": True,
+            "action": action_name,
+            "message_type": message.get("type"),
+            "active_document_id": self._active_doc_id,
+            "session_id": self.get_session_id(),
+        }
+
+    def _operator_set_camera_view(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        view = str(payload.get("view") or "current").lower()
+        if view == "current":
+            return {"ok": True, "view": view, "camera_info": camera_tools.get_camera_info(self._app)}
+
+        eye, target, up = self._operator_camera_preset(view)
+        ok = camera_tools.set_camera_from_coordinates(self._app, eye, target, up, fit_view=False)
+        if not ok:
+            raise RuntimeError(f"Failed to set camera view '{view}'")
+        return {"ok": True, "view": view, "camera_info": camera_tools.get_camera_info(self._app)}
+
+    def _operator_capture_screenshot(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        view = str(payload.get("view") or "current").lower()
+        width = int(payload.get("width") or 1280)
+        height = int(payload.get("height") or 720)
+
+        if view == "current":
+            capture = camera_tools.capture_screenshot_internal(self._app, width=width, height=height)
+            if capture:
+                capture = {"success": True, **capture}
+            else:
+                capture = {"success": False, "error": "Failed to capture current viewport"}
+        else:
+            eye, target, _up = self._operator_camera_preset(view)
+            capture = camera_tools.capture_screenshot(
+                eye[0], eye[1], eye[2],
+                target[0], target[1], target[2],
+                width=width,
+                height=height,
+                description=f"Operator screenshot: {view}",
+            )
+
+        if not capture.get("success"):
+            raise RuntimeError(str(capture.get("error") or "Screenshot capture failed"))
+
+        if self._operator_runtime and not self._operator_runtime.get_active_run_dir():
+            self._operator_runtime.start_run({"run_id": f"screenshot-{time.strftime('%Y%m%d-%H%M%S', time.gmtime())}"})
+
+        run_dir = self._operator_runtime.get_active_run_dir() if self._operator_runtime else None
+        if not run_dir:
+            run_dir = Path(tempfile.gettempdir()) / "cadagent-operator-screenshots"
+        screenshot_dir = Path(run_dir) / "screenshots"
+        screenshot_dir.mkdir(parents=True, exist_ok=True)
+
+        filename = str(payload.get("filename") or f"{time.strftime('%Y%m%d-%H%M%S', time.gmtime())}_{view}.png")
+        safe_name = "".join(ch if ch.isalnum() or ch in ("-", "_", ".") else "-" for ch in filename)
+        if not safe_name.lower().endswith(".png"):
+            safe_name += ".png"
+        path = screenshot_dir / safe_name
+        path.write_bytes(base64.b64decode(capture["image_base64"]))
+
+        result = {
+            "ok": True,
+            "path": str(path),
+            "view": view,
+            "width": capture.get("width"),
+            "height": capture.get("height"),
+            "camera_info": capture.get("camera_info"),
+            "active_document_id": self._active_doc_id,
+            "active_document_name": self._operator_status_snapshot().get("active_document_name"),
+            "captured_at": time.time(),
+        }
+        self._latest_operator_state["last_screenshot"] = result
+        return result
+
+    def _operator_camera_preset(self, view: str) -> Tuple[Tuple[float, float, float], Tuple[float, float, float], Tuple[float, float, float]]:
+        target = (0.0, 0.0, 0.0)
+        presets = {
+            "front": ((0.0, -50.0, 0.0), target, (0.0, 0.0, 1.0)),
+            "back": ((0.0, 50.0, 0.0), target, (0.0, 0.0, 1.0)),
+            "left": ((-50.0, 0.0, 0.0), target, (0.0, 0.0, 1.0)),
+            "right": ((50.0, 0.0, 0.0), target, (0.0, 0.0, 1.0)),
+            "top": ((0.0, 0.0, 50.0), target, (0.0, 1.0, 0.0)),
+            "bottom": ((0.0, 0.0, -50.0), target, (0.0, 1.0, 0.0)),
+            "iso": ((35.0, -35.0, 28.0), target, (0.0, 0.0, 1.0)),
+        }
+        if view not in presets:
+            raise ValueError(f"Unsupported camera view '{view}'")
+        return presets[view]
+
     def _handle_message(self, doc_id: str, message: Dict[str, Any]) -> None:
         """Route incoming messages to appropriate handlers."""
         message_type = message.get("type")
+        if self._operator_runtime:
+            try:
+                self._operator_runtime.record_backend_message(doc_id, message)
+            except Exception as exc:
+                logger.debug("Operator backend message recording failed: %s", exc)
+        self._latest_operator_state["last_backend_message"] = {
+            "doc_id": doc_id,
+            "type": message_type,
+            "received_at": time.time(),
+        }
         # INSTRUMENTATION: Track message handling in CADAgent
         if message_type not in _QUIET_MESSAGE_TYPES:
             logger.debug("[CADAGENT_HANDLE] Handling message: doc_id=%s, type=%s", doc_id, message_type)
@@ -688,6 +1090,12 @@ class AgentController:
             display_plan_plain = message.get("display_plan_plain") or full_plan
 
             self._pending_plan_full[doc_id] = full_plan
+            self._latest_operator_state["build_plan"] = {
+                "doc_id": doc_id,
+                "full_plan": full_plan,
+                "display_plan": display_plan,
+                "display_plan_plain": display_plan_plain,
+            }
 
             # Show plan in palette first
             if full_plan:
@@ -700,19 +1108,33 @@ class AgentController:
                 )
             else:
                 self._palette_manager.send_log('agent', '📋 Plan generated.', doc_id=doc_id)
-            self._palette_manager.send_log('info', 'Please review the plan in the dialog that will appear...', doc_id=doc_id)
+            if self._operator_runtime and self._operator_runtime.is_running():
+                self._palette_manager.send_log('info', 'Please review the plan through the operator API.', doc_id=doc_id)
+            else:
+                self._palette_manager.send_log('info', 'Please review the plan in the dialog that will appear...', doc_id=doc_id)
 
-            # Fire custom event with plan data (handler runs on main thread)
-            event_payload = {"plan_text": display_plan_plain, "doc_id": doc_id}
-            self._app.fireCustomEvent('CADAgentPlanApproval', json.dumps(event_payload))
+            # In operator mode, avoid opening a blocking Fusion dialog. The
+            # terminal agent can approve or reject via /planning/approve.
+            if self._operator_runtime and self._operator_runtime.is_running():
+                self._palette_manager.send_log(
+                    'info',
+                    'Plan is waiting for operator approval.',
+                    doc_id=doc_id,
+                )
+            else:
+                # Fire custom event with plan data (handler runs on main thread)
+                event_payload = {"plan_text": display_plan_plain, "doc_id": doc_id}
+                self._app.fireCustomEvent('CADAgentPlanApproval', json.dumps(event_payload))
             self._plan_chunks.pop(doc_id, None)
         elif message_type == "completed":
             # Don't send any message - frontend will update run summary to "Designed"
+            self._latest_operator_state["last_completion"] = {"doc_id": doc_id, "message": message}
             self._palette_manager.send_completed("", doc_id=doc_id)
         elif message_type == "error":
             error_msg = message.get("message", "An error occurred")
             details = message.get("details", "")
             full_error = f"{error_msg}\n{details}" if details else error_msg
+            self._latest_operator_state["last_error"] = {"doc_id": doc_id, "message": full_error}
             self._palette_manager.send_error(full_error, doc_id=doc_id)
         elif message_type == "cancelled":
             cancel_msg = message.get("message", "Request cancelled")
@@ -753,20 +1175,35 @@ class AgentController:
             self._handle_entity_context_request(doc_id, message)
         elif message_type == "question_tree_generated":
             # Forward design-exploration question tree to the palette UI
+            question_data = message.get("data", {})
+            self._latest_operator_state["questions"] = question_data
+            if self._operator_runtime:
+                try:
+                    self._operator_runtime.set_questions(question_data.get("questions", question_data), doc_id=doc_id)
+                except Exception as exc:
+                    logger.debug("Operator question state update failed: %s", exc)
             self._palette_manager.send_message(
                 'question_tree_generated',
                 doc_id=doc_id,
-                data=message.get("data", {}),
+                data=question_data,
             )
         elif message_type == "designs_proposed":
             # Forward design proposal cards to the palette UI
+            designs_data = message.get("data", {})
+            self._latest_operator_state["designs"] = designs_data
+            if self._operator_runtime:
+                try:
+                    self._operator_runtime.set_designs(designs_data.get("designs", designs_data), doc_id=doc_id)
+                except Exception as exc:
+                    logger.debug("Operator design state update failed: %s", exc)
             self._palette_manager.send_message(
                 'designs_proposed',
                 doc_id=doc_id,
-                data=message.get("data", {}),
+                data=designs_data,
             )
         elif message_type == "build_plan_generated":
             # Forward build plan to the palette UI
+            self._latest_operator_state["build_plan"] = message.get("data", {})
             self._palette_manager.send_message(
                 'build_plan_generated',
                 doc_id=doc_id,
@@ -908,6 +1345,12 @@ class AgentController:
                 payload[key] = value
 
         logger.info(f"Operation {operation} {'succeeded' if result.get('success') else 'failed'}")
+        self._latest_operator_state["last_execution_result"] = payload
+        if self._operator_runtime:
+            try:
+                self._operator_runtime.record_execution_result(doc_id, payload)
+            except Exception as exc:
+                logger.debug("Operator execution result recording failed: %s", exc)
 
         if result.get("success"):
             self._palette_manager.send_log('success', f"✓ {operation} completed", doc_id=doc_id)
@@ -1973,6 +2416,8 @@ class AgentController:
             "type": "feature_snapshot",
             "session_id": session_id,
             "doc_id": doc_id,
+            "message_id": message.get("message_id"),
+            "request_id": message.get("request_id"),
             "requested_timeline_count": message.get("timeline_count"),
             "requested_marker_position": message.get("marker_position"),
             "max_features": max_features,
@@ -2558,9 +3003,18 @@ class AgentController:
             return self._sessions[self._active_doc_id].get('ws_client')
         return None
 
-    def _ensure_session_for_doc(self, doc: adsk.core.Document) -> Dict[str, Any]:
+    def _ensure_session_for_doc(
+        self,
+        doc: adsk.core.Document,
+        requested_backend_target: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
         doc_id, name = self._doc_identity(doc)
         token_required = bool(self._auth_client) and not self._auth_bypass
+        requested_target = (
+            config.normalize_backend_target(requested_backend_target)
+            if requested_backend_target is not None
+            else None
+        )
 
         if doc_id in self._sessions:
             info = self._sessions[doc_id]
@@ -2569,12 +3023,14 @@ class AgentController:
             design = self._resolve_design_reference(doc)
             if design:
                 info['design'] = design
+            backend_target = requested_target or self._get_backend_target_for_session(info)
+            self._apply_backend_target_to_session_info(info, backend_target)
             # If the client exists but isn't connected (e.g., backend restart), recreate it using the same session_id
             try:
                 client = info.get('ws_client')
                 if not client or not client.is_connected():
                     session_id = info.get('session_id') or str(uuid.uuid4())
-                    ws_url = config.build_ws_url(session_id)
+                    ws_url = config.build_ws_url(session_id, backend_target=info.get("backend_target"))
                     # Get user token for usage tracking
                     user_token = self._get_user_token()
                     if token_required and not user_token:
@@ -2601,6 +3057,7 @@ class AgentController:
                     new_client.add_state_handler(lambda connected, d=doc_id: self._on_ws_state(d, connected))
                     new_client.start()
                     info['ws_client'] = new_client
+                    info['ws_url'] = ws_url
                     if 'session_id' not in info:
                         info['session_id'] = session_id
                     logger.info(
@@ -2618,7 +3075,8 @@ class AgentController:
 
         # Create a new session for this document
         session_id = str(uuid.uuid4())
-        ws_url = config.build_ws_url(session_id)
+        backend_target = requested_target or config.default_backend_target()
+        ws_url = config.build_ws_url(session_id, backend_target=backend_target)
         # Get user token for usage tracking
         user_token = self._get_user_token()
         if token_required and not user_token:
@@ -2629,6 +3087,8 @@ class AgentController:
             info = {
                 'session_id': session_id,
                 'ws_client': None,
+                'backend_target': backend_target,
+                'ws_url': ws_url,
                 'created_at': time.time(),
                 'last_active': time.time(),
                 'doc_name': name,
@@ -2673,6 +3133,8 @@ class AgentController:
         info = {
             'session_id': session_id,
             'ws_client': client,
+            'backend_target': backend_target,
+            'ws_url': ws_url,
             'created_at': time.time(),
             'last_active': time.time(),
             'doc_name': name,
@@ -3015,6 +3477,41 @@ class AgentController:
             return None
         return self._sessions.get(doc_id)
 
+    def _get_backend_target_for_session(self, info: Dict[str, Any]) -> Dict[str, Any]:
+        target = info.get("backend_target")
+        if isinstance(target, dict):
+            return config.normalize_backend_target(target)
+        return config.default_backend_target()
+
+    def _apply_backend_target_to_session_info(self, info: Dict[str, Any], backend_target: Dict[str, Any]) -> None:
+        normalized = config.normalize_backend_target(backend_target)
+        current = self._get_backend_target_for_session(info)
+        if current == normalized:
+            info["backend_target"] = normalized
+            return
+
+        info["backend_target"] = normalized
+        info["ws_url"] = None
+        client = info.get("ws_client")
+        if client:
+            try:
+                client.stop()
+            except Exception as exc:
+                logger.warning("Failed to stop WebSocket client during backend target switch: %s", exc)
+            finally:
+                info["ws_client"] = None
+
+    def _normalize_backend_target_from_payload(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        backend = payload.get("backend")
+        if backend is None:
+            backend = {
+                "mode": payload.get("backend_mode") or payload.get("mode") or "prod",
+                "url": payload.get("backend_url") or payload.get("url"),
+            }
+        if not isinstance(backend, dict):
+            raise ValueError("Document creation requires 'backend' to be an object")
+        return config.normalize_backend_target(backend)
+
     def _get_ws_client_for_doc(self, doc_id: Optional[str]) -> Optional[FusionWebSocketClient]:
         # Ensure token is fresh before returning client
         self._get_user_token()
@@ -3051,9 +3548,14 @@ class AgentController:
             return
         self._switch_to_document(doc)
 
-    def _switch_to_document(self, doc: adsk.core.Document) -> None:
+    def _switch_to_document(
+        self,
+        doc: adsk.core.Document,
+        requested_backend_target: Optional[Dict[str, Any]] = None,
+        force_refresh: bool = False,
+    ) -> None:
         target_id, target_name = self._doc_identity(doc)
-        if self._active_doc_id == target_id:
+        if self._active_doc_id == target_id and not force_refresh and requested_backend_target is None:
             logger.info(f"Document '{target_name}' already active; no switch required")
             return
 
@@ -3067,7 +3569,7 @@ class AgentController:
 
         # Ensure target session exists (create once per document) and keep all sessions connected.
         # We avoid stopping previous sessions so chat state and connections remain warm.
-        info = self._ensure_session_for_doc(doc)
+        info = self._ensure_session_for_doc(doc, requested_backend_target=requested_backend_target)
         self._active_doc_id = target_id
         info['last_active'] = time.time()
 

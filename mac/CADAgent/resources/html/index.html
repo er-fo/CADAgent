@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>CADAgent</title>
+  <title>CADAgent Operator</title>
   <link href="https://fonts.googleapis.com/css2?family=Geist:wght@200;300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&family=Playfair+Display:ital,wght@0,300;0,400;1,400&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="styles.css">
 </head>
@@ -63,6 +63,7 @@
       <div class="brand-container">
         <img src="../logo-bright.png" alt="CADAgent" class="logo" />
         <h1 class="brand-name">CAD<span class="agent">Agent</span></h1>
+        <span class="operator-badge">Operator</span>
       </div>
       <div class="header-controls">
         <div class="version-row"><span id="version-display" class="version-badge">v1.0</span></div>
@@ -107,8 +108,13 @@
     <main class="chat-main main-content">
       <div id="welcomeMessage" class="welcome-hero">
         <div class="hero-inner">
-          <h2 class="tagline">CAD at the speed of <em class="thought-italic">thought</em></h2>
-          <p class="description">Describe what you want. Iterate instantly. Directly into Fusion 360.</p>
+          <div class="operator-kicker">Operator control surface</div>
+          <h2 class="tagline">Agent-driven Fusion testing</h2>
+          <p class="description">This is the terminal-accessible operator add-in. Use it for autonomous end-to-end runs, screenshots, prompts, question trees, and design selection. The manual CADAgent add-in remains separate.</p>
+          <div class="operator-callout">
+            <span class="operator-callout-label">Local API</span>
+            <span class="operator-callout-value">127.0.0.1:8765</span>
+          </div>
           <div class="session-pill">
             <span class="session-label">Session</span>
             <span class="session-id" id="sessionId">-</span>
@@ -130,7 +136,7 @@
 
       <div id="inputContainer" class="chat-input-dock floating-input-container">
         <div class="chat-input-dock-inner">
-          <textarea id="cadRequest" rows="1" placeholder="Describe your design..."></textarea>
+          <textarea id="cadRequest" rows="1" placeholder="Operator prompt for Fusion automation..."></textarea>
           
           <!-- Image attachment preview -->
           <div id="imagePreview" class="image-preview hidden">
@@ -151,10 +157,10 @@
 
                 <div class="model-selector-container">
                   <select id="modelSelect" class="model-select" title="Select AI model" aria-label="Select model">
-                    <option value="claude-sonnet-4.6">Claude Sonnet 4.6</option>
+                    <option value="claude-sonnet-4.6" selected>Claude Sonnet 4.6</option>
                     <option value="claude-opus-4.7">Claude Opus 4.7</option>
                     <option value="gpt-5">GPT-5</option>
-                    <option value="gpt-5.4" selected>GPT-5.4</option>
+                    <option value="gpt-5.4">GPT-5.4</option>
                     <option value="gpt-5-mini">GPT 5 Mini</option>
                   </select>
                 </div>
@@ -190,14 +196,15 @@
         <div class="brand-container">
           <img src="../logo-bright.png" alt="CADAgent" class="logo" />
           <h1 class="brand-name">CAD<span class="agent">Agent</span></h1>
+          <span class="operator-badge">Operator</span>
         </div>
         <span class="version-chip" id="loginVersion">v1.0</span>
       </div>
 
       <div class="login-copy">
-        <p class="eyebrow">Passwordless access</p>
-        <h2>Get started</h2>
-        <p class="lede">We'll email you a one-time code. No passwords to remember. New users are created automatically. CADAgent is completely free to use and 100% BYOK.</p>
+        <p class="eyebrow">Operator mode</p>
+        <h2>Sign in for automation</h2>
+        <p class="lede">This palette is the operator-only surface for local agent testing. It uses your normal CADAgent account and BYOK provider configuration.</p>
       </div>
 
       <div id="loginCta" class="login-cta">
@@ -281,8 +288,9 @@
       </div>
 
       <div class="login-copy">
+        <p class="eyebrow">Operator configuration</p>
         <h2>API Keys</h2>
-        <p class="lede">CADAgent is completely free to use and 100% BYOK. Connect your own AI provider account (Anthropic or OpenAI) to generate your 3D models.</p>
+        <p class="lede">CADAgent Operator uses your existing BYOK provider configuration. Anthropic is the default for operator prompts; OpenAI remains available when configured.</p>
         <p class="lede">You only pay your AI provider directly based on your usage. Typical provider costs are around $0.10-$0.50 per model.</p>
 
         <details class="provider-guide">
